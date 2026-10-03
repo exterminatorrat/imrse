@@ -93,6 +93,14 @@ extension AppearancePreference {
         case .dark: .dark
         }
     }
+
+    var settingsNSAppearance: NSAppearance? {
+        switch self {
+        case .system: nil
+        case .light: NSAppearance(named: .aqua)
+        case .dark: NSAppearance(named: .darkAqua)
+        }
+    }
 }
 
 struct SettingsPage<Content: View>: View {
