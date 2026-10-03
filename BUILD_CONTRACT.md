@@ -1,0 +1,12 @@
+# Implementation ownership and contracts
+
+This document is the integration specification, not a future feature plan.
+
+- Captain owns Package.swift, Contracts.swift, root release documentation, scripts and integration repairs.
+- Core worker owns other ImrseCore files and ImrseCoreTests. Implement @MainActor TransformationEngine, state enum, onChange callback, invoke/submit/cancel/dismiss/undo. SelectionAccess remains MainActor; TextProvider and CredentialStore are Sendable. Keep tests portable and cancellation race-safe.
+- Services worker owns ImrseServices and ImrseServicesTests. Public ConfigurationStore(root: URL), load/save, loadDefaultInstruction, loadPresets/savePreset, bootstrap, ProviderRouter, OpenAICompatibleProvider. Coordinate concrete method signatures with App worker. ProviderRouter resolves preset overrides/fallback without local-only escape; stream completion must be proven.
+- macOS worker owns ImrseMac. Public MacSelectionAccess: SelectionAccess; KeychainCredentialStore: CredentialStore; ShortcutMonitor configurable invocation/preset callbacks. Native source is guarded by #if os(macOS). Safe target capture, conservative verified replacement, secure-field protections, single undo ownership.
+- UI worker owns ImrseApp and the native kit integration. The supplied `pill-kit/CAPY-INTEGRATION.md` preserves loader/source identity; the user's 2026-09-30 clarification restores height52 and narrows widths by phase (input360, processing240, applying220, success180, error300). Preserve the original24px Lottie SpiralLoader, 2.5-second labels and invisibility before invocation. Use its SwiftUI view inside the existing AppKit panel, resizing without reactivation or recapture, not a second controller or webview. Wire actual engine events and confirmed replacement only.
+- Preview worker owns `pill-kit/web` dependency installation, provided checks and screenshot verification. The React preview remains separate from the native app; never ship simulated completion callbacks in production. Original upstream loader source and resources are immutable.
+
+No worker commits, changes branch, pushes, or edits another ownership area without coordination. All workers share the local Mac filesystem; use distinct scratch/build paths to avoid SwiftPM contention. No Capy cloud machines. Use real provider code, no production mocks. No automatic external publication. Follow user startup guidance and scoped skills. Target native compilation as well as Foundation-only portable checks; do not claim Linux execution unless actually performed.

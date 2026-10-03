@@ -1,0 +1,18 @@
+{
+  "upstreamRepository": "https://github.com/21st-dev/agent-elements",
+  "sourceFiles": [
+    {
+      "path": "lib/agent-ui/components/spiral-loader.tsx",
+      "gitBlobSHA": "6578cdad7bf91f6525ad08e563cc1fda677e264a",
+      "status": "byte-identical"
+    },
+    {
+      "path": "lib/agent-ui/components/spiral-loader-data.ts",
+      "gitBlobSHA": "7e92e83871a3d7125e9b92d9f048608de6c5990f",
+      "status": "byte-identical"
+    }
+  ],
+  "nativeAssets": "JSON extracted losslessly from the two exports; original path, keyframes, timing and 24% layer opacity retained.",
+  "textDots": "New local implementation matching the user-provided TextDots API. Original TextDots source was not supplied.",
+  "reference": "reference/imrse-corrected-reference.png"
+}

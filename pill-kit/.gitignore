@@ -1,0 +1,10 @@
+node_modules/
+.next/
+.build/
+.swiftpm/
+playwright-report/
+test-results/
+*.tsbuildinfo
+.DS_Store
+.env*
+!.env.example
