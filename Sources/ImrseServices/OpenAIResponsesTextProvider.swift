@@ -94,7 +94,10 @@ public struct OpenAIResponsesTextProvider: TextProvider, Sendable {
             instructions: request.instruction,
             input: [ResponsesInput(role: "user", content: request.text)],
             store: false,
-            stream: true
+            stream: true,
+            reasoning: request.provider.activeReasoningEffort.flatMap {
+                $0.format == .responsesObject ? ResponsesReasoning(effort: $0.effort) : nil
+            }
         ))
 
         let exchange: HTTPExchange
@@ -442,6 +445,11 @@ private struct ResponsesRequest: Encodable {
     let input: [ResponsesInput]
     let store: Bool
     let stream: Bool
+    let reasoning: ResponsesReasoning?
+}
+
+private struct ResponsesReasoning: Encodable {
+    let effort: String
 }
 
 private struct ResponsesInput: Encodable {

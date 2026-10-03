@@ -144,7 +144,21 @@ public struct ConfigurationStore: Sendable {
             )
             if let providers = object["providers"] as? [Any] {
                 for provider in providers {
-                    _ = try requireKeys(provider, allowed: ["id", "name", "kind", "endpoint", "model", "requiresCredential"], failure: .invalidConfiguration)
+                    let fields = try requireKeys(
+                        provider,
+                        allowed: [
+                            "id", "name", "kind", "endpoint", "model", "requiresCredential",
+                            "reasoningEffort", "reasoningEffortCapabilities"
+                        ],
+                        failure: .invalidConfiguration
+                    )
+                    if let capabilities = fields["reasoningEffortCapabilities"], !(capabilities is NSNull) {
+                        _ = try requireKeys(
+                            capabilities,
+                            allowed: ["endpoint", "model", "supportedEfforts", "requestFormat", "defaultEffort", "mandatory"],
+                            failure: .invalidConfiguration
+                        )
+                    }
                 }
             }
             if let invocation = object["invocation"] {

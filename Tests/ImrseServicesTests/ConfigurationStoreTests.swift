@@ -107,8 +107,25 @@ final class ConfigurationStoreTests: XCTestCase {
     func testConfigurationAndPresetRoundTrip() throws {
         let directory = try TemporaryDirectory()
         let store = ConfigurationStore(root: directory.url)
+        let providerEndpoint = URL(string: "https://example.com/v1")!
+        let capabilities = ReasoningEffortCapabilities(
+            endpoint: providerEndpoint,
+            model: "model-1",
+            supportedEfforts: ["high", "low"],
+            requestFormat: .chatCompletionsField,
+            defaultEffort: "low",
+            mandatory: false
+        )
         let configuration = AppConfiguration(
-            providers: [provider(id: "one")],
+            providers: [ProviderConfiguration(
+                id: "one",
+                name: "one",
+                kind: .compatible,
+                endpoint: providerEndpoint,
+                model: "model-1",
+                reasoningEffort: "high",
+                reasoningEffortCapabilities: capabilities
+            )],
             selectedProviderID: "one",
             invocation: InvocationConfiguration(shortcut: ShortcutBinding(keyCode: 0, command: true))
         )
@@ -131,6 +148,60 @@ final class ConfigurationStoreTests: XCTestCase {
         let markdown = try String(contentsOf: directory.url.appending(path: "presets/polish.md"), encoding: .utf8)
         XCTAssertTrue(markdown.hasPrefix("---\n{"))
         XCTAssertTrue(markdown.contains("Improve clarity and preserve meaning."))
+    }
+
+    func testVersionOneConfigurationWithoutReasoningFieldsStillLoads() throws {
+        let directory = try TemporaryDirectory()
+        let store = ConfigurationStore(root: directory.url)
+        try store.bootstrap()
+        let legacy = AppConfiguration(providers: [provider(id: "legacy")], selectedProviderID: "legacy")
+        let encoded = try JSONEncoder().encode(legacy)
+        var object = try XCTUnwrap(JSONSerialization.jsonObject(with: encoded) as? [String: Any])
+        var providers = try XCTUnwrap(object["providers"] as? [[String: Any]])
+        providers[0].removeValue(forKey: "reasoningEffort")
+        providers[0].removeValue(forKey: "reasoningEffortCapabilities")
+        object["providers"] = providers
+        let data = try JSONSerialization.data(withJSONObject: object)
+        try data.write(to: directory.url.appending(path: "config.json"))
+
+        let loaded = try store.load()
+
+        XCTAssertEqual(loaded, legacy)
+        XCTAssertNil(loaded.providers.first?.reasoningEffort)
+        XCTAssertNil(loaded.providers.first?.reasoningEffortCapabilities)
+    }
+
+    func testUnknownReasoningCapabilityKeysAreRejectedInsteadOfIgnored() throws {
+        let directory = try TemporaryDirectory()
+        let store = ConfigurationStore(root: directory.url)
+        let endpoint = URL(string: "https://example.com/v1")!
+        let capabilities = ReasoningEffortCapabilities(
+            endpoint: endpoint,
+            model: "model-1",
+            supportedEfforts: ["high", "low"],
+            requestFormat: .chatCompletionsField
+        )
+        try store.save(AppConfiguration(providers: [ProviderConfiguration(
+            id: "one",
+            name: "one",
+            kind: .compatible,
+            endpoint: endpoint,
+            model: "model-1",
+            reasoningEffortCapabilities: capabilities
+        )]))
+
+        let url = directory.url.appending(path: "config.json")
+        var object = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: Any])
+        var providers = try XCTUnwrap(object["providers"] as? [[String: Any]])
+        var savedCapabilities = try XCTUnwrap(providers[0]["reasoningEffortCapabilities"] as? [String: Any])
+        savedCapabilities["unrecognized"] = true
+        providers[0]["reasoningEffortCapabilities"] = savedCapabilities
+        object["providers"] = providers
+        try JSONSerialization.data(withJSONObject: object).write(to: url)
+
+        XCTAssertThrowsError(try store.load()) {
+            XCTAssertEqual($0 as? ImrseError, .invalidConfiguration)
+        }
     }
 
     func testInvalidConfigurationAndPresetFieldsAreRejected() throws {

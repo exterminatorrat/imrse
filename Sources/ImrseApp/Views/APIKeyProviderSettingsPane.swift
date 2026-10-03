@@ -8,6 +8,12 @@ struct APIKeyProviderSettingsPane: View {
     let section: ModelProviderSection
     private let initialProviderID: String?
     @State private var selectedModelID: String
+    @State private var selectedReasoningEffort: String?
+    @State private var reasoningCapabilities: ReasoningEffortCapabilities?
+    @State private var didResolveReasoningCapabilities = false
+    @State private var reasoningStatus: String?
+    @State private var isRefreshingReasoningCapabilities = false
+    @State private var reasoningQueryID = UUID()
     @State private var providerID: String
     @State private var credential = ""
     @State private var hasSavedCredential = false
@@ -30,6 +36,8 @@ struct APIKeyProviderSettingsPane: View {
     private var isSelectedDefault: Bool {
         configuredProvider?.id == model.configuration.selectedProviderID
             && configuredProvider?.model == selectedModelID
+            && configuredProvider?.reasoningEffort == selectedReasoningEffortForProvider
+            && configuredProvider?.reasoningEffortCapabilities == selectedReasoningCapabilitiesForProvider
     }
 
     init(model: AppModel, section: ModelProviderSection, providerID: String? = nil) {
@@ -43,6 +51,7 @@ struct APIKeyProviderSettingsPane: View {
         self.initialProviderID = existing?.id
         let recommendation = CuratedModelCatalog.recommendations(for: kind).first?.id ?? ""
         _selectedModelID = State(initialValue: existing?.model ?? recommendation)
+        _selectedReasoningEffort = State(initialValue: existing?.reasoningEffort)
         _providerID = State(initialValue: Self.providerID(for: section, existing: existing, configuration: model.configuration))
     }
 
@@ -56,6 +65,22 @@ struct APIKeyProviderSettingsPane: View {
 
             CuratedModelChoicesView(choices: choices, selection: $selectedModelID)
                 .disabled(!model.canChangeSettings || isSaving || choices.isEmpty)
+
+            if let capabilities = selectedReasoningCapabilitiesForProvider {
+                ReasoningEffortControl(effort: $selectedReasoningEffort, capabilities: capabilities)
+                    .disabled(!model.canChangeSettings || isSaving || isRefreshingReasoningCapabilities)
+                if let reasoningStatus {
+                    Text(reasoningStatus)
+                        .font(.imrseCaption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            } else if let reasoningStatus {
+                Text(reasoningStatus)
+                    .font(.imrseCaption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
 
             if let configuredProvider,
                !choices.contains(where: { $0.id == configuredProvider.model }) {
@@ -96,7 +121,7 @@ struct APIKeyProviderSettingsPane: View {
                         )
                     } else {
                         ImrsePrimaryButton(title: primaryActionTitle, action: saveSelection)
-                            .disabled(!model.canChangeSettings || isSaving || selectedModelID.isEmpty || (!hasSavedCredential && credential.isEmpty))
+                            .disabled(!model.canChangeSettings || isSaving || isRefreshingReasoningCapabilities || selectedModelID.isEmpty || (!hasSavedCredential && credential.isEmpty))
                     }
 
                     if !hasSavedCredential && credential.isEmpty {
@@ -117,9 +142,19 @@ struct APIKeyProviderSettingsPane: View {
             Spacer(minLength: 0)
         }
         .onChange(of: model.configuration.providers) { _, _ in
-            if let configuredProvider { providerID = configuredProvider.id }
+            if let configuredProvider {
+                providerID = configuredProvider.id
+                Task { await refreshCredentialStatus(for: configuredProvider.id) }
+            }
+        }
+        .onChange(of: selectedModelID) { _, _ in
+            selectedReasoningEffort = nil
+            reasoningCapabilities = nil
+            didResolveReasoningCapabilities = false
+            reasoningStatus = nil
         }
         .task(id: providerID) { await refreshCredentialStatus(for: providerID) }
+        .task(id: reasoningCapabilityQueryKey) { await refreshReasoningCapabilities() }
     }
 
     private var billingDetail: String {
@@ -139,6 +174,43 @@ struct APIKeyProviderSettingsPane: View {
         return "No key is saved for this provider."
     }
 
+    private var reasoningCapabilityQueryKey: String {
+        "\(providerID)|\(kind.rawValue)|\(endpoint.absoluteString)|\(selectedModelID)|\(hasSavedCredential)|\(isAuthenticatedReasoningDestinationSaved)"
+    }
+
+    private var isAuthenticatedReasoningDestinationSaved: Bool {
+        if kind == .openRouter,
+           URLComponents(url: endpoint, resolvingAgainstBaseURL: false)?.host?.lowercased() == "openrouter.ai"
+        {
+            return true
+        }
+        guard let provider = configuredProvider else { return false }
+        return provider.id == providerID
+            && provider.endpoint == endpoint
+            && provider.kind == kind
+            && provider.requiresCredential
+    }
+
+    private var selectedReasoningCapabilitiesForProvider: ReasoningEffortCapabilities? {
+        if let reasoningCapabilities,
+           reasoningCapabilities.applies(to: endpoint, model: selectedModelID, providerKind: kind)
+        {
+            return reasoningCapabilities
+        }
+        guard !didResolveReasoningCapabilities,
+              let saved = configuredProvider?.reasoningEffortCapabilities,
+              saved.applies(to: endpoint, model: selectedModelID, providerKind: kind)
+        else { return nil }
+        return saved
+    }
+
+    private var selectedReasoningEffortForProvider: String? {
+        guard let selectedReasoningEffort,
+              selectedReasoningCapabilitiesForProvider?.supportedEfforts.contains(selectedReasoningEffort) == true
+        else { return nil }
+        return selectedReasoningEffort
+    }
+
     private func saveSelection() {
         guard model.canChangeSettings,
               !selectedModelID.isEmpty,
@@ -150,7 +222,9 @@ struct APIKeyProviderSettingsPane: View {
             kind: kind,
             endpoint: endpoint,
             model: selectedModelID,
-            requiresCredential: true
+            requiresCredential: true,
+            reasoningEffort: selectedReasoningEffortForProvider,
+            reasoningEffortCapabilities: selectedReasoningCapabilitiesForProvider
         )
         let submittedCredential = credential
         let sessionID = UUID()
@@ -213,6 +287,59 @@ struct APIKeyProviderSettingsPane: View {
         } catch {
             guard !Task.isCancelled, credentialQueryID == queryID, providerID == identifier else { return }
             feedback = AppModel.userMessage(for: error)
+        }
+    }
+
+    private func refreshReasoningCapabilities() async {
+        let queryID = UUID()
+        reasoningQueryID = queryID
+        reasoningCapabilities = nil
+        didResolveReasoningCapabilities = false
+        isRefreshingReasoningCapabilities = false
+        guard !model.isPreviewMode else {
+            reasoningStatus = "Preview doesn't query provider capability metadata."
+            return
+        }
+        guard !selectedModelID.isEmpty else {
+            reasoningStatus = "Choose a model to check for advertised reasoning effort choices."
+            return
+        }
+        isRefreshingReasoningCapabilities = true
+        reasoningStatus = "Checking endpoint-advertised reasoning effort choices…"
+        defer {
+            if reasoningQueryID == queryID { isRefreshingReasoningCapabilities = false }
+        }
+        let requestKey = reasoningCapabilityQueryKey
+        let provider = ProviderConfiguration(
+            id: configuredProvider?.id ?? providerID,
+            name: configuredProvider?.name ?? section.defaultProviderName,
+            kind: kind,
+            endpoint: endpoint,
+            model: selectedModelID,
+            requiresCredential: true
+        )
+        do {
+            let capabilities = try await model.providerReasoningEffortCapabilities(for: provider)
+            guard !Task.isCancelled, reasoningQueryID == queryID, reasoningCapabilityQueryKey == requestKey else { return }
+            reasoningCapabilities = capabilities
+            didResolveReasoningCapabilities = true
+            if selectedReasoningEffortForProvider == nil { selectedReasoningEffort = nil }
+            reasoningStatus = capabilities == nil
+                ? "This endpoint doesn't advertise supported reasoning effort choices. The provider default will be used."
+                : nil
+        } catch let error as ImrseError where error == .missingCredentials {
+            guard !Task.isCancelled, reasoningQueryID == queryID, reasoningCapabilityQueryKey == requestKey else { return }
+            reasoningStatus = selectedReasoningCapabilitiesForProvider == nil
+                ? "Save an API key to check advertised reasoning effort choices. The provider default will be used."
+                : "Save an API key to refresh the advertised choices. Saved choices remain available."
+        } catch AppModelProviderModelCatalogError.unsavedAuthenticatedDestination {
+            guard !Task.isCancelled, reasoningQueryID == queryID, reasoningCapabilityQueryKey == requestKey else { return }
+            reasoningStatus = "Save this provider before checking its endpoint for advertised reasoning choices. The provider default will be used."
+        } catch {
+            guard !Task.isCancelled, reasoningQueryID == queryID, reasoningCapabilityQueryKey == requestKey else { return }
+            reasoningStatus = selectedReasoningCapabilitiesForProvider == nil
+                ? "Couldn't verify reasoning effort choices. The provider default will be used."
+                : "Couldn't refresh the advertised choices. Saved choices remain available."
         }
     }
 

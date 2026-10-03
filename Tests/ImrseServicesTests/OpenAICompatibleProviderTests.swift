@@ -99,6 +99,100 @@ final class OpenAICompatibleProviderTests: XCTestCase {
         XCTAssertEqual(messages.map { $0["content"] }, ["rewrite", "input"])
     }
 
+    func testReasoningEffortUsesAdvertisedFormatAndClearsUnsupportedSelections() async throws {
+        let body = "data: {\"choices\":[{\"delta\":{\"content\":\"Done\"},\"finish_reason\":\"stop\"}]}\n\n"
+        let openRouterEndpoint = URL(string: "https://openrouter.ai/api/v1")!
+        let cases: [(ProviderKind, String, String?, ReasoningEffortCapabilities?, [String: Any])] = [
+            (
+                .openRouter,
+                "model-1",
+                "high",
+                ReasoningEffortCapabilities(
+                    endpoint: openRouterEndpoint,
+                    model: "model-1",
+                    supportedEfforts: ["high", "low"],
+                    requestFormat: .chatCompletionsObject
+                ),
+                ["effort": "high"]
+            ),
+            (
+                .compatible,
+                "model-1",
+                "low",
+                ReasoningEffortCapabilities(
+                    endpoint: URL(string: "https://api.example.com/v1")!,
+                    model: "model-1",
+                    supportedEfforts: ["high", "low"],
+                    requestFormat: .chatCompletionsField
+                ),
+                ["reasoning_effort": "low"]
+            ),
+            (
+                .openRouter,
+                "model-1",
+                nil,
+                ReasoningEffortCapabilities(
+                    endpoint: openRouterEndpoint,
+                    model: "model-1",
+                    supportedEfforts: ["high", "low"],
+                    requestFormat: .chatCompletionsObject
+                ),
+                [:]
+            ),
+            (
+                .openRouter,
+                "model-1",
+                "xhigh",
+                ReasoningEffortCapabilities(
+                    endpoint: openRouterEndpoint,
+                    model: "model-1",
+                    supportedEfforts: ["high", "low"],
+                    requestFormat: .chatCompletionsObject
+                ),
+                [:]
+            ),
+            (
+                .openRouter,
+                "preset-model-override",
+                "high",
+                ReasoningEffortCapabilities(
+                    endpoint: openRouterEndpoint,
+                    model: "model-1",
+                    supportedEfforts: ["high", "low"],
+                    requestFormat: .chatCompletionsObject
+                ),
+                [:]
+            )
+        ]
+
+        for (kind, model, effort, capabilities, expected) in cases {
+            let transport = StubTransport(exchange: exchange(status: 200, chunks: [Data(body.utf8)]))
+            let provider = OpenAICompatibleProvider(credentials: StubCredentials(value: "test-key"), transport: transport)
+            _ = try await collect(
+                provider,
+                request: request(
+                    model: model,
+                    kind: kind,
+                    reasoningEffort: effort,
+                    reasoningEffortCapabilities: capabilities
+                )
+            )
+            let captured = await transport.captured()
+            let payload = try XCTUnwrap(captured?.request.httpBody)
+            let json = try XCTUnwrap(JSONSerialization.jsonObject(with: payload) as? [String: Any])
+            if kind == .compatible && !expected.isEmpty {
+                XCTAssertEqual(json["reasoning_effort"] as? String, expected["reasoning_effort"] as? String)
+                XCTAssertNil(json["reasoning"])
+            } else if !expected.isEmpty {
+                XCTAssertEqual(json["reasoning"] as? [String: String], expected as? [String: String])
+                XCTAssertNil(json["reasoning_effort"])
+            } else {
+                XCTAssertNil(json["reasoning"])
+                XCTAssertNil(json["reasoning_effort"])
+            }
+        }
+    }
+
     func testFinishReasonAloneIsExplicitCompletion() async throws {
         let body = "data: {\"choices\":[{\"delta\":{\"content\":\"Done\"},\"finish_reason\":\"stop\"}]}\n\n"
         let provider = OpenAICompatibleProvider(
@@ -267,7 +361,9 @@ final class OpenAICompatibleProviderTests: XCTestCase {
         localOnly: Bool = false,
         model: String = "model-1",
         kind: ProviderKind = .compatible,
-        reportResponseMetadata: (@MainActor @Sendable (ResponseMetadata) -> Void)? = nil
+        reportResponseMetadata: (@MainActor @Sendable (ResponseMetadata) -> Void)? = nil,
+        reasoningEffort: String? = nil,
+        reasoningEffortCapabilities: ReasoningEffortCapabilities? = nil
     ) -> TransformationRequest {
         TransformationRequest(
             text: "input",
@@ -277,7 +373,9 @@ final class OpenAICompatibleProviderTests: XCTestCase {
                 name: "Compatible",
                 kind: kind,
                 endpoint: URL(string: kind == .openRouter ? "https://openrouter.ai/api/v1" : "https://api.example.com/v1")!,
-                model: model
+                model: model,
+                reasoningEffort: reasoningEffort,
+                reasoningEffortCapabilities: reasoningEffortCapabilities
             ),
             localOnly: localOnly,
             reportResponseMetadata: reportResponseMetadata

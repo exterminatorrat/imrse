@@ -22,7 +22,14 @@ public struct OpenAIAccountStatus: Equatable, Sendable {
 public struct OpenAIAccountModel: Equatable, Identifiable, Sendable {
     public let slug: String
     public let displayName: String
+    public let supportedReasoningEfforts: [String]
     public var id: String { slug }
+
+    public init(slug: String, displayName: String, supportedReasoningEfforts: [String] = []) {
+        self.slug = slug
+        self.displayName = displayName
+        self.supportedReasoningEfforts = supportedReasoningEfforts
+    }
 }
 
 public struct OpenAISignInRequest: Sendable {
@@ -371,7 +378,13 @@ public actor OpenAIAccountClient {
                       && isSafeDisplayName($0.displayName)
               })
         else { throw OpenAIAccountClientError.malformedResponse }
-        return catalog.models.map { OpenAIAccountModel(slug: $0.slug, displayName: $0.displayName) }
+        return catalog.models.map {
+            OpenAIAccountModel(
+                slug: $0.slug,
+                displayName: $0.displayName,
+                supportedReasoningEfforts: $0.supportedReasoningEfforts
+            )
+        }
     }
 
     public func freshAccessToken(for providerID: String) async throws -> String {
@@ -1015,10 +1028,22 @@ private struct ModelCatalogResponse: Decodable {
         if container.contains(.models) {
             models = try container.decode([LegacyModelCatalogEntry].self, forKey: .models)
                 .filter { $0.visibility == "list" }
-                .map { ModelCatalogEntry(slug: $0.slug, displayName: $0.displayName) }
+                .map {
+                    ModelCatalogEntry(
+                        slug: $0.slug,
+                        displayName: $0.displayName,
+                        supportedReasoningEfforts: $0.supportedReasoningEfforts
+                    )
+                }
         } else {
             models = try container.decode([StandardModelCatalogEntry].self, forKey: .data)
-                .map { ModelCatalogEntry(slug: $0.id, displayName: $0.displayName ?? $0.id) }
+                .map {
+                    ModelCatalogEntry(
+                        slug: $0.id,
+                        displayName: $0.displayName ?? $0.id,
+                        supportedReasoningEfforts: $0.supportedReasoningEfforts
+                    )
+                }
         }
     }
 }
@@ -1026,28 +1051,84 @@ private struct ModelCatalogResponse: Decodable {
 private struct ModelCatalogEntry {
     let slug: String
     let displayName: String
+    let supportedReasoningEfforts: [String]
 }
 
 private struct LegacyModelCatalogEntry: Decodable {
     let slug: String
     let displayName: String
     let visibility: String
+    let supportedReasoningEfforts: [String]
 
     enum CodingKeys: String, CodingKey {
         case slug
         case displayName = "display_name"
         case visibility
+        case supportedReasoningLevels = "supported_reasoning_levels"
+    }
+
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        slug = try values.decode(String.self, forKey: .slug)
+        displayName = try values.decode(String.self, forKey: .displayName)
+        visibility = try values.decode(String.self, forKey: .visibility)
+        supportedReasoningEfforts = Self.efforts(values)
+    }
+
+    private static func efforts(_ values: KeyedDecodingContainer<CodingKeys>) -> [String] {
+        guard let levels = try? values.decode([ReasoningLevel].self, forKey: .supportedReasoningLevels) else { return [] }
+        return normalizedEfforts(levels.compactMap(\.effort))
     }
 }
 
 private struct StandardModelCatalogEntry: Decodable {
     let id: String
     let displayName: String?
+    let supportedReasoningEfforts: [String]
 
     enum CodingKeys: String, CodingKey {
         case id
         case displayName = "display_name"
+        case supportedReasoningLevels = "supported_reasoning_levels"
     }
+
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        id = try values.decode(String.self, forKey: .id)
+        displayName = try values.decodeIfPresent(String.self, forKey: .displayName)
+        guard let levels = try? values.decode([ReasoningLevel].self, forKey: .supportedReasoningLevels) else {
+            supportedReasoningEfforts = []
+            return
+        }
+        supportedReasoningEfforts = normalizedEfforts(levels.compactMap(\.effort))
+    }
+}
+
+private struct ReasoningLevel: Decodable {
+    let effort: String?
+
+    private enum CodingKeys: String, CodingKey {
+        case effort
+    }
+
+    init(from decoder: Decoder) throws {
+        if let values = try? decoder.singleValueContainer(),
+           let effort = try? values.decode(String.self)
+        {
+            self.effort = effort
+            return
+        }
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        effort = try values.decodeIfPresent(String.self, forKey: .effort)
+    }
+}
+
+private func normalizedEfforts(_ efforts: [String]) -> [String] {
+    var seen = Set<String>()
+    return efforts.filter {
+        $0.range(of: "^[A-Za-z][A-Za-z0-9_-]{0,31}$", options: .regularExpression) != nil
+            && seen.insert($0).inserted
+    }.prefix(32).map { $0 }
 }
 
 private struct DiscoveryDocument: Decodable {

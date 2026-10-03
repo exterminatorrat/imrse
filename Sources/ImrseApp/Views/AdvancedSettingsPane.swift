@@ -47,12 +47,6 @@ struct AdvancedSettingsPane: View {
                             subtitle: "Time allowed between the two Control taps."
                         ) {
                             HStack(spacing: 8) {
-                                SettingsStatusBadge(
-                                    title: model.configuration.invocation.doubleControlEnabled ? "On" : "Off",
-                                    symbol: model.configuration.invocation.doubleControlEnabled ? "checkmark.circle.fill" : "minus.circle",
-                                    tone: model.configuration.invocation.doubleControlEnabled ? .positive : .neutral
-                                )
-
                                 ImrseTextField(placeholder: "Milliseconds", text: $controlIntervalDraft, width: 68)
                                     .accessibilityLabel("Double Control interval in milliseconds")
                                     .accessibilityValue(controlIntervalDraft)

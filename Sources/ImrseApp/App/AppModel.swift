@@ -21,6 +21,20 @@ protocol AppModelOpenAIAccountClient: Actor {
 
 extension OpenAIAccountClient: AppModelOpenAIAccountClient {}
 
+protocol AppModelProviderModelCatalogClient: Sendable {
+    func reasoningEffortCapabilities(for provider: ProviderConfiguration) async throws -> ReasoningEffortCapabilities?
+}
+
+extension ProviderModelCatalogClient: AppModelProviderModelCatalogClient {}
+
+enum AppModelProviderModelCatalogError: Error, LocalizedError, Equatable {
+    case unsavedAuthenticatedDestination
+
+    var errorDescription: String? {
+        "Save this provider before checking endpoint-advertised reasoning choices."
+    }
+}
+
 @MainActor
 protocol AppModelChatGPTSignInCoordinating: AnyObject {
     func prepareCallback() async throws -> URL
@@ -90,6 +104,7 @@ final class AppModel: ObservableObject {
     private var terminationRequested = false
     private let connectedChatGPTProviderID: String
     private let openAIAccountClient: (any AppModelOpenAIAccountClient)?
+    private let providerModelCatalogClient: any AppModelProviderModelCatalogClient
     private let chatGPTSignInCoordinator: (any AppModelChatGPTSignInCoordinating)?
     private let managedLocalModelStore: ManagedLocalModelStore?
     private var accountStatusRefreshTask: Task<Void, Never>?
@@ -181,7 +196,8 @@ final class AppModel: ObservableObject {
         shortcutMonitoring: (any ShortcutMonitoring)? = nil,
         accountClient: OpenAIAccountClient? = nil,
         accountOperations: (any AppModelOpenAIAccountClient)? = nil,
-        signInCoordinator: (any AppModelChatGPTSignInCoordinating)? = nil
+        signInCoordinator: (any AppModelChatGPTSignInCoordinating)? = nil,
+        providerModelCatalog: (any AppModelProviderModelCatalogClient)? = nil
     ) {
         self.init(
             loadSettingsFromDisk: false,
@@ -193,7 +209,8 @@ final class AppModel: ObservableObject {
             shortcutMonitorOverride: shortcutMonitoring,
             accountClientOverride: accountClient,
             accountOperationsOverride: accountOperations,
-            signInCoordinatorOverride: signInCoordinator
+            signInCoordinatorOverride: signInCoordinator,
+            providerModelCatalogOverride: providerModelCatalog
         )
     }
     #else
@@ -212,7 +229,8 @@ final class AppModel: ObservableObject {
         shortcutMonitorOverride: (any ShortcutMonitoring)? = nil,
         accountClientOverride: OpenAIAccountClient? = nil,
         accountOperationsOverride: (any AppModelOpenAIAccountClient)? = nil,
-        signInCoordinatorOverride: (any AppModelChatGPTSignInCoordinating)? = nil
+        signInCoordinatorOverride: (any AppModelChatGPTSignInCoordinating)? = nil,
+        providerModelCatalogOverride: (any AppModelProviderModelCatalogClient)? = nil
     ) {
         let store = configurationStoreOverride ?? ConfigurationStore(root: Self.applicationSupportURL)
         var configuration = AppConfiguration()
@@ -293,6 +311,7 @@ final class AppModel: ObservableObject {
         self.configurationIssue = issue
         self.connectedChatGPTProviderID = connectedChatGPTProviderID
         self.openAIAccountClient = accountClient
+        self.providerModelCatalogClient = providerModelCatalogOverride ?? ProviderModelCatalogClient(credentials: credentialStore)
         self.chatGPTSignInCoordinator = signInCoordinator
         self.managedLocalModelStore = managedLocalModelStore
         self.allowsGlobalShortcutMonitoring = !isPreviewMode
@@ -553,6 +572,27 @@ final class AppModel: ObservableObject {
         try ensureSettingsCanChange()
         guard configuration.providers.contains(where: { $0.id == providerID }) else { return false }
         return try await credentialStore.credential(for: providerID) != nil
+    }
+
+    func providerReasoningEffortCapabilities(for provider: ProviderConfiguration) async throws -> ReasoningEffortCapabilities? {
+        try ensureSettingsCanChange()
+        let isPublicOpenRouterCatalog = provider.kind == .openRouter
+            && URLComponents(url: provider.endpoint, resolvingAgainstBaseURL: false)?.host?.lowercased() == "openrouter.ai"
+        if provider.requiresCredential && !isPublicOpenRouterCatalog {
+            let savedDestinationMatches = configuration.providers.contains { savedProvider in
+                savedProvider.id == provider.id
+                    && savedProvider.endpoint == provider.endpoint
+                    && savedProvider.kind == provider.kind
+                    && savedProvider.requiresCredential == provider.requiresCredential
+            }
+            guard savedDestinationMatches else {
+                throw AppModelProviderModelCatalogError.unsavedAuthenticatedDestination
+            }
+        }
+        let capabilities = try await providerModelCatalogClient.reasoningEffortCapabilities(for: provider)
+        try Task.checkCancellation()
+        try ensureSettingsCanChange()
+        return capabilities
     }
 
     func removeCredential(for providerID: String) async throws {

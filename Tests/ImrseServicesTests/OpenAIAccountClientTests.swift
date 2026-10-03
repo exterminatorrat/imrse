@@ -264,6 +264,48 @@ final class OpenAIAccountClientTests: XCTestCase, @unchecked Sendable {
         XCTAssertEqual(models.map(\.displayName), ["model-b", "model-a"])
     }
 
+    func testLegacyAccountCatalogParsesOnlyReportedReasoningLevels() async throws {
+        let keys = try FixtureKeys()
+        let transport = ScriptedTransport(responses: [
+            "/v1/models": .json(200, ["models": [
+                ["slug": "string-levels", "display_name": "String levels", "visibility": "list", "supported_reasoning_levels": ["high", "low"]],
+                ["slug": "object-levels", "display_name": "Object levels", "visibility": "list", "supported_reasoning_levels": [["effort": "max"], ["effort": "medium"]]],
+                ["slug": "enabled-only", "display_name": "Enabled only", "visibility": "list", "reasoning": ["enabled": true]]
+            ]])
+        ])
+        let credentials = MemoryCredentials()
+        let client = OpenAIAccountClient(credentials: credentials, transport: transport)
+        try await saveSession(in: credentials, providerID: "chatgpt-account", keys: keys)
+
+        let models = try await client.availableModels(for: "chatgpt-account")
+
+        XCTAssertEqual(models.map(\.supportedReasoningEfforts), [["high", "low"], ["max", "medium"], []])
+        let requests = await transport.requests()
+        let request = try XCTUnwrap(requests.first)
+        XCTAssertEqual(request.url?.absoluteString, "https://api.openai.com/v1/models")
+    }
+
+    func testStandardAccountCatalogParsesOnlyReportedReasoningLevels() async throws {
+        let keys = try FixtureKeys()
+        let transport = ScriptedTransport(responses: [
+            "/v1/models": .json(200, ["data": [
+                ["id": "string-levels", "supported_reasoning_levels": ["high", "low"]],
+                ["id": "object-levels", "supported_reasoning_levels": [["effort": "xhigh"], ["effort": "medium"]]],
+                ["id": "enabled-only", "reasoning": ["enabled": true]]
+            ]])
+        ])
+        let credentials = MemoryCredentials()
+        let client = OpenAIAccountClient(credentials: credentials, transport: transport)
+        try await saveSession(in: credentials, providerID: "chatgpt-account", keys: keys)
+
+        let models = try await client.availableModels(for: "chatgpt-account")
+
+        XCTAssertEqual(models.map(\.supportedReasoningEfforts), [["high", "low"], ["xhigh", "medium"], []])
+        let requests = await transport.requests()
+        let request = try XCTUnwrap(requests.first)
+        XCTAssertEqual(request.url?.absoluteString, "https://api.openai.com/v1/models")
+    }
+
     func testAccountModelCatalogRejectsUnsafeIDsNamesAndDuplicateIDs() async throws {
         let keys = try FixtureKeys()
         let transport = ScriptedTransport()

@@ -1,6 +1,7 @@
 #if os(macOS)
 import Foundation
 import ImrseCore
+import SwiftUI
 
 enum ModelProviderSection: String, CaseIterable, Identifiable {
     case local
@@ -82,6 +83,55 @@ enum ModelProviderSection: String, CaseIterable, Identifiable {
         case .openAI where provider.endpoint == URL(string: "https://api.openai.com/v1"): .openAIAPI
         case .openRouter where provider.endpoint == URL(string: "https://openrouter.ai/api/v1"): .openRouter
         case .openAI, .openRouter, .compatible: .custom
+        }
+    }
+}
+
+struct ReasoningEffortControl: View {
+    private enum Selection: Hashable {
+        case providerDefault
+        case effort(String)
+    }
+
+    @Binding var effort: String?
+    let capabilities: ReasoningEffortCapabilities
+
+    var body: some View {
+        ImrseLabeledRow(
+            "Reasoning effort",
+            subtitle: "Choose an effort reported by this endpoint."
+        ) {
+            ImrseMenuControl(
+                selection: selection,
+                options: [.providerDefault] + capabilities.supportedEfforts.map(Selection.effort),
+                title: title,
+                accessibilityLabel: "Reasoning effort"
+            )
+        }
+    }
+
+    private var selection: Binding<Selection> {
+        Binding(
+            get: {
+                guard let effort, capabilities.supportedEfforts.contains(effort) else { return .providerDefault }
+                return .effort(effort)
+            },
+            set: { selection in
+                effort = switch selection {
+                case .providerDefault: nil
+                case .effort(let value): value
+                }
+            }
+        )
+    }
+
+    private func title(_ selection: Selection) -> String {
+        switch selection {
+        case .providerDefault:
+            capabilities.defaultEffort.map { "Provider default (\($0))" } ?? "Provider default"
+        case .effort("none"):
+            "None (disable reasoning)"
+        case .effort(let value): value
         }
     }
 }

@@ -17,11 +17,12 @@ enum OpenAIHTTP {
     static func send(
         _ request: URLRequest,
         using transport: any StreamingHTTPTransport,
-        maximumResponseBytes: Int = Self.maximumResponseBytes
+        maximumResponseBytes: Int = Self.maximumResponseBytes,
+        localOnly: Bool = false
     ) async throws -> OpenAIHTTPResponse {
         let exchange: HTTPExchange
         do {
-            exchange = try await transport.execute(request, localOnly: false)
+            exchange = try await transport.execute(request, localOnly: localOnly)
         } catch is CancellationError {
             throw OpenAIAccountClientError.cancelled
         } catch {
