@@ -1,6 +1,7 @@
 #if os(macOS)
 import AppKit
 import Combine
+import ImrseCore
 import SwiftUI
 
 @MainActor
@@ -10,6 +11,7 @@ final class AppCoordinator: NSObject, NSMenuItemValidation {
     private let settingsWindowController = SettingsWindowController()
     private var statusItem: NSStatusItem?
     private var configurationObserver: AnyCancellable?
+    private var settingsAppearanceObserver: AnyCancellable?
     private(set) var showsResponseDetails = false
 
     override init() {
@@ -41,6 +43,16 @@ final class AppCoordinator: NSObject, NSMenuItemValidation {
         model.onPresentPill = { [weak panelController] screen in
             panelController?.present(afterCapturingTargetOn: screen)
         }
+        guard !model.isPreviewMode else { return }
+        settingsAppearanceObserver = model.$configuration
+            .map(\.appearance)
+            .removeDuplicates()
+            .dropFirst()
+            .sink { [weak self] appearance in
+                Task { @MainActor [weak self] in
+                    self?.settingsWindowController.apply(appearance: appearance)
+                }
+            }
     }
 
     var contextMenu: NSMenu {
@@ -165,7 +177,11 @@ final class AppCoordinator: NSObject, NSMenuItemValidation {
             window.appearance = NSAppearance(named: .aqua)
         } else if previewColorScheme == .dark {
             window.appearance = NSAppearance(named: .darkAqua)
+        } else if !model.isPreviewMode {
+            settingsWindowController.apply(appearance: model.configuration.appearance)
         }
+        #else
+        settingsWindowController.apply(appearance: model.configuration.appearance)
         #endif
         return window
     }
@@ -276,6 +292,10 @@ enum MenuBarAssets {
 final class SettingsWindowController {
     static let windowSize = NSSize(width: 900, height: 570)
     private(set) var window: NSWindow?
+
+    func apply(appearance preference: AppearancePreference) {
+        window?.appearance = preference.settingsNSAppearance
+    }
 
     func makeWindow<Content: View>(rootView: Content) -> NSWindow {
         if let window { return window }
