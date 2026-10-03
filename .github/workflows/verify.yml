@@ -26,6 +26,12 @@ jobs:
       - run: swift test --jobs 1 -Xswiftc -warnings-as-errors
       - run: swift test --package-path pill-kit/native -Xswiftc -warnings-as-errors
       - run: python3 pill-kit/scripts/verify-assets.py
+      - name: Ensure Metal compiler is available
+        run: |
+          if ! xcrun --sdk macosx metal --version; then
+            xcodebuild -downloadComponent MetalToolchain
+          fi
+          xcrun --sdk macosx metal --version
       - run: ./scripts/build-app.sh
   design:
     runs-on: ubuntu-latest
