@@ -16,11 +16,14 @@ jobs:
       - run: swift test --package-path pill-kit/native -Xswiftc -warnings-as-errors
   native:
     runs-on: macos-15
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_26.3.app/Contents/Developer
     steps:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
-      - run: swift test -Xswiftc -warnings-as-errors
+      - run: xcodebuild -version && swift --version
+      - run: swift test --jobs 1 -Xswiftc -warnings-as-errors
       - run: swift test --package-path pill-kit/native -Xswiftc -warnings-as-errors
       - run: python3 pill-kit/scripts/verify-assets.py
       - run: ./scripts/build-app.sh

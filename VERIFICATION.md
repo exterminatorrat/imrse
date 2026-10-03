@@ -22,7 +22,7 @@ signatures and ZIP integrity do not establish distribution readiness.
 ## CI compatibility follow-up
 
 The first hosted run exposed a Linux Foundation integer-precision difference
-and a Swift 6.2 generic Sendable requirement. Token parsing now preserves signed
+and an older-compiler generic Sendable requirement. Token parsing now preserves signed
 and unsigned integer representations without passing them through a rounded
 Decimal bridge; floating and Decimal counts still require exact nonnegative
 in-range integers. Existing maximum-count assertions remain unchanged, with
@@ -30,8 +30,11 @@ additional precision, overflow and fractional tests.
 
 The current portable suite passed on a local Swift 6.2.4 Linux verifier, along
 with all 16 native-kit Core tests. The 24 focused macOS numeric/account tests
-also passed. A fresh hosted macOS run is needed to confirm Swift 6.2 compatibility;
-the local packaged baseline used a newer compiler.
+also passed, followed by all three loopback sign-in coordinator regressions.
+Native CI explicitly selects the runner's installed Xcode 26.3 rather than its
+default Xcode 16.4, which is below the documented toolchain requirement. Callback
+member captures are explicit for compiler compatibility. The hosted run checks
+that selected toolchain; the local packaged baseline used a newer compiler.
 
 ## Native behavior measured
 

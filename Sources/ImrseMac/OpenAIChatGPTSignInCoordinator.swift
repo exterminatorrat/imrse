@@ -164,22 +164,22 @@ public final class OpenAIChatGPTSignInCoordinator {
         connection.receive(minimumIncompleteLength: 1, maximumLength: 16_384) { [weak self] data, _, isComplete, error in
             Task { @MainActor [weak self] in
                 guard let self, self.runID == runID else { connection.cancel(); return }
-                if let data { requestBuffers[identifier, default: Data()].append(data) }
-                guard requestBuffers[identifier, default: Data()].count <= 32_768 else {
-                    respond(on: connection, identifier: identifier, status: 400, runID: runID)
+                if let data { self.requestBuffers[identifier, default: Data()].append(data) }
+                guard self.requestBuffers[identifier, default: Data()].count <= 32_768 else {
+                    self.respond(on: connection, identifier: identifier, status: 400, runID: runID)
                     return
                 }
-                if requestBuffers[identifier, default: Data()].range(of: Data("\r\n\r\n".utf8)) != nil {
-                    handleRequest(on: connection, identifier: identifier, runID: runID)
+                if self.requestBuffers[identifier, default: Data()].range(of: Data("\r\n\r\n".utf8)) != nil {
+                    self.handleRequest(on: connection, identifier: identifier, runID: runID)
                     return
                 }
                 if error != nil || isComplete {
                     connection.cancel()
-                    connections.removeValue(forKey: identifier)
-                    requestBuffers.removeValue(forKey: identifier)
+                    self.connections.removeValue(forKey: identifier)
+                    self.requestBuffers.removeValue(forKey: identifier)
                     return
                 }
-                receiveNext(on: connection, identifier: identifier, runID: runID)
+                self.receiveNext(on: connection, identifier: identifier, runID: runID)
             }
         }
     }
@@ -219,9 +219,9 @@ public final class OpenAIChatGPTSignInCoordinator {
             Task { @MainActor [weak self] in
                 guard let self, self.runID == runID else { connection.cancel(); return }
                 connection.cancel()
-                connections.removeValue(forKey: identifier)
-                requestBuffers.removeValue(forKey: identifier)
-                finish(result: result, runID: runID)
+                self.connections.removeValue(forKey: identifier)
+                self.requestBuffers.removeValue(forKey: identifier)
+                self.finish(result: result, runID: runID)
             }
         })
     }
@@ -231,8 +231,8 @@ public final class OpenAIChatGPTSignInCoordinator {
             Task { @MainActor [weak self] in
                 guard let self, self.runID == runID else { connection.cancel(); return }
                 connection.cancel()
-                connections.removeValue(forKey: identifier)
-                requestBuffers.removeValue(forKey: identifier)
+                self.connections.removeValue(forKey: identifier)
+                self.requestBuffers.removeValue(forKey: identifier)
             }
         })
     }
