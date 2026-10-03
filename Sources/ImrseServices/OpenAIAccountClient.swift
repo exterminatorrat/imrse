@@ -760,7 +760,7 @@ public actor OpenAIAccountClient {
         guard committed else { throw OpenAIAccountClientError.cancelled }
     }
 
-    private func withStorageLock<T>(_ operation: () async throws -> T) async throws -> T {
+    private func withStorageLock<T: Sendable>(_ operation: () async throws -> T) async throws -> T {
         if storageLocked {
             await withCheckedContinuation { storageWaiters.append($0) }
         } else {

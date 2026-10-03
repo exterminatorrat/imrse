@@ -34,18 +34,31 @@ enum ResponseMetadataParser {
 
     private static func tokenCount(_ value: Any?) -> Int? {
         guard let number = value as? NSNumber,
-              CFGetTypeID(number) != CFBooleanGetTypeID(),
-              number.doubleValue.isFinite,
-              number.doubleValue >= 0
+              CFGetTypeID(number) != CFBooleanGetTypeID()
         else { return nil }
 
-        let decimal = number.decimalValue
-        guard !decimal.isNaN, decimal >= 0, decimal <= Decimal(Int.max) else { return nil }
-        var source = decimal
-        var rounded = Decimal()
-        NSDecimalRound(&rounded, &source, 0, .plain)
-        guard rounded == decimal else { return nil }
-        return NSDecimalNumber(decimal: decimal).intValue
+        if let number = number as? NSDecimalNumber {
+            let decimal = number.decimalValue
+            guard !decimal.isNaN, decimal >= 0, decimal <= Decimal(Int.max) else { return nil }
+            var source = decimal
+            var rounded = Decimal()
+            NSDecimalRound(&rounded, &source, 0, .plain)
+            guard rounded == decimal else { return nil }
+            return Int(number.stringValue)
+        }
+
+        switch String(cString: number.objCType) {
+        case "c", "s", "i", "l", "q":
+            let count = number.int64Value
+            guard count >= 0 else { return nil }
+            return Int(exactly: count)
+        case "C", "S", "I", "L", "Q":
+            return Int(exactly: number.uint64Value)
+        default:
+            let count = number.doubleValue
+            guard count.isFinite, count >= 0 else { return nil }
+            return Int(exactly: count)
+        }
     }
 
     private static func costValue(_ value: Any?) -> Double? {

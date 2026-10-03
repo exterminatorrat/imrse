@@ -4,7 +4,7 @@ This is a public-safe summary of measured checks. Private machine-specific
 diagnostics, account metadata, local installation records and screenshots are
 not part of the source repository.
 
-## Latest native source — 0.1.2 build 11
+## Local packaged baseline — 0.1.2 build 11
 
 - Strict Debug: 274 cases, one opt-in model-download/inference skip, zero failures.
 - Strict Release: 227 cases, the same opt-in skip, zero failures.
@@ -18,6 +18,20 @@ not part of the source repository.
 
 The local bundle is not Developer ID signed or notarized. Compilation,
 signatures and ZIP integrity do not establish distribution readiness.
+
+## CI compatibility follow-up
+
+The first hosted run exposed a Linux Foundation integer-precision difference
+and a Swift 6.2 generic Sendable requirement. Token parsing now preserves signed
+and unsigned integer representations without passing them through a rounded
+Decimal bridge; floating and Decimal counts still require exact nonnegative
+in-range integers. Existing maximum-count assertions remain unchanged, with
+additional precision, overflow and fractional tests.
+
+The current portable suite passed on a local Swift 6.2.4 Linux verifier, along
+with all 16 native-kit Core tests. The 24 focused macOS numeric/account tests
+also passed. A fresh hosted macOS run is needed to confirm Swift 6.2 compatibility;
+the local packaged baseline used a newer compiler.
 
 ## Native behavior measured
 
