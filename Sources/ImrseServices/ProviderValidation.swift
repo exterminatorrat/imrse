@@ -56,6 +56,8 @@ enum ProviderValidation {
         guard isValidIdentifier(provider.id)
             && isValidName(provider.name)
             && isValidModel(provider.model)
+            && (provider.reasoningEffort.map(isValidReasoningEffort) ?? true)
+            && (provider.reasoningEffortCapabilities.map(isValidReasoningEffortCapabilities) ?? true)
         else { return false }
         switch provider.kind {
         case .managedLocal:
@@ -119,6 +121,19 @@ enum ProviderValidation {
     static func isValidModel(_ value: String) -> Bool {
         let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
         return !trimmed.isEmpty && trimmed.utf8.count <= 256 && !containsControlCharacters(value, allowingNewlines: false)
+    }
+
+    private static func isValidReasoningEffort(_ value: String) -> Bool {
+        value.range(of: "^[A-Za-z][A-Za-z0-9_-]{0,31}$", options: .regularExpression) != nil
+    }
+
+    private static func isValidReasoningEffortCapabilities(_ capabilities: ReasoningEffortCapabilities) -> Bool {
+        isValidEndpoint(capabilities.endpoint)
+            && isValidModel(capabilities.model)
+            && (1...32).contains(capabilities.supportedEfforts.count)
+            && Set(capabilities.supportedEfforts).count == capabilities.supportedEfforts.count
+            && capabilities.supportedEfforts.allSatisfy(isValidReasoningEffort)
+            && (capabilities.defaultEffort.map(isValidReasoningEffort) ?? true)
     }
 
     static func isValidInstruction(_ value: String) -> Bool {

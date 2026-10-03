@@ -89,6 +89,79 @@ final class OpenAIResponsesTextProviderTests: XCTestCase, @unchecked Sendable {
         XCTAssertEqual(input[0]["content"] as? String, "selected text")
     }
 
+    func testReasoningEffortUsesAdvertisedSelectionOnlyForMatchingAccountModel() async throws {
+        let endpoint = URL(string: "https://api.openai.com/v1")!
+        let body = #"data: {"type":"response.completed","response":{"status":"completed","output":[{"type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"answer"}]}]}}"# + "\n\n"
+        let cases: [(String, String?, ReasoningEffortCapabilities?, String?)] = [
+            (
+                "gpt-6.1-sol",
+                "high",
+                ReasoningEffortCapabilities(
+                    endpoint: endpoint,
+                    model: "gpt-6.1-sol",
+                    supportedEfforts: ["high", "medium"],
+                    requestFormat: .responsesObject
+                ),
+                "high"
+            ),
+            (
+                "gpt-6.1-sol",
+                "xhigh",
+                ReasoningEffortCapabilities(
+                    endpoint: endpoint,
+                    model: "gpt-6.1-sol",
+                    supportedEfforts: ["high", "medium"],
+                    requestFormat: .responsesObject
+                ),
+                nil
+            ),
+            (
+                "preset-model-override",
+                "high",
+                ReasoningEffortCapabilities(
+                    endpoint: endpoint,
+                    model: "gpt-6.1-sol",
+                    supportedEfforts: ["high", "medium"],
+                    requestFormat: .responsesObject
+                ),
+                nil
+            ),
+            (
+                "gpt-6.1-sol",
+                "high",
+                ReasoningEffortCapabilities(
+                    endpoint: endpoint,
+                    model: "gpt-6.1-sol",
+                    supportedEfforts: ["high", "medium"],
+                    requestFormat: .chatCompletionsField
+                ),
+                nil
+            )
+        ]
+
+        for (modelID, effort, capabilities, expectedEffort) in cases {
+            let credentials = MemoryCredentials()
+            try await credentials.setCredential(sessionJSON(), for: OpenAIAccountClient.credentialKey(for: "chatgpt-account"))
+            let accountClient = OpenAIAccountClient(credentials: credentials, transport: StubTransport(exchange: exchange(status: 200, chunks: [])))
+            let transport = StubTransport(exchange: exchange(status: 200, chunks: [Data(body.utf8)]))
+            let provider = OpenAIResponsesTextProvider(accountClient: accountClient, transport: transport)
+
+            _ = try await collect(
+                provider,
+                request: request(
+                    model: modelID,
+                    reasoningEffort: effort,
+                    reasoningEffortCapabilities: capabilities
+                )
+            )
+
+            let capturedRequest = await transport.captured()
+            let payload = try XCTUnwrap(capturedRequest?.httpBody)
+            let json = try XCTUnwrap(JSONSerialization.jsonObject(with: payload) as? [String: Any])
+            XCTAssertEqual((json["reasoning"] as? [String: String])?["effort"], expectedEffort)
+        }
+    }
+
     func testOnlyResponseCompletedEndsSuccessfully() async throws {
         let cases: [(String, ImrseError)] = [
             (#"data: {"type":"response.failed","response":{"error":{"message":"synthetic-response-secret"}}}"# + "\n\n", .server),
@@ -414,7 +487,10 @@ final class OpenAIResponsesTextProviderTests: XCTestCase, @unchecked Sendable {
 }
 
 private func request(
-    reportResponseMetadata: (@MainActor @Sendable (ResponseMetadata) -> Void)? = nil
+    reportResponseMetadata: (@MainActor @Sendable (ResponseMetadata) -> Void)? = nil,
+    model: String = "gpt-6.1-sol",
+    reasoningEffort: String? = nil,
+    reasoningEffortCapabilities: ReasoningEffortCapabilities? = nil
 ) -> TransformationRequest {
     TransformationRequest(
         text: "selected text",
@@ -424,7 +500,9 @@ private func request(
             name: "ChatGPT",
             kind: .openAIChatGPT,
             endpoint: URL(string: "https://api.openai.com/v1")!,
-            model: "gpt-6.1-sol"
+            model: model,
+            reasoningEffort: reasoningEffort,
+            reasoningEffortCapabilities: reasoningEffortCapabilities
         ),
         reportResponseMetadata: reportResponseMetadata
     )

@@ -40,6 +40,184 @@ final class ModelSettingsTests: XCTestCase {
         XCTAssertFalse(hasCredential)
     }
 
+    func testProviderReasoningCapabilitiesUseInjectedCatalog() async throws {
+        let endpoint = URL(string: "https://custom.example/v1")!
+        let capabilities = ReasoningEffortCapabilities(
+            endpoint: endpoint,
+            model: "reported-model",
+            supportedEfforts: ["high", "low"],
+            requestFormat: .chatCompletionsField
+        )
+        let catalog = StaticProviderModelCatalogClient(capabilities: capabilities)
+        let model = AppModel(testEngine: makeEngine(), providerModelCatalog: catalog)
+        let provider = ProviderConfiguration(
+            id: "custom-provider",
+            name: "Custom provider",
+            kind: .compatible,
+            endpoint: endpoint,
+            model: "reported-model",
+            requiresCredential: false
+        )
+
+        let result = try await model.providerReasoningEffortCapabilities(for: provider)
+
+        XCTAssertEqual(result, capabilities)
+        let requestedProvider = await catalog.requestedProvider()
+        XCTAssertEqual(requestedProvider, provider)
+    }
+
+    func testAuthenticatedCatalogDoesNotUseCredentialForUnsavedDestination() async {
+        let savedEndpoint = URL(string: "https://saved.example/v1")!
+        let changedEndpoint = URL(string: "https://changed.example/v1")!
+        let savedProvider = ProviderConfiguration(
+            id: "custom-provider",
+            name: "Custom provider",
+            kind: .compatible,
+            endpoint: savedEndpoint,
+            model: "model-1"
+        )
+        let credentiallessProvider = ProviderConfiguration(
+            id: "credentialless-provider",
+            name: "Credentialless provider",
+            kind: .compatible,
+            endpoint: URL(string: "https://credentialless.example/v1")!,
+            model: "model-1",
+            requiresCredential: false
+        )
+        let catalog = StaticProviderModelCatalogClient(capabilities: nil)
+        let model = AppModel(
+            testEngine: makeEngine(),
+            configuration: AppConfiguration(providers: [savedProvider, credentiallessProvider], selectedProviderID: savedProvider.id),
+            providerModelCatalog: catalog
+        )
+        let changedProviders = [
+            ProviderConfiguration(
+                id: savedProvider.id,
+                name: savedProvider.name,
+                kind: savedProvider.kind,
+                endpoint: changedEndpoint,
+                model: savedProvider.model
+            ),
+            ProviderConfiguration(
+                id: "different-provider",
+                name: savedProvider.name,
+                kind: savedProvider.kind,
+                endpoint: savedEndpoint,
+                model: savedProvider.model
+            ),
+            ProviderConfiguration(
+                id: savedProvider.id,
+                name: savedProvider.name,
+                kind: .openRouter,
+                endpoint: savedEndpoint,
+                model: savedProvider.model
+            ),
+            ProviderConfiguration(
+                id: credentiallessProvider.id,
+                name: credentiallessProvider.name,
+                kind: credentiallessProvider.kind,
+                endpoint: credentiallessProvider.endpoint,
+                model: credentiallessProvider.model,
+                requiresCredential: true
+            )
+        ]
+
+        for changedProvider in changedProviders {
+            do {
+                _ = try await model.providerReasoningEffortCapabilities(for: changedProvider)
+                XCTFail("An unsaved authenticated destination must not reach the provider catalog.")
+            } catch {
+                XCTAssertEqual(error as? AppModelProviderModelCatalogError, .unsavedAuthenticatedDestination)
+            }
+        }
+
+        let requestedProvider = await catalog.requestedProvider()
+        XCTAssertNil(requestedProvider)
+    }
+
+    func testSavedAuthenticatedProviderCanQueryCatalog() async throws {
+        let endpoint = URL(string: "https://custom.example/v1")!
+        let provider = ProviderConfiguration(
+            id: "saved-provider",
+            name: "Saved provider",
+            kind: .compatible,
+            endpoint: endpoint,
+            model: "model-1"
+        )
+        let capabilities = ReasoningEffortCapabilities(
+            endpoint: endpoint,
+            model: provider.model,
+            supportedEfforts: ["high"],
+            requestFormat: .chatCompletionsField
+        )
+        let catalog = StaticProviderModelCatalogClient(capabilities: capabilities)
+        let model = AppModel(
+            testEngine: makeEngine(),
+            configuration: AppConfiguration(providers: [provider], selectedProviderID: provider.id),
+            providerModelCatalog: catalog
+        )
+
+        let result = try await model.providerReasoningEffortCapabilities(for: provider)
+
+        XCTAssertEqual(result, capabilities)
+        let requestedProvider = await catalog.requestedProvider()
+        XCTAssertEqual(requestedProvider, provider)
+    }
+
+    func testPublicOpenRouterCatalogCanBeQueriedBeforeSavingProvider() async throws {
+        let endpoint = URL(string: "https://openrouter.ai/api/v1")!
+        let provider = ProviderConfiguration(
+            id: "new-router",
+            name: "OpenRouter",
+            kind: .openRouter,
+            endpoint: endpoint,
+            model: "model-1"
+        )
+        let capabilities = ReasoningEffortCapabilities(
+            endpoint: endpoint,
+            model: provider.model,
+            supportedEfforts: ["high"],
+            requestFormat: .chatCompletionsObject
+        )
+        let catalog = StaticProviderModelCatalogClient(capabilities: capabilities)
+        let model = AppModel(testEngine: makeEngine(), providerModelCatalog: catalog)
+
+        let result = try await model.providerReasoningEffortCapabilities(for: provider)
+
+        XCTAssertEqual(result, capabilities)
+        let requestedProvider = await catalog.requestedProvider()
+        XCTAssertEqual(requestedProvider, provider)
+    }
+
+    func testProviderReasoningCapabilityQueryRejectsLateCancelledResponse() async throws {
+        let endpoint = URL(string: "https://custom.example/v1")!
+        let capabilities = ReasoningEffortCapabilities(
+            endpoint: endpoint,
+            model: "reported-model",
+            supportedEfforts: ["high"],
+            requestFormat: .chatCompletionsField
+        )
+        let catalog = DeferredProviderModelCatalogClient(capabilities: capabilities)
+        let model = AppModel(testEngine: makeEngine(), providerModelCatalog: catalog)
+        let provider = ProviderConfiguration(
+            id: "custom-provider",
+            name: "Custom provider",
+            kind: .compatible,
+            endpoint: endpoint,
+            model: "reported-model",
+            requiresCredential: false
+        )
+        let query = Task { try await model.providerReasoningEffortCapabilities(for: provider) }
+        try await catalog.waitForRequest()
+        query.cancel()
+        await catalog.finishPendingRequest()
+
+        do {
+            _ = try await query.value
+            XCTFail("A cancelled capability query must not return its late result.")
+        } catch is CancellationError {}
+    }
+
     func testSavingProviderPreservesExistingProvidersAndPresetRouting() throws {
         let root = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString, directoryHint: .isDirectory)
         defer { try? FileManager.default.removeItem(at: root) }
@@ -486,6 +664,52 @@ private actor StaticModelCatalogAccountClient: AppModelOpenAIAccountClient {
 
 private enum ModelSettingsFixtureError: Error {
     case timedOut
+}
+
+private actor StaticProviderModelCatalogClient: AppModelProviderModelCatalogClient {
+    private let capabilities: ReasoningEffortCapabilities?
+    private var requested: ProviderConfiguration?
+
+    init(capabilities: ReasoningEffortCapabilities?) {
+        self.capabilities = capabilities
+    }
+
+    func reasoningEffortCapabilities(for provider: ProviderConfiguration) async throws -> ReasoningEffortCapabilities? {
+        requested = provider
+        return capabilities
+    }
+
+    func requestedProvider() -> ProviderConfiguration? { requested }
+}
+
+private actor DeferredProviderModelCatalogClient: AppModelProviderModelCatalogClient {
+    private let capabilities: ReasoningEffortCapabilities?
+    private var requestStarted = false
+    private var continuation: CheckedContinuation<ReasoningEffortCapabilities?, any Error>?
+
+    init(capabilities: ReasoningEffortCapabilities?) {
+        self.capabilities = capabilities
+    }
+
+    func reasoningEffortCapabilities(for provider: ProviderConfiguration) async throws -> ReasoningEffortCapabilities? {
+        requestStarted = true
+        return try await withCheckedThrowingContinuation { continuation in
+            self.continuation = continuation
+        }
+    }
+
+    func waitForRequest() async throws {
+        for _ in 0..<200 {
+            if requestStarted { return }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        throw ModelSettingsFixtureError.timedOut
+    }
+
+    func finishPendingRequest() {
+        continuation?.resume(returning: capabilities)
+        continuation = nil
+    }
 }
 
 @MainActor

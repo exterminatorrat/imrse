@@ -7,6 +7,7 @@ struct ChatGPTAccountSettingsPane: View {
     @ObservedObject var model: AppModel
     private let initialProviderID: String?
     @State private var selectedModelID: String
+    @State private var selectedReasoningEffort: String?
     @State private var feedback: String?
     @State private var showDisconnectConfirmation = false
 
@@ -35,6 +36,8 @@ struct ChatGPTAccountSettingsPane: View {
         !selectedModelID.isEmpty
             && existingProvider?.id == model.configuration.selectedProviderID
             && existingProvider?.model == selectedModelID
+            && existingProvider?.reasoningEffort == selectedReasoningEffortForProvider
+            && existingProvider?.reasoningEffortCapabilities == selectedModelReasoningCapabilities
     }
 
     private var accountModelAccessReady: Bool {
@@ -78,6 +81,25 @@ struct ChatGPTAccountSettingsPane: View {
         choices.map(\.id) + (existingProvider.map { [$0.model] } ?? [])
     }
 
+    private var selectedModelReasoningCapabilities: ReasoningEffortCapabilities? {
+        guard let selectedModel = model.chatGPTModels.first(where: { $0.slug == selectedModelID }),
+              !selectedModel.supportedReasoningEfforts.isEmpty
+        else { return nil }
+        return ReasoningEffortCapabilities(
+            endpoint: URL(string: "https://api.openai.com/v1")!,
+            model: selectedModelID,
+            supportedEfforts: selectedModel.supportedReasoningEfforts,
+            requestFormat: .responsesObject
+        )
+    }
+
+    private var selectedReasoningEffortForProvider: String? {
+        guard let selectedReasoningEffort,
+              selectedModelReasoningCapabilities?.supportedEfforts.contains(selectedReasoningEffort) == true
+        else { return nil }
+        return selectedReasoningEffort
+    }
+
     init(model: AppModel, providerID: String? = nil) {
         self.model = model
         self.initialProviderID = providerID
@@ -100,6 +122,7 @@ struct ChatGPTAccountSettingsPane: View {
             initialSelection = existing?.model ?? ""
         }
         _selectedModelID = State(initialValue: initialSelection)
+        _selectedReasoningEffort = State(initialValue: existing?.reasoningEffort)
     }
 
     var body: some View {
@@ -168,6 +191,18 @@ struct ChatGPTAccountSettingsPane: View {
                             presentation: .chatGPTAccount
                         )
                         .disabled(!model.canChangeSettings || (choices.isEmpty && configuredModelChoice == nil))
+                        if let capabilities = selectedModelReasoningCapabilities {
+                            ReasoningEffortControl(effort: $selectedReasoningEffort, capabilities: capabilities)
+                                .disabled(!model.canChangeSettings)
+                        } else if !model.isPreviewMode,
+                                  !model.isRefreshingChatGPTAccount,
+                                  model.chatGPTModels.contains(where: { $0.slug == selectedModelID })
+                        {
+                            Text("This model doesn't advertise reasoning effort choices. The provider default will be used.")
+                                .font(.imrseCaption)
+                                .foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
                         HStack(spacing: 10) {
                             if isSelectedDefault {
                                 SettingsStatusBadge(
@@ -208,6 +243,7 @@ struct ChatGPTAccountSettingsPane: View {
             }
             Spacer(minLength: 0)
         }
+        .onChange(of: selectedModelID) { _, _ in selectedReasoningEffort = nil }
         .onChange(of: isUnsupportedAccount ? [] : selectableChoiceIDs) { _, identifiers in
             guard !isUnsupportedAccount, !identifiers.contains(selectedModelID) else { return }
             selectedModelID = ""
@@ -345,7 +381,9 @@ struct ChatGPTAccountSettingsPane: View {
             kind: .openAIChatGPT,
             endpoint: URL(string: "https://api.openai.com/v1")!,
             model: selectedModelID,
-            requiresCredential: true
+            requiresCredential: true,
+            reasoningEffort: selectedReasoningEffortForProvider,
+            reasoningEffortCapabilities: selectedModelReasoningCapabilities
         )
         do {
             try model.saveProvider(provider)

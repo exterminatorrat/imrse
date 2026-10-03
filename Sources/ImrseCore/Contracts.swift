@@ -5,6 +5,50 @@ public enum AppearancePreference: String, Codable, CaseIterable, Sendable { case
 public enum ContextScope: String, Codable, Sendable { case selection }
 public enum ProviderKind: String, Codable, CaseIterable, Sendable { case openAI, openAIChatGPT, openRouter, managedLocal, compatible }
 public enum ReplacementStrategy: String, Codable, Sendable { case selectedText, valueRange, clipboard }
+public enum ReasoningEffortRequestFormat: String, Codable, Sendable {
+    case chatCompletionsField
+    case chatCompletionsObject
+    case responsesObject
+}
+
+public struct ReasoningEffortCapabilities: Codable, Equatable, Sendable {
+    public var endpoint: URL
+    public var model: String
+    public var supportedEfforts: [String]
+    public var requestFormat: ReasoningEffortRequestFormat
+    public var defaultEffort: String?
+    public var mandatory: Bool?
+
+    public init(
+        endpoint: URL,
+        model: String,
+        supportedEfforts: [String],
+        requestFormat: ReasoningEffortRequestFormat,
+        defaultEffort: String? = nil,
+        mandatory: Bool? = nil
+    ) {
+        self.endpoint = endpoint
+        self.model = model
+        self.supportedEfforts = supportedEfforts
+        self.requestFormat = requestFormat
+        self.defaultEffort = defaultEffort
+        self.mandatory = mandatory
+    }
+
+    public func applies(to endpoint: URL, model: String, providerKind: ProviderKind) -> Bool {
+        guard self.endpoint == endpoint, self.model == model else { return false }
+        switch providerKind {
+        case .openAIChatGPT:
+            return requestFormat == .responsesObject
+        case .openRouter:
+            return requestFormat == .chatCompletionsObject
+        case .openAI, .compatible:
+            return requestFormat != .responsesObject
+        case .managedLocal:
+            return false
+        }
+    }
+}
 
 public struct TextRange: Codable, Equatable, Sendable {
     public var location: Int
@@ -50,9 +94,32 @@ public struct ProviderConfiguration: Codable, Equatable, Identifiable, Sendable 
     public var endpoint: URL
     public var model: String
     public var requiresCredential: Bool
-    public init(id: String, name: String, kind: ProviderKind, endpoint: URL, model: String, requiresCredential: Bool = true) {
+    public var reasoningEffort: String?
+    public var reasoningEffortCapabilities: ReasoningEffortCapabilities?
+    public init(
+        id: String,
+        name: String,
+        kind: ProviderKind,
+        endpoint: URL,
+        model: String,
+        requiresCredential: Bool = true,
+        reasoningEffort: String? = nil,
+        reasoningEffortCapabilities: ReasoningEffortCapabilities? = nil
+    ) {
         self.id = id; self.name = name; self.kind = kind; self.endpoint = endpoint
         self.model = model; self.requiresCredential = requiresCredential
+        self.reasoningEffort = reasoningEffort
+        self.reasoningEffortCapabilities = reasoningEffortCapabilities
+    }
+
+    public var activeReasoningEffort: (effort: String, format: ReasoningEffortRequestFormat)? {
+        guard let reasoningEffort,
+              let capabilities = reasoningEffortCapabilities,
+              capabilities.applies(to: endpoint, model: model, providerKind: kind),
+              capabilities.supportedEfforts.contains(reasoningEffort),
+              capabilities.mandatory != true || reasoningEffort != "none"
+        else { return nil }
+        return (reasoningEffort, capabilities.requestFormat)
     }
 }
 

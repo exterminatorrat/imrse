@@ -88,7 +88,13 @@ public struct OpenAICompatibleProvider: TextProvider, Sendable {
                 ChatMessage(role: "system", content: request.instruction),
                 ChatMessage(role: "user", content: request.text)
             ],
-            stream: true
+            stream: true,
+            reasoningEffort: request.provider.activeReasoningEffort.flatMap {
+                $0.format == .chatCompletionsField ? $0.effort : nil
+            },
+            reasoning: request.provider.activeReasoningEffort.flatMap {
+                $0.format == .chatCompletionsObject ? ChatCompletionReasoning(effort: $0.effort) : nil
+            }
         )
         let encoder = JSONEncoder()
         let data: Data
@@ -260,6 +266,17 @@ private struct ChatCompletionRequest: Encodable {
     let model: String
     let messages: [ChatMessage]
     let stream: Bool
+    let reasoningEffort: String?
+    let reasoning: ChatCompletionReasoning?
+
+    enum CodingKeys: String, CodingKey {
+        case model, messages, stream, reasoning
+        case reasoningEffort = "reasoning_effort"
+    }
+}
+
+private struct ChatCompletionReasoning: Encodable {
+    let effort: String
 }
 
 private struct ChatMessage: Encodable {

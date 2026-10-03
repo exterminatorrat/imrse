@@ -25,6 +25,89 @@ final class ProviderRouterTests: XCTestCase {
         XCTAssertEqual(request.fallbackProvider, route.fallback)
     }
 
+    func testPresetModelOverrideCannotReuseSavedReasoningEffort() throws {
+        let endpoint = URL(string: "https://openrouter.ai/api/v1")!
+        let capabilities = ReasoningEffortCapabilities(
+            endpoint: endpoint,
+            model: "model-1",
+            supportedEfforts: ["high", "none"],
+            requestFormat: .chatCompletionsObject,
+            mandatory: true
+        )
+        let provider = ProviderConfiguration(
+            id: "router",
+            name: "Router",
+            kind: .openRouter,
+            endpoint: endpoint,
+            model: "model-1",
+            reasoningEffort: "high",
+            reasoningEffortCapabilities: capabilities
+        )
+        let configuration = AppConfiguration(providers: [provider], selectedProviderID: provider.id)
+        let route = try ProviderRouter(configuration: configuration).resolve(preset: Preset(
+            id: "override-model",
+            name: "Override model",
+            instruction: "Rewrite",
+            providerID: provider.id,
+            model: "model-2"
+        ))
+
+        XCTAssertEqual(route.primary.model, "model-2")
+        XCTAssertNil(route.primary.activeReasoningEffort)
+    }
+
+    func testProviderDefaultUnadvertisedEffortAndMandatoryNoneDoNotOverrideDefault() throws {
+        let endpoint = URL(string: "https://openrouter.ai/api/v1")!
+        let capabilities = ReasoningEffortCapabilities(
+            endpoint: endpoint,
+            model: "model-1",
+            supportedEfforts: ["high", "none"],
+            requestFormat: .chatCompletionsObject,
+            mandatory: true
+        )
+
+        let defaultProvider = ProviderConfiguration(
+            id: "default",
+            name: "Default",
+            kind: .openRouter,
+            endpoint: endpoint,
+            model: "model-1",
+            reasoningEffortCapabilities: capabilities
+        )
+        XCTAssertNil(defaultProvider.activeReasoningEffort)
+
+        var unsupportedProvider = defaultProvider
+        unsupportedProvider.reasoningEffort = "xhigh"
+        XCTAssertNil(unsupportedProvider.activeReasoningEffort)
+
+        var mandatoryProvider = defaultProvider
+        mandatoryProvider.reasoningEffort = "none"
+        XCTAssertNil(mandatoryProvider.activeReasoningEffort)
+    }
+
+    func testReasoningCapabilitiesMustMatchProviderFormat() {
+        let endpoint = URL(string: "https://openrouter.ai/api/v1")!
+        let capabilities = ReasoningEffortCapabilities(
+            endpoint: endpoint,
+            model: "model-1",
+            supportedEfforts: ["high"],
+            requestFormat: .chatCompletionsField
+        )
+        let provider = ProviderConfiguration(
+            id: "router",
+            name: "Router",
+            kind: .openRouter,
+            endpoint: endpoint,
+            model: "model-1",
+            reasoningEffort: "high",
+            reasoningEffortCapabilities: capabilities
+        )
+
+        XCTAssertFalse(capabilities.applies(to: endpoint, model: "model-1", providerKind: .openRouter))
+        XCTAssertNil(provider.activeReasoningEffort)
+        XCTAssertTrue(capabilities.applies(to: endpoint, model: "model-1", providerKind: .compatible))
+    }
+
     func testLocalOnlyRouteRequiresLocalPrimaryAndSuppressesRemoteFallback() throws {
         let router = ProviderRouter(configuration: configuration())
         XCTAssertThrowsError(try router.resolve(preset: Preset(

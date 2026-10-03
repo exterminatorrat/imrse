@@ -13,6 +13,12 @@ struct CustomProviderSettingsPane: View {
     @State private var draft = CustomProviderDraft()
     @State private var credential = ""
     @State private var hasSavedCredential = false
+    @State private var selectedReasoningEffort: String?
+    @State private var reasoningCapabilities: ReasoningEffortCapabilities?
+    @State private var didResolveReasoningCapabilities = false
+    @State private var reasoningStatus: String?
+    @State private var isRefreshingReasoningCapabilities = false
+    @State private var reasoningQueryID = UUID()
     @State private var isSaving = false
     @State private var feedback: String?
     @State private var credentialQueryID = UUID()
@@ -87,6 +93,22 @@ struct CustomProviderSettingsPane: View {
                     TextField("Model ID", text: $draft.model)
                         .disabled(!model.canChangeSettings || isSaving)
 
+                    if let capabilities = selectedReasoningCapabilitiesForDraft {
+                        ReasoningEffortControl(effort: $selectedReasoningEffort, capabilities: capabilities)
+                            .disabled(!model.canChangeSettings || isSaving || isRefreshingReasoningCapabilities)
+                        if let reasoningStatus {
+                            Text(reasoningStatus)
+                                .font(.imrseCaption)
+                                .foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                    } else if let reasoningStatus {
+                        Text(reasoningStatus)
+                            .font(.imrseCaption)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+
                     Toggle("Provider requires an API key", isOn: $draft.requiresCredential)
                         .disabled(!model.canChangeSettings || isSaving)
                 }
@@ -117,7 +139,7 @@ struct CustomProviderSettingsPane: View {
 
             HStack(spacing: 10) {
                 ImrsePrimaryButton(title: isSaving ? "Saving…" : "Save provider", action: saveProvider)
-                    .disabled(!model.canChangeSettings || isSaving || !draft.isValid)
+                    .disabled(!model.canChangeSettings || isSaving || isRefreshingReasoningCapabilities || !draft.isValid)
                 if showsRemoveProviderAction && !editingProviderID.isEmpty {
                     ImrseDestructiveButton(title: "Remove provider", action: removeProvider)
                         .disabled(!model.canChangeSettings || isSaving || providerIsInUse)
@@ -138,7 +160,11 @@ struct CustomProviderSettingsPane: View {
             Spacer(minLength: 0)
         }
         .onAppear(perform: loadSettings)
+        .onChange(of: draft.model) { _, _ in resetReasoningCapabilities() }
+        .onChange(of: draft.endpoint) { _, _ in resetReasoningCapabilities() }
+        .onChange(of: draft.kind) { _, _ in resetReasoningCapabilities() }
         .task(id: draft.id) { await refreshCredentialStatus(for: draft.id) }
+        .task(id: reasoningCapabilityQueryKey) { await refreshReasoningCapabilities() }
     }
 
     private var credentialStatus: String {
@@ -149,6 +175,44 @@ struct CustomProviderSettingsPane: View {
 
     private var providerIsInUse: Bool {
         model.presets.contains { $0.providerID == editingProviderID || $0.fallbackProviderID == editingProviderID }
+    }
+
+    private var reasoningCapabilityQueryKey: String {
+        "\(draft.id)|\(draft.kind.rawValue)|\(draft.endpoint)|\(draft.model)|\(draft.requiresCredential)|\(hasSavedCredential)|\(isAuthenticatedReasoningDestinationSaved)"
+    }
+
+    private var isAuthenticatedReasoningDestinationSaved: Bool {
+        guard let provider = draft.provider,
+              provider.requiresCredential,
+              !(provider.kind == .openRouter && URLComponents(url: provider.endpoint, resolvingAgainstBaseURL: false)?.host?.lowercased() == "openrouter.ai")
+        else { return true }
+        return model.configuration.providers.contains { savedProvider in
+            savedProvider.id == provider.id
+                && savedProvider.endpoint == provider.endpoint
+                && savedProvider.kind == provider.kind
+                && savedProvider.requiresCredential == provider.requiresCredential
+        }
+    }
+
+    private var selectedReasoningCapabilitiesForDraft: ReasoningEffortCapabilities? {
+        guard let provider = draft.provider else { return nil }
+        if let reasoningCapabilities,
+           reasoningCapabilities.applies(to: provider.endpoint, model: provider.model, providerKind: provider.kind)
+        {
+            return reasoningCapabilities
+        }
+        guard !didResolveReasoningCapabilities,
+              let saved = draft.reasoningEffortCapabilities,
+              saved.applies(to: provider.endpoint, model: provider.model, providerKind: provider.kind)
+        else { return nil }
+        return saved
+    }
+
+    private var selectedReasoningEffortForDraft: String? {
+        guard let selectedReasoningEffort,
+              selectedReasoningCapabilitiesForDraft?.supportedEfforts.contains(selectedReasoningEffort) == true
+        else { return nil }
+        return selectedReasoningEffort
     }
 
     private func loadSettings() {
@@ -173,16 +237,24 @@ struct CustomProviderSettingsPane: View {
     private func loadProvider(_ identifier: String) {
         credential = ""
         feedback = nil
+        reasoningCapabilities = nil
+        didResolveReasoningCapabilities = false
+        reasoningStatus = nil
+        selectedReasoningEffort = nil
         guard let provider = providers.first(where: { $0.id == identifier }) else {
             draft = CustomProviderDraft()
             hasSavedCredential = false
             return
         }
         draft = CustomProviderDraft(provider: provider)
+        selectedReasoningEffort = provider.reasoningEffort
     }
 
     private func saveProvider() {
-        guard let provider = draft.provider else {
+        guard let provider = draft.makeProvider(
+            reasoningEffort: selectedReasoningEffortForDraft,
+            reasoningEffortCapabilities: selectedReasoningCapabilitiesForDraft
+        ) else {
             feedback = "Enter a valid endpoint URL, provider name and model ID."
             return
         }
@@ -282,6 +354,59 @@ struct CustomProviderSettingsPane: View {
             feedback = AppModel.userMessage(for: error)
         }
     }
+
+    private func resetReasoningCapabilities() {
+        reasoningCapabilities = nil
+        didResolveReasoningCapabilities = false
+        reasoningStatus = nil
+    }
+
+    private func refreshReasoningCapabilities() async {
+        let queryID = UUID()
+        reasoningQueryID = queryID
+        reasoningCapabilities = nil
+        didResolveReasoningCapabilities = false
+        isRefreshingReasoningCapabilities = false
+        guard !model.isPreviewMode else {
+            reasoningStatus = "Preview doesn't query provider capability metadata."
+            return
+        }
+        guard let provider = draft.provider else {
+            reasoningStatus = "Enter a model ID and endpoint to check advertised reasoning effort choices."
+            return
+        }
+        isRefreshingReasoningCapabilities = true
+        reasoningStatus = "Checking endpoint-advertised reasoning effort choices…"
+        defer {
+            if reasoningQueryID == queryID { isRefreshingReasoningCapabilities = false }
+        }
+        try? await Task.sleep(for: .milliseconds(300))
+        guard !Task.isCancelled, reasoningQueryID == queryID else { return }
+        let requestKey = reasoningCapabilityQueryKey
+        do {
+            let capabilities = try await model.providerReasoningEffortCapabilities(for: provider)
+            guard !Task.isCancelled, reasoningQueryID == queryID, reasoningCapabilityQueryKey == requestKey else { return }
+            reasoningCapabilities = capabilities
+            didResolveReasoningCapabilities = true
+            if selectedReasoningEffortForDraft == nil { selectedReasoningEffort = nil }
+            reasoningStatus = capabilities == nil
+                ? "This endpoint doesn't advertise supported reasoning effort choices. The provider default will be used."
+                : nil
+        } catch let error as ImrseError where error == .missingCredentials {
+            guard !Task.isCancelled, reasoningQueryID == queryID, reasoningCapabilityQueryKey == requestKey else { return }
+            reasoningStatus = selectedReasoningCapabilitiesForDraft == nil
+                ? "Save an API key to check advertised reasoning effort choices. The provider default will be used."
+                : "Save an API key to refresh the advertised choices. Saved choices remain available."
+        } catch AppModelProviderModelCatalogError.unsavedAuthenticatedDestination {
+            guard !Task.isCancelled, reasoningQueryID == queryID, reasoningCapabilityQueryKey == requestKey else { return }
+            reasoningStatus = "Save this provider before checking its endpoint for advertised reasoning choices. The provider default will be used."
+        } catch {
+            guard !Task.isCancelled, reasoningQueryID == queryID, reasoningCapabilityQueryKey == requestKey else { return }
+            reasoningStatus = selectedReasoningCapabilitiesForDraft == nil
+                ? "Couldn't verify reasoning effort choices. The provider default will be used."
+                : "Couldn't refresh the advertised choices. Saved choices remain available."
+        }
+    }
 }
 
 private struct CustomProviderDraft {
@@ -291,6 +416,8 @@ private struct CustomProviderDraft {
     var endpoint = ""
     var model = ""
     var requiresCredential = true
+    var reasoningEffort: String?
+    var reasoningEffortCapabilities: ReasoningEffortCapabilities?
 
     init(provider: ProviderConfiguration? = nil) {
         guard let provider else { return }
@@ -300,9 +427,18 @@ private struct CustomProviderDraft {
         endpoint = provider.endpoint.absoluteString
         model = provider.model
         requiresCredential = provider.requiresCredential
+        reasoningEffort = provider.reasoningEffort
+        reasoningEffortCapabilities = provider.reasoningEffortCapabilities
     }
 
     var provider: ProviderConfiguration? {
+        makeProvider(reasoningEffort: reasoningEffort, reasoningEffortCapabilities: reasoningEffortCapabilities)
+    }
+
+    func makeProvider(
+        reasoningEffort: String? = nil,
+        reasoningEffortCapabilities: ReasoningEffortCapabilities? = nil
+    ) -> ProviderConfiguration? {
         guard let endpoint = URL(string: endpoint.trimmingCharacters(in: .whitespacesAndNewlines)) else { return nil }
         return ProviderConfiguration(
             id: id,
@@ -310,7 +446,9 @@ private struct CustomProviderDraft {
             kind: kind,
             endpoint: endpoint,
             model: model.trimmingCharacters(in: .whitespacesAndNewlines),
-            requiresCredential: requiresCredential
+            requiresCredential: requiresCredential,
+            reasoningEffort: reasoningEffort,
+            reasoningEffortCapabilities: reasoningEffortCapabilities
         )
     }
 
