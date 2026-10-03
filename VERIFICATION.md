@@ -36,6 +36,12 @@ default Xcode 16.4, which is below the documented toolchain requirement. Callbac
 member captures are explicit for compiler compatibility. The hosted run checks
 that selected toolchain; the local packaged baseline used a newer compiler.
 
+Packaging is a separate macOS 26/Xcode 26.6 gate, matching the toolchain that
+produced the verified local bundle. Older macOS 15/Xcode 26.3 native tests remain
+enabled. This split preserves runtime/compiler coverage while avoiding the
+older SwiftBuild Metal integration failure; the package gate still requires the
+Metal compiler and complete resources/signature checks.
+
 ## Native behavior measured
 
 Disposable production-adapter probes passed selected-text replacement and exact

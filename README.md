@@ -16,7 +16,7 @@ swift test
 open dist/imrse.app
 ```
 
-The script uses SwiftBuild so MLX's compiled Metal resource is included, then creates a local ad-hoc signed bundle. It does not notarize or publish anything. For development use `CONFIGURATION=debug ./scripts/build-app.sh`. A distribution release needs a stable Developer ID signature and notarization; source compilation does not prove distribution readiness.
+The script uses SwiftBuild so MLX's compiled Metal resource is included, then creates a local ad-hoc signed bundle. Resource-complete packaging is verified with Xcode 26.6 and its Metal toolchain; CI separately keeps native test coverage on Xcode 26.3. It does not notarize or publish anything. For development use `CONFIGURATION=debug ./scripts/build-app.sh`. A distribution release needs a stable Developer ID signature and notarization; source compilation does not prove distribution readiness.
 
 Core and Services also build and test on Linux:
 

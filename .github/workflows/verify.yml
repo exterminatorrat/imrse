@@ -26,6 +26,15 @@ jobs:
       - run: swift test --jobs 1 -Xswiftc -warnings-as-errors
       - run: swift test --package-path pill-kit/native -Xswiftc -warnings-as-errors
       - run: python3 pill-kit/scripts/verify-assets.py
+  package:
+    runs-on: macos-26
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - run: xcodebuild -version && swift --version
       - name: Ensure Metal compiler is available
         run: |
           if ! xcrun --sdk macosx metal --version; then
