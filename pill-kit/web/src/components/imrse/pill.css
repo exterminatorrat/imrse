@@ -1,0 +1,54 @@
+/* Shared dimensions match native/PillTokens.swift. Scope keeps host CSS untouched. */
+.imrse-pill {
+  --imrse-surface: #fff; --imrse-text:#171717; --imrse-muted:#737373; --imrse-edge:rgba(0,0,0,.045);
+  --imrse-pill-width:360px;
+  box-sizing:border-box; width:min(var(--imrse-pill-width),calc(100vw - 40px)); height:52px; flex-shrink:0;
+  display:flex;align-items:center;gap:12px;padding:0 20px;border:1px solid var(--imrse-edge);border-radius:26px;
+  color:var(--imrse-text);background:var(--imrse-surface);font:400 13px/20px -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+  box-shadow:0 6px 22px rgba(0,0,0,.12),0 1px 3px rgba(0,0,0,.025);
+  animation:imrse-enter 160ms cubic-bezier(.16,1,.3,1) both;
+}
+.imrse-pill[data-phase="processing"]{--imrse-pill-width:240px}
+.imrse-pill[data-phase="applying"]{--imrse-pill-width:220px}
+.imrse-pill[data-phase="success"]{--imrse-pill-width:180px}
+.imrse-pill[data-phase="error"]{--imrse-pill-width:300px}
+.dark .imrse-pill,[data-theme="dark"] .imrse-pill {
+  --imrse-surface:#181818;--imrse-text:#f4f4f4;--imrse-muted:#a1a1a1;--imrse-edge:rgba(255,255,255,.08);
+  box-shadow:0 8px 24px rgba(0,0,0,.22);
+}
+.imrse-pill[data-motion="instant"]{animation:none}
+.imrse-pill[data-motion="smooth"]{animation-duration:240ms}
+.imrse-pill *, .imrse-pill *::before, .imrse-pill *::after{box-sizing:border-box}
+.imrse-input-row{display:flex;align-items:center;gap:12px;width:100%;min-width:0;margin:0}
+.imrse-input-row input{flex:1;min-width:0;width:100%;padding:0;border:0;outline:none;box-shadow:none;background:transparent;color:inherit;font:inherit;border-radius:0}
+.imrse-input-row input::placeholder{color:var(--imrse-muted);opacity:1}
+.imrse-pill:focus-within{border-color:color-mix(in srgb,var(--imrse-text) 16%,transparent)}
+.imrse-action{flex:none;padding:5px 2px;margin:0;border:0;outline:none;background:none;box-shadow:none;font:400 11px/18px -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color:var(--imrse-muted);border-radius:4px;cursor:pointer;white-space:nowrap}
+button.imrse-action:hover{color:var(--imrse-text)}
+button.imrse-action:focus-visible{outline:1px solid currentColor;outline-offset:3px}
+.imrse-return{font-size:19px;color:var(--imrse-text)}
+.imrse-message{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.imrse-processing{display:flex;flex:1;align-items:center;min-width:0;gap:10px}
+.imrse-activity{display:block;min-width:0;overflow:hidden;white-space:nowrap}
+.imrse-text-dots{display:inline-flex;align-items:baseline;white-space:nowrap}
+.imrse-dots{display:inline-flex;min-width:12px;letter-spacing:0}
+.imrse-dots>span{animation:imrse-dot 1200ms ease-in-out infinite;width:3px}
+.imrse-dots>span:nth-child(2){animation-delay:160ms}
+.imrse-dots>span:nth-child(3){animation-delay:320ms}
+.imrse-word{display:inline-block;animation:imrse-word-in 160ms ease-out both}
+.imrse-spiral-frame,.imrse-still-spiral{display:block;width:24px;height:24px;flex:0 0 24px;overflow:hidden}
+.imrse-invert{filter:invert(1)}
+/* These are the exact utility classes used by the unmodified upstream component.
+   A consuming app with Tailwind may omit this scoped compatibility block. */
+.imrse-spiral-frame .relative{position:relative}.imrse-spiral-frame .shrink-0{flex-shrink:0}
+.imrse-spiral-frame .absolute{position:absolute}.imrse-spiral-frame .inset-0{inset:0}
+.imrse-spiral-frame .transition-opacity{transition-property:opacity;transition-timing-function:cubic-bezier(.4,0,.2,1)}
+.imrse-spiral-frame .duration-75{transition-duration:75ms}
+.imrse-spiral-frame .invert{filter:invert(1)}
+.imrse-spiral-frame .opacity-100{opacity:1}.imrse-spiral-frame .opacity-0{opacity:0}
+.imrse-sr-only{position:absolute!important;width:1px!important;height:1px!important;overflow:hidden!important;clip-path:inset(50%);white-space:nowrap}
+@keyframes imrse-enter{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:translateY(0)}}
+@keyframes imrse-word-in{from{opacity:0}to{opacity:1}}
+@keyframes imrse-dot{0%,80%,100%{opacity:.3}40%{opacity:1}}
+@media(prefers-reduced-motion:reduce){.imrse-pill,.imrse-word,.imrse-dots>span{animation:none!important;transition:none!important}.imrse-dots>span{opacity:1}}
+@media(prefers-contrast:more){.imrse-pill{--imrse-muted:var(--imrse-text);border-color:currentColor}}

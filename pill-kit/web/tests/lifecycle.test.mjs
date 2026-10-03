@@ -1,0 +1,30 @@
+import test from "node:test";
+import assert from "node:assert/strict";
+import {hidden,transition,activityWord} from "../src/core/lifecycle.mjs";
+const open=()=>transition(hidden,{type:"invoke"});
+const running=()=>transition(open(),{type:"submit",id:"one"});
+test("nothing is shown before invocation",()=>assert.equal(hidden.phase,"hidden"));
+test("shortcut enters input state",()=>assert.equal(open().phase,"input"));
+test("cannot submit while hidden",()=>assert.equal(transition(hidden,{type:"submit",id:"x"}),hidden));
+test("submit starts a named request",()=>assert.deepEqual(running(),{phase:"processing",id:"one"}));
+test("duplicate submit cannot replace in-flight request",()=>assert.deepEqual(transition(running(),{type:"submit",id:"two"}),running()));
+test("invoke while processing does not open competing input",()=>assert.deepEqual(transition(running(),{type:"invoke"}),running()));
+test("generation completion is not replacement success",()=>assert.equal(transition(running(),{type:"generated",id:"one"}).phase,"applying"));
+test("success requires confirmed replacement",()=>{const state=running();assert.equal(transition(state,{type:"applied",id:"one"}),state);});
+test("confirm applied after generated enters success",()=>{
+ const s=transition(running(),{type:"generated",id:"one"});
+ assert.deepEqual(transition(s,{type:"applied",id:"one"}),{phase:"success",id:"one"});
+});
+test("stale completion does not change new request",()=>assert.deepEqual(transition(running(),{type:"generated",id:"old"}),running()));
+test("cancel hides immediately",()=>assert.equal(transition(running(),{type:"dismiss"}).phase,"hidden"));
+test("late callback cannot resurrect cancelled pill",()=>assert.equal(transition(hidden,{type:"generated",id:"one"}),hidden));
+test("request failure remains visible",()=>assert.deepEqual(transition(running(),{type:"failed",id:"one",message:"Try again"}),{phase:"error",id:"one",message:"Try again"}));
+test("old failure does not replace active status",()=>assert.deepEqual(transition(running(),{type:"failed",id:"old",message:"old"}),running()));
+test("dismiss error returns hidden",()=>assert.equal(transition({phase:"error",id:"x",message:"Oops"},{type:"dismiss"}).phase,"hidden"));
+test("activity cycles on 2.5s boundary",()=>{
+ const words=["Thinking","Refining","Discombobulating"];
+ assert.equal(activityWord(0,words),"Thinking");assert.equal(activityWord(2499,words),"Thinking");
+ assert.equal(activityWord(2500,words),"Refining");assert.equal(activityWord(5000,words),"Discombobulating");assert.equal(activityWord(7500,words),"Thinking");
+});
+test("empty activity words have safe fallback",()=>assert.equal(activityWord(0,[]),"Thinking"));
+test("invalid timing has safe fallback",()=>assert.equal(activityWord(-10,["Thinking","Refining"],0),"Thinking"));

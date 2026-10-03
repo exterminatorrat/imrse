@@ -1,0 +1,68 @@
+name: Verify
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  portable:
+    runs-on: ubuntu-latest
+    container: swift:6.2
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - run: swift test -Xswiftc -warnings-as-errors
+      - run: swift test --package-path pill-kit/native -Xswiftc -warnings-as-errors
+  native:
+    runs-on: macos-15
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_26.3.app/Contents/Developer
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - run: xcodebuild -version && swift --version
+      - run: swift test --jobs 1 -Xswiftc -warnings-as-errors
+      - run: swift test --package-path pill-kit/native -Xswiftc -warnings-as-errors
+      - run: python3 pill-kit/scripts/verify-assets.py
+  package:
+    runs-on: macos-26
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - run: xcodebuild -version && swift --version
+      - name: Ensure Metal compiler is available
+        run: |
+          if ! xcrun --sdk macosx metal --version; then
+            xcodebuild -downloadComponent MetalToolchain
+          fi
+          xcrun --sdk macosx metal --version
+      - run: ./scripts/build-app.sh
+  design:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: pill-kit/web
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: pill-kit/web/package-lock.json
+      - run: npm ci
+      - run: npx playwright install --with-deps chromium
+      - run: npm test
+      - run: npm run typecheck
+      - run: npm run test:browser
+      - run: npm run build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: visual-states
+          path: pill-kit/web/test-results

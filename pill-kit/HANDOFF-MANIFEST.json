@@ -1,0 +1,308 @@
+{
+  "package": "imrse-pill-kit",
+  "version": "0.1.0",
+  "scope": "Native pill component kit and React preview; no app engine or repository integration claimed",
+  "validation": {
+    "javascriptTestsPassed": 23,
+    "swiftCoreTestsPassed": 15,
+    "reactRuntimeVerified": false,
+    "nativeUIBuildVerified": false
+  },
+  "files": [
+    {
+      "path": ".gitignore",
+      "bytes": 116,
+      "sha256": "c3928c7a0581638b09f361e239f7c4232949baa1976f92fefc8f5284a61254ca"
+    },
+    {
+      "path": "CAPY-INTEGRATION.md",
+      "bytes": 5896,
+      "sha256": "89df49b94fe4d7fa974f33950386787eba429af97647c709298b35cccef1b1ed"
+    },
+    {
+      "path": "CAPY-PASTE.txt",
+      "bytes": 814,
+      "sha256": "9c418b3a03d6f09e26e6f4c4cc5e989a1d8a1c388b3f1bb035dcf9b8bb436815"
+    },
+    {
+      "path": "DESIGN.md",
+      "bytes": 3126,
+      "sha256": "7c6ccecf0619c5add430bccfb3c7fece7b208f5e4a8a19ea3dc4e116846ccee7"
+    },
+    {
+      "path": "LICENSE",
+      "bytes": 1075,
+      "sha256": "8d054ce0566381aa92ceb8b113c42376602237876b42dfa2e58e6675b35ecf72"
+    },
+    {
+      "path": "README.md",
+      "bytes": 3199,
+      "sha256": "c6baf0276342d734b8ba428211f55d8f146e30745181c6e91b9c7150b606c309"
+    },
+    {
+      "path": "SOURCE-MANIFEST.json",
+      "bytes": 756,
+      "sha256": "5049be386a5b2d1395c08becf1c409010f130c4abbd072b5cb69090e045e0099"
+    },
+    {
+      "path": "THIRD_PARTY_NOTICES.md",
+      "bytes": 2158,
+      "sha256": "ca26e06d2fef497c3ff6d50664b9601d7911fa69d19b28b4c82345ebcda608cb"
+    },
+    {
+      "path": "evidence/VALIDATION.md",
+      "bytes": 2939,
+      "sha256": "75198a47feceb9bb31c7f523701db1dd40286eec644dfe56c30636ce7aae1c75"
+    },
+    {
+      "path": "evidence/asset-verification.txt",
+      "bytes": 67,
+      "sha256": "5d4613f910fec58bb9f56356d7f7535691bfd8f5649f6693dd77709ce23bbfd3"
+    },
+    {
+      "path": "evidence/dependency-install.txt",
+      "bytes": 277,
+      "sha256": "56b4bab5b16d2bb2713a57483dba4a069e38be8553b168ae95c66210fafdcd1f"
+    },
+    {
+      "path": "evidence/native-syntax.txt",
+      "bytes": 249,
+      "sha256": "dc3d189daf49fd3bc29f706a880503d01eb4914b4aba07b6e8b0b77df399aa6c"
+    },
+    {
+      "path": "evidence/swift-red.txt",
+      "bytes": 5501,
+      "sha256": "97a28db521add7dcd7bf3ada8978df3712cda7d3cf859cf72fb0929ce8672d2f"
+    },
+    {
+      "path": "evidence/swift-tests.txt",
+      "bytes": 3579,
+      "sha256": "a8bd5c4af6ee97ec027de79cb087f50ca8ef297c36c6bb11d36dbc9e30eae7eb"
+    },
+    {
+      "path": "evidence/typescript-syntax.txt",
+      "bytes": 171,
+      "sha256": "d349d22758232bdd403fe60fa99c4ef2fd9387b7c29bead7c6e957eddd1a6b14"
+    },
+    {
+      "path": "evidence/web-red.txt",
+      "bytes": 9576,
+      "sha256": "c2225339d93383b5416be1871c51608bfe86312f265b15bff0f44974315948de"
+    },
+    {
+      "path": "evidence/web-tests.txt",
+      "bytes": 3545,
+      "sha256": "364bf70c417e925c8d979182c1d44f20200e566ad36077a11d92356b82c9d1ca"
+    },
+    {
+      "path": "integration-extras/pill-kit-ci.yml",
+      "bytes": 724,
+      "sha256": "053b19be8cfd837f99bf49d87ff98d8768dfa9cc47658311db1c2afc42d7a8ab"
+    },
+    {
+      "path": "native/Package.swift",
+      "bytes": 815,
+      "sha256": "5ff8c911e743c85e621de4d76069db72f33c5bc033ece03344f6c96f86a1ea40"
+    },
+    {
+      "path": "native/Sources/ImrsePillCore/ActivityWords.swift",
+      "bytes": 1381,
+      "sha256": "9e9bd0c9287158e8c7c950a010a5ad4c6502189afb1793f9d060e17a5c2dce4d"
+    },
+    {
+      "path": "native/Sources/ImrsePillCore/PillLifecycle.swift",
+      "bytes": 1473,
+      "sha256": "ac4f63a8d1f5a01fb30f9f5145565cd7116b8a14a9f7e79030b295e569e14b6d"
+    },
+    {
+      "path": "native/Sources/ImrsePillUI/ImrsePillView.swift",
+      "bytes": 3816,
+      "sha256": "c5f70f39fea5ac6bc6f143be69b5618bcf8f046a335a9ab211edbd98cba49934"
+    },
+    {
+      "path": "native/Sources/ImrsePillUI/PillModel.swift",
+      "bytes": 3816,
+      "sha256": "4016324e8824f06348da870448f29d2a911ba0bc7547ed52dc9c874e035bc5b1"
+    },
+    {
+      "path": "native/Sources/ImrsePillUI/PillPanelController.swift",
+      "bytes": 3654,
+      "sha256": "d03becebc1f3afa6de8626641ac48d306ad667c80f279df4dba061221d2c2dba"
+    },
+    {
+      "path": "native/Sources/ImrsePillUI/PillTokens.swift",
+      "bytes": 792,
+      "sha256": "612099823d3d851fb6500c8e6dc3a037d62d0f5a68ae7f8ad693fcf86cba1020"
+    },
+    {
+      "path": "native/Sources/ImrsePillUI/ProcessingLabel.swift",
+      "bytes": 1310,
+      "sha256": "7d0927cfc0f0fca54f2707dcb645e5dd706683e85147e8cc29f85a07fd2e7d99"
+    },
+    {
+      "path": "native/Sources/ImrsePillUI/Resources/spiral-fast.json",
+      "bytes": 1583,
+      "sha256": "1d2befa04d257fa0f66809db6259ee3002c9234f761866bc50011c91d613c0df"
+    },
+    {
+      "path": "native/Sources/ImrsePillUI/Resources/spiral-slow.json",
+      "bytes": 1584,
+      "sha256": "7ef679668dee3c7370922f7d3688fa4c53d8303fb2fff8f4747edc04debc416b"
+    },
+    {
+      "path": "native/Sources/ImrsePillUI/SpiralLoaderView.swift",
+      "bytes": 4908,
+      "sha256": "084afeefc524dfaef9e173965019f1edbebcaf3fb0d7a0f37c1ab818e5c6f26a"
+    },
+    {
+      "path": "native/Tests/ImrsePillCoreTests/ActivityWordsTests.swift",
+      "bytes": 1252,
+      "sha256": "4ee8acf2cdf2d4ed0ee0e524a1695d20dfa914441ce5eabb11d5570fe2e0f2b2"
+    },
+    {
+      "path": "native/Tests/ImrsePillCoreTests/PillLifecycleTests.swift",
+      "bytes": 1619,
+      "sha256": "3545a49c5d0a2acef5a8a666bfb83b95ba37774fed55929f5419a7735647e47c"
+    },
+    {
+      "path": "native/UNVERIFIED_MACOS.md",
+      "bytes": 1686,
+      "sha256": "b0f3f8ea8ee1f1f2258b00f416edc0bcc1b6d5eb95098c1d42568fcb4223d456"
+    },
+    {
+      "path": "reference/imrse-corrected-reference.png",
+      "bytes": 140387,
+      "sha256": "36d24b77e2a213ea7f01b452728ca81d5cfddad07c3e95d30427690ab9b9efba"
+    },
+    {
+      "path": "scripts/verify-assets.py",
+      "bytes": 990,
+      "sha256": "15750b596e55b6b277b4456a2a061c23433486f8242a0a791b27e7c22d3c4767"
+    },
+    {
+      "path": "upstream/LICENSE",
+      "bytes": 1065,
+      "sha256": "8bc26817d6b5c323f8cb5e5da77182fe0db8a5ad0e0b563903f9382bba06dc9a"
+    },
+    {
+      "path": "upstream/spiral-loader-data.ts",
+      "bytes": 3230,
+      "sha256": "6e90e646de678de9a8773e368c055d7c4f1a510e3011e7cab82d9137d6eed9a9"
+    },
+    {
+      "path": "upstream/spiral-loader.tsx",
+      "bytes": 3032,
+      "sha256": "275be5a0215e6daced2f49461b78eeda55fbe4c7fd82dc7016b24f1644091ce1"
+    },
+    {
+      "path": "web/browser-tests/pill.spec.ts",
+      "bytes": 3313,
+      "sha256": "54f0660b5205c21e88f1cddf36449edc08c87fbe50f96e765423c82be19affde"
+    },
+    {
+      "path": "web/next-env.d.ts",
+      "bytes": 81,
+      "sha256": "879741880b6ab48da99dcc06dcc674d381c9826137b0496bf7bb368f302de9fc"
+    },
+    {
+      "path": "web/next.config.mjs",
+      "bytes": 101,
+      "sha256": "f19e670ae8b9b6402901cab458cae6c2c51aa7c2aff56786c9a7553484533778"
+    },
+    {
+      "path": "web/package.json",
+      "bytes": 716,
+      "sha256": "70741e75f2c65dd73af319c2f719180676c149efcc172cc26c26c4fd9d62c1e8"
+    },
+    {
+      "path": "web/playwright.config.ts",
+      "bytes": 255,
+      "sha256": "44cf6fc5642812ee0137d56618db4f5e183c81e68baa5d13bdc6f4b4380113ce"
+    },
+    {
+      "path": "web/src/app/layout.tsx",
+      "bytes": 423,
+      "sha256": "402fb3b9d621ca2337e34f1cdd9d992345ec07cb900001d819fc52e1b839136b"
+    },
+    {
+      "path": "web/src/app/page.tsx",
+      "bytes": 4190,
+      "sha256": "dab498d3edffcf1423ed2f583b86d3bb5d0ca6551d45b9c12709b0c265ad1d87"
+    },
+    {
+      "path": "web/src/app/preview.css",
+      "bytes": 1463,
+      "sha256": "b44e44cb08257db52efaca5a4b7439b3a4e9e576aa59f87a67b243e73d6e4aef"
+    },
+    {
+      "path": "web/src/app/providers.tsx",
+      "bytes": 260,
+      "sha256": "98be6a99a9598c7c26955d56d9b9e1db1baea8291ae3f5eacdd034ee7d1fd744"
+    },
+    {
+      "path": "web/src/components/agent-elements/spiral-loader-data.ts",
+      "bytes": 3230,
+      "sha256": "6e90e646de678de9a8773e368c055d7c4f1a510e3011e7cab82d9137d6eed9a9"
+    },
+    {
+      "path": "web/src/components/agent-elements/spiral-loader.tsx",
+      "bytes": 3032,
+      "sha256": "275be5a0215e6daced2f49461b78eeda55fbe4c7fd82dc7016b24f1644091ce1"
+    },
+    {
+      "path": "web/src/components/imrse/imrse-pill.tsx",
+      "bytes": 3875,
+      "sha256": "96b4793f8674fa9136a2f08bfcbfa78bc945f9c3ac1594e5a89f59a0bed81856"
+    },
+    {
+      "path": "web/src/components/imrse/pill.css",
+      "bytes": 4002,
+      "sha256": "59d5a64f4cc2f2d99b327e227238db15a1eb8099032aa6a1dd4dae441e7ecae8"
+    },
+    {
+      "path": "web/src/components/imrse/processing-indicator.tsx",
+      "bytes": 2087,
+      "sha256": "55946ffca0cf8ee29bd929687d75a5c1ed2687e1a88d1662c013f29b8e052e0f"
+    },
+    {
+      "path": "web/src/components/imrse/use-motion.ts",
+      "bytes": 670,
+      "sha256": "330d302de8a0c5c1b1f89fdffeddea60ed7627274502e4d7dc451a299da3bdf1"
+    },
+    {
+      "path": "web/src/components/loading-ui/text-dots.tsx",
+      "bytes": 449,
+      "sha256": "c395cd469f7d5fdb429b0ffe32fde6af3949bdc35aa5ca6a520307ead1b767c6"
+    },
+    {
+      "path": "web/src/components/utils/cn.ts",
+      "bytes": 215,
+      "sha256": "ef156e46a7449fe48edb21ce83af3390ae11ff3338c8b6a15098104ac0bfff0c"
+    },
+    {
+      "path": "web/src/core/lifecycle.d.mts",
+      "bytes": 560,
+      "sha256": "9ed11b1593e56ffcfe4f0e9bc4d5a5494db7cd647bced247a9992794eac801ef"
+    },
+    {
+      "path": "web/src/core/lifecycle.mjs",
+      "bytes": 1421,
+      "sha256": "af0c7247474fbf039788dddd8342282a1b82b7a4d7e72c75a831910cc69b1aff"
+    },
+    {
+      "path": "web/tests/lifecycle.test.mjs",
+      "bytes": 2794,
+      "sha256": "241b8d0df59a6d5ea8126330b2ed40f3823dd2321a1ed67029ed5ab80f7e9fac"
+    },
+    {
+      "path": "web/tests/source.test.mjs",
+      "bytes": 1500,
+      "sha256": "2a26e667e0a88af38e0c6aa15a4075a7c97bb030dd5d4c2cd92e8f3579ae416d"
+    },
+    {
+      "path": "web/tsconfig.json",
+      "bytes": 679,
+      "sha256": "002f3dc1737c5dc35bbcf3a41d42ffdbd27f37a88a0ace94b3152918dfabce4c"
+    }
+  ]
+}
