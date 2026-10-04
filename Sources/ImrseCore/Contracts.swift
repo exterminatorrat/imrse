@@ -3,7 +3,10 @@ import Foundation
 public enum MotionPreference: String, Codable, CaseIterable, Sendable { case instant, quick, smooth, balanced, slow }
 public enum AppearancePreference: String, Codable, CaseIterable, Sendable { case system, light, dark }
 public enum ContextScope: String, Codable, Sendable { case selection }
-public enum ProviderKind: String, Codable, CaseIterable, Sendable { case openAI, openAIChatGPT, openRouter, managedLocal, compatible }
+public enum ProviderKind: String, Codable, CaseIterable, Sendable {
+    case openAI, openAIChatGPT, openRouter, managedLocal, compatible
+    case anthropic, openRouterAccount, huggingFaceAccount, githubCopilot
+}
 public enum ReplacementStrategy: String, Codable, Sendable { case selectedText, valueRange, clipboard }
 public enum ReasoningEffortRequestFormat: String, Codable, Sendable {
     case chatCompletionsField
@@ -44,7 +47,7 @@ public struct ReasoningEffortCapabilities: Codable, Equatable, Sendable {
             return requestFormat == .chatCompletionsObject
         case .openAI, .compatible:
             return requestFormat != .responsesObject
-        case .managedLocal:
+        case .managedLocal, .anthropic, .openRouterAccount, .huggingFaceAccount, .githubCopilot:
             return false
         }
     }
@@ -96,6 +99,7 @@ public struct ProviderConfiguration: Codable, Equatable, Identifiable, Sendable 
     public var requiresCredential: Bool
     public var reasoningEffort: String?
     public var reasoningEffortCapabilities: ReasoningEffortCapabilities?
+    public var oauthClientID: String?
     public init(
         id: String,
         name: String,
@@ -104,12 +108,14 @@ public struct ProviderConfiguration: Codable, Equatable, Identifiable, Sendable 
         model: String,
         requiresCredential: Bool = true,
         reasoningEffort: String? = nil,
-        reasoningEffortCapabilities: ReasoningEffortCapabilities? = nil
+        reasoningEffortCapabilities: ReasoningEffortCapabilities? = nil,
+        oauthClientID: String? = nil
     ) {
         self.id = id; self.name = name; self.kind = kind; self.endpoint = endpoint
         self.model = model; self.requiresCredential = requiresCredential
         self.reasoningEffort = reasoningEffort
         self.reasoningEffortCapabilities = reasoningEffortCapabilities
+        self.oauthClientID = oauthClientID
     }
 
     public var activeReasoningEffort: (effort: String, format: ReasoningEffortRequestFormat)? {
@@ -254,6 +260,9 @@ public enum ImrseError: String, Error, Codable, CaseIterable, Sendable {
     case noSelection, secureInput, selectionTooLarge, instructionTooLarge
     case targetLost, staleSelection, replacementFailed, clipboardFailed, undoUnavailable
     case providerUnavailable, localModelUnavailable, authentication, missingCredentials
+    case accountNotConnected, accountAuthentication
+    case copilotRuntimeUnavailable, copilotRuntimeIncompatible, copilotAuthentication
+    case copilotPermissionDenied, copilotToolDenied
     case rateLimited, timeout, network, server, malformedResponse, interruptedStream
     case emptyOutput, outputTooLarge, invalidConfiguration, missingModel, invalidPreset
     case permissionRequired, shortcutConflict, cancelled
@@ -273,6 +282,13 @@ public enum ImrseError: String, Error, Codable, CaseIterable, Sendable {
         case .localModelUnavailable: "The local model is unavailable"
         case .authentication: "Check this provider's API key"
         case .missingCredentials: "Add an API key in Settings"
+        case .accountNotConnected: "Connect this provider account in Settings"
+        case .accountAuthentication: "Reconnect this provider account in Settings"
+        case .copilotRuntimeUnavailable: "Install or select a GitHub Copilot runtime"
+        case .copilotRuntimeIncompatible: "Update the GitHub Copilot runtime to a compatible version"
+        case .copilotAuthentication: "Reconnect GitHub and confirm this account has Copilot access"
+        case .copilotPermissionDenied: "This request needs a permission that Imrse does not allow"
+        case .copilotToolDenied: "This runtime requested a tool, which Imrse does not allow"
         case .rateLimited: "The provider is busy. Try again shortly"
         case .timeout: "The model took too long. Try again"
         case .network: "Couldn't reach the model"

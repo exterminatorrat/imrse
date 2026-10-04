@@ -56,17 +56,34 @@ enum ProviderValidation {
         guard isValidIdentifier(provider.id)
             && isValidName(provider.name)
             && isValidModel(provider.model)
+            && (provider.oauthClientID.map(isValidOAuthClientID) ?? true)
             && (provider.reasoningEffort.map(isValidReasoningEffort) ?? true)
             && (provider.reasoningEffortCapabilities.map(isValidReasoningEffortCapabilities) ?? true)
         else { return false }
         switch provider.kind {
         case .managedLocal:
             return provider.endpoint == URL(string: "imrse-local://models") && !provider.requiresCredential
+                && provider.oauthClientID == nil
         case .openAIChatGPT:
             return provider.endpoint == URL(string: "https://api.openai.com/v1") && provider.requiresCredential
+                && provider.oauthClientID == nil
         case .openAI, .openRouter, .compatible:
-            return isValidEndpoint(provider.endpoint)
+            return isValidEndpoint(provider.endpoint) && provider.oauthClientID == nil
+        case .anthropic:
+            return provider.endpoint == URL(string: "https://api.anthropic.com/v1") && provider.requiresCredential
+                && provider.oauthClientID == nil
+        case .openRouterAccount:
+            return provider.endpoint == URL(string: "https://openrouter.ai/api/v1") && provider.requiresCredential
+                && provider.oauthClientID == nil
+        case .huggingFaceAccount:
+            return provider.endpoint == URL(string: "https://router.huggingface.co/v1") && provider.requiresCredential
+        case .githubCopilot:
+            return provider.endpoint == URL(string: "https://api.githubcopilot.com") && provider.requiresCredential
         }
+    }
+
+    static func isAccount(_ provider: ProviderConfiguration) -> Bool {
+        [.openAIChatGPT, .openRouterAccount, .huggingFaceAccount, .githubCopilot].contains(provider.kind)
     }
 
     static func isLocal(_ provider: ProviderConfiguration) -> Bool {
@@ -121,6 +138,10 @@ enum ProviderValidation {
     static func isValidModel(_ value: String) -> Bool {
         let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
         return !trimmed.isEmpty && trimmed.utf8.count <= 256 && !containsControlCharacters(value, allowingNewlines: false)
+    }
+
+    private static func isValidOAuthClientID(_ value: String) -> Bool {
+        !value.isEmpty && value.utf8.count <= 256 && value.utf8.allSatisfy { (33...126).contains($0) }
     }
 
     private static func isValidReasoningEffort(_ value: String) -> Bool {

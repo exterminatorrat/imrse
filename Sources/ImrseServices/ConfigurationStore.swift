@@ -148,7 +148,7 @@ public struct ConfigurationStore: Sendable {
                         provider,
                         allowed: [
                             "id", "name", "kind", "endpoint", "model", "requiresCredential",
-                            "reasoningEffort", "reasoningEffortCapabilities"
+                            "reasoningEffort", "reasoningEffortCapabilities", "oauthClientID"
                         ],
                         failure: .invalidConfiguration
                     )

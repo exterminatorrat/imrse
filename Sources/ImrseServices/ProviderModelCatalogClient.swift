@@ -20,7 +20,7 @@ public struct ProviderModelCatalogClient: Sendable {
     public func reasoningEffortCapabilities(for provider: ProviderConfiguration) async throws -> ReasoningEffortCapabilities? {
         guard [.openAI, .openRouter, .compatible].contains(provider.kind) else { return nil }
         try ProviderValidation.validate(provider)
-        guard let url = Self.modelsURL(for: provider.endpoint) else { throw ImrseError.invalidConfiguration }
+        guard let url = Self.modelsURL(for: provider) else { return nil }
 
         let isPublicOpenRouterCatalog = provider.kind == .openRouter
             && URLComponents(url: provider.endpoint, resolvingAgainstBaseURL: false)?.host?.lowercased() == "openrouter.ai"
@@ -124,7 +124,17 @@ public struct ProviderModelCatalogClient: Sendable {
         value.range(of: "^[A-Za-z][A-Za-z0-9_-]{0,31}$", options: .regularExpression) != nil
     }
 
-    private static func modelsURL(for endpoint: URL) -> URL? {
+    private static func modelsURL(for provider: ProviderConfiguration) -> URL? {
+        if let descriptor = OfficialAPIProviderCatalog.descriptors.first(where: { $0.endpoint == provider.endpoint }) {
+            if descriptor.id == "gemini" { return nil }
+            if descriptor.id == "deepseek" {
+                guard var components = URLComponents(url: provider.endpoint, resolvingAgainstBaseURL: false) else { return nil }
+                components.path = "/models"
+                return components.url
+            }
+        }
+
+        let endpoint = provider.endpoint
         guard var components = URLComponents(url: endpoint, resolvingAgainstBaseURL: false) else { return nil }
         var path = components.path
         while path.count > 1 && path.hasSuffix("/") { path.removeLast() }

@@ -11,17 +11,20 @@ public struct OpenAICompatibleProvider: TextProvider, Sendable {
     private let transport: any StreamingHTTPTransport
     private let timeout: TimeInterval
     private let maximumOutputBytes: Int
+    private let requireSuccessfulStreamTerminator: Bool
 
     public init(
         credentials: any CredentialStore,
         transport: any StreamingHTTPTransport = URLSessionHTTPTransport(),
         timeout: TimeInterval = 60,
-        maximumOutputBytes: Int = 1_000_000
+        maximumOutputBytes: Int = 1_000_000,
+        requireSuccessfulStreamTerminator: Bool = false
     ) {
         self.credentials = credentials
         self.transport = transport
         self.timeout = timeout.isFinite ? min(max(timeout, 1), 300) : 60
         self.maximumOutputBytes = min(max(maximumOutputBytes, 1), Self.maximumAllowedOutputBytes)
+        self.requireSuccessfulStreamTerminator = requireSuccessfulStreamTerminator
     }
 
     public func stream(_ request: TransformationRequest) async throws -> AsyncThrowingStream<String, any Error> {
@@ -81,7 +84,7 @@ public struct OpenAICompatibleProvider: TextProvider, Sendable {
     }
 
     private func makeRequest(_ request: TransformationRequest) throws -> URLRequest {
-        guard let url = Self.completionsURL(for: request.provider.endpoint) else { throw ImrseError.invalidConfiguration }
+        guard let url = Self.completionsURL(for: request.provider) else { throw ImrseError.invalidConfiguration }
         let body = ChatCompletionRequest(
             model: request.provider.model,
             messages: [
@@ -124,6 +127,7 @@ public struct OpenAICompatibleProvider: TextProvider, Sendable {
         var responseBytes = 0
         var outputBytes = 0
         var completed = false
+        var sawSuccessfulFinishReason = false
         var responseMetadata: ResponseMetadata?
 
         for try await chunk in exchange.body {
@@ -137,6 +141,7 @@ public struct OpenAICompatibleProvider: TextProvider, Sendable {
                     providerKind: request.provider.kind,
                     outputBytes: &outputBytes,
                     completed: &completed,
+                    sawSuccessfulFinishReason: &sawSuccessfulFinishReason,
                     responseMetadata: &responseMetadata,
                     continuation: continuation
                 ) {
@@ -153,6 +158,7 @@ public struct OpenAICompatibleProvider: TextProvider, Sendable {
                     providerKind: request.provider.kind,
                     outputBytes: &outputBytes,
                     completed: &completed,
+                    sawSuccessfulFinishReason: &sawSuccessfulFinishReason,
                     responseMetadata: &responseMetadata,
                     continuation: continuation
                 ) {
@@ -161,6 +167,9 @@ public struct OpenAICompatibleProvider: TextProvider, Sendable {
             }
         }
         guard completed else { throw ImrseError.interruptedStream }
+        if requireSuccessfulStreamTerminator && !sawSuccessfulFinishReason {
+            throw ImrseError.interruptedStream
+        }
         guard outputBytes > 0 else { throw ImrseError.emptyOutput }
         try Task.checkCancellation()
         if let responseMetadata { await request.reportResponseMetadata?(responseMetadata) }
@@ -171,6 +180,7 @@ public struct OpenAICompatibleProvider: TextProvider, Sendable {
         providerKind: ProviderKind,
         outputBytes: inout Int,
         completed: inout Bool,
+        sawSuccessfulFinishReason: inout Bool,
         responseMetadata: inout ResponseMetadata?,
         continuation: AsyncThrowingStream<String, any Error>.Continuation
     ) throws -> Bool {
@@ -206,6 +216,9 @@ public struct OpenAICompatibleProvider: TextProvider, Sendable {
         for choice in choices {
             if let delta = choice["delta"] as? [String: Any], let content = delta["content"] {
                 if let text = content as? String {
+                    if requireSuccessfulStreamTerminator, sawSuccessfulFinishReason, !text.isEmpty {
+                        throw ImrseError.interruptedStream
+                    }
                     outputBytes += text.utf8.count
                     guard outputBytes <= maximumOutputBytes else { throw ImrseError.outputTooLarge }
                     if !text.isEmpty {
@@ -221,7 +234,8 @@ public struct OpenAICompatibleProvider: TextProvider, Sendable {
             if let finishReason = choice["finish_reason"], !(finishReason is NSNull) {
                 guard let reason = finishReason as? String else { throw ImrseError.malformedResponse }
                 guard reason == "stop" else { throw ImrseError.interruptedStream }
-                completed = true
+                sawSuccessfulFinishReason = true
+                if !requireSuccessfulStreamTerminator { completed = true }
             }
         }
         return completed
@@ -245,14 +259,17 @@ public struct OpenAICompatibleProvider: TextProvider, Sendable {
         return .network
     }
 
-    private static func completionsURL(for endpoint: URL) -> URL? {
-        guard var components = URLComponents(url: endpoint, resolvingAgainstBaseURL: false) else { return nil }
+    private static func completionsURL(for provider: ProviderConfiguration) -> URL? {
+        guard var components = URLComponents(url: provider.endpoint, resolvingAgainstBaseURL: false) else { return nil }
         var path = components.path
         while path.count > 1 && path.hasSuffix("/") { path.removeLast() }
         if path.hasSuffix("/chat/completions") {
             components.path = path
         } else if path == "/" || path.isEmpty {
-            components.path = "/v1/chat/completions"
+            let deepSeekEndpoint = OfficialAPIProviderCatalog.descriptors.contains {
+                $0.id == "deepseek" && $0.endpoint == provider.endpoint
+            }
+            components.path = deepSeekEndpoint ? "/chat/completions" : "/v1/chat/completions"
         } else if path.hasSuffix("/v1") {
             components.path = path + "/chat/completions"
         } else {

@@ -8,7 +8,11 @@ final class ProviderSettingsPresentationTests: XCTestCase {
     func testAddProviderOptionsIncludeEverySupportedContext() {
         XCTAssertEqual(
             ModelProviderSection.allCases,
-            [.local, .chatGPTAccount, .openAIAPI, .openRouter, .custom]
+            [
+                .local, .chatGPTAccount, .openRouterAccount, .huggingFaceAccount, .githubCopilot,
+                .openAIAPI, .openRouter, .anthropicAPI, .deepSeekAPI, .geminiAPI, .xAIAPI,
+                .mistralAPI, .togetherAPI, .fireworksAPI, .cerebrasAPI, .custom
+            ]
         )
     }
 

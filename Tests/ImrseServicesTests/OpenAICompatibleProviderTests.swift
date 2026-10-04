@@ -70,6 +70,85 @@ final class OpenAICompatibleProviderTests: XCTestCase {
         XCTAssertEqual(reports.values, [ResponseMetadata(detectedModel: "openai/gpt-6.1")])
     }
 
+    @MainActor
+    func testStrictTerminationAccountsForTrailingUsageBeforeDone() async throws {
+        let body = [
+            #"data: {"model":"openai/gpt-6.1","choices":[{"delta":{"content":"Done"},"finish_reason":"stop"}]}"#,
+            #"data: {"choices":[],"usage":{"prompt_tokens":10,"completion_tokens":4,"total_tokens":14,"cost":0.00014}}"#,
+            "data: [DONE]"
+        ].joined(separator: "\n\n") + "\n\n"
+        let provider = OpenAICompatibleProvider(
+            credentials: StubCredentials(value: "test-key"),
+            transport: StubTransport(exchange: exchange(status: 200, chunks: [Data(body.utf8)])),
+            requireSuccessfulStreamTerminator: true
+        )
+        let reports = ResponseMetadataReports()
+        let metadataCallback: @MainActor @Sendable (ResponseMetadata) -> Void = { reports.values.append($0) }
+
+        let output = try await collect(provider, request: request(kind: .openRouter, reportResponseMetadata: metadataCallback))
+
+        XCTAssertEqual(output, "Done")
+        XCTAssertEqual(reports.values, [ResponseMetadata(
+            detectedModel: "openai/gpt-6.1",
+            inputTokens: 10,
+            outputTokens: 4,
+            totalTokens: 14,
+            costUSD: 0.00014
+        )])
+    }
+
+    func testStrictTerminationRequiresBothStopAndDone() async throws {
+        let bodies = [
+            "data: {\"choices\":[{\"delta\":{\"content\":\"Done\"},\"finish_reason\":\"stop\"}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"content\":\"Done\"},\"finish_reason\":null}]}\n\ndata: [DONE]\n\n"
+        ]
+
+        for body in bodies {
+            let provider = OpenAICompatibleProvider(
+                credentials: StubCredentials(value: "test-key"),
+                transport: StubTransport(exchange: exchange(status: 200, chunks: [Data(body.utf8)])),
+                requireSuccessfulStreamTerminator: true
+            )
+            await assertError(.interruptedStream) {
+                _ = try await collect(provider, request: request())
+            }
+        }
+    }
+
+    func testStrictTerminationRejectsContentAfterStop() async throws {
+        let body = [
+            #"data: {"choices":[{"delta":{"content":"Done"},"finish_reason":"stop"}]}"#,
+            #"data: {"choices":[{"delta":{"content":"late"},"finish_reason":null}]}"#,
+            "data: [DONE]"
+        ].joined(separator: "\n\n") + "\n\n"
+        let provider = OpenAICompatibleProvider(
+            credentials: StubCredentials(value: "test-key"),
+            transport: StubTransport(exchange: exchange(status: 200, chunks: [Data(body.utf8)])),
+            requireSuccessfulStreamTerminator: true
+        )
+
+        await assertError(.interruptedStream) {
+            _ = try await collect(provider, request: request())
+        }
+    }
+
+    func testStrictTerminationRejectsErrorAfterStop() async throws {
+        let body = [
+            #"data: {"choices":[{"delta":{"content":"Done"},"finish_reason":"stop"}]}"#,
+            #"data: {"error":{"message":"late failure"}}"#,
+            "data: [DONE]"
+        ].joined(separator: "\n\n") + "\n\n"
+        let provider = OpenAICompatibleProvider(
+            credentials: StubCredentials(value: "test-key"),
+            transport: StubTransport(exchange: exchange(status: 200, chunks: [Data(body.utf8)])),
+            requireSuccessfulStreamTerminator: true
+        )
+
+        await assertError(.server) {
+            _ = try await collect(provider, request: request())
+        }
+    }
+
     func testMultipleChoicesCannotBeCombinedIntoOneReplacement() async throws {
         let body = "data: {\"choices\":[{\"delta\":{\"content\":\"first\"},\"finish_reason\":\"stop\"},{\"delta\":{\"content\":\"second\"},\"finish_reason\":\"stop\"}]}\n\n"
         let provider = OpenAICompatibleProvider(

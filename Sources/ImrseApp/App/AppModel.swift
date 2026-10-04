@@ -45,6 +45,46 @@ protocol AppModelChatGPTSignInCoordinating: AnyObject {
 extension OpenAIChatGPTSignInCoordinator: AppModelChatGPTSignInCoordinating {}
 
 @MainActor
+protocol AppModelOfficialAccountSignInCoordinating: AnyObject {
+    func prepareCallback() async throws -> URL
+    func openAndWait(for authorizationURL: URL, timeout: Duration) async throws -> URL
+    func openDeviceVerificationPage(for url: URL) -> Bool
+    func cancel()
+}
+
+extension OfficialAccountSignInCoordinator: AppModelOfficialAccountSignInCoordinating {}
+
+protocol AppModelOfficialAccountClient: Actor {
+    func beginAuthorization(for provider: ProviderConfiguration, redirectURI: URL?) async throws -> OfficialAccountAuthorizationStart
+    func completeAuthorization(for provider: ProviderConfiguration, callbackURL: URL) async throws -> OfficialAccountConnectionStatus
+    func completeDeviceAuthorization(for provider: ProviderConfiguration, attemptID: UUID) async throws -> OfficialAccountConnectionStatus
+    func cancelAuthorizationAndWait(for provider: ProviderConfiguration, attemptID: UUID?) async
+    func connectionStatus(for provider: ProviderConfiguration) async throws -> OfficialAccountConnectionStatus
+    func availableModels(for provider: ProviderConfiguration) async throws -> [OfficialAccountModel]
+    func disconnect(for provider: ProviderConfiguration) async throws
+}
+
+extension OfficialAccountClient: AppModelOfficialAccountClient {
+    func cancelAuthorizationAndWait(for provider: ProviderConfiguration, attemptID: UUID?) async {
+        cancelAuthorization(for: provider, attemptID: attemptID)
+    }
+}
+
+private struct OfficialAccountProviderBinding: Equatable {
+    let id: String
+    let kind: ProviderKind
+    let endpoint: URL
+    let clientID: String?
+
+    init(_ provider: ProviderConfiguration) {
+        id = provider.id
+        kind = provider.kind
+        endpoint = provider.endpoint
+        clientID = provider.oauthClientID
+    }
+}
+
+@MainActor
 protocol ShortcutMonitoring: AnyObject {
     var isMonitoring: Bool { get }
     func start(
@@ -88,6 +128,16 @@ final class AppModel: ObservableObject {
     @Published private(set) var isConnectingChatGPT = false
     @Published private(set) var isDisconnectingChatGPT = false
     @Published private(set) var isRefreshingChatGPTAccount = false
+    @Published private(set) var officialAccountStatuses: [String: OfficialAccountConnectionStatus] = [:]
+    @Published private(set) var officialAccountModels: [String: [OfficialAccountModel]] = [:]
+    @Published private(set) var officialAccountIssues: [String: String] = [:]
+    @Published private(set) var officialAccountRefreshingProviderID: String?
+    @Published private(set) var officialAccountSigningInProviderID: String?
+    @Published private(set) var officialAccountDisconnectingProviderIDs: Set<String> = []
+    @Published private(set) var officialAccountSignInCancellationRequestedProviderID: String?
+    @Published private(set) var officialAccountDeviceCode: String?
+    @Published private(set) var officialAccountDeviceVerificationURL: URL?
+    @Published private(set) var officialAccountDeviceCodeExpiresAt: Date?
     @Published private(set) var managedLocalModelSnapshots: [ManagedLocalModelSnapshot] = []
     @Published private(set) var managedLocalModelDownloadID: String?
     @Published private(set) var managedLocalModelProgress: ManagedLocalModelProgress?
@@ -104,11 +154,26 @@ final class AppModel: ObservableObject {
     private var terminationRequested = false
     private let connectedChatGPTProviderID: String
     private let openAIAccountClient: (any AppModelOpenAIAccountClient)?
+    private let officialAccountClient: (any AppModelOfficialAccountClient)?
+    private var officialAccountStatusBindings: [String: OfficialAccountProviderBinding] = [:]
     private let providerModelCatalogClient: any AppModelProviderModelCatalogClient
     private let chatGPTSignInCoordinator: (any AppModelChatGPTSignInCoordinating)?
+    private let officialAccountSignInCoordinator: (any AppModelOfficialAccountSignInCoordinating)?
+    private let copilotRuntime: (any CopilotRuntime)?
     private let managedLocalModelStore: ManagedLocalModelStore?
     private var accountStatusRefreshTask: Task<Void, Never>?
     private var chatGPTSignInTask: Task<Void, Never>?
+    private var officialAccountStatusRefreshTask: Task<Void, Never>?
+    private var officialAccountStatusRefreshSessionID: UUID?
+    private var officialAccountStatusRefreshTaskID: UUID?
+    private var officialAccountSignInTask: Task<Void, Never>?
+    private var officialAccountSignInSessionID: UUID?
+    private var officialAccountAttemptID: UUID?
+    private var officialAccountSignInProvider: ProviderConfiguration?
+    private var officialAccountDisconnectTasks: [String: Task<Void, Never>] = [:]
+    private var officialAccountDisconnectTaskIDs: [String: UUID] = [:]
+    private var officialAccountOperationIDs: Set<UUID> = []
+    private var officialAccountDeletionProviderIDs: Set<String> = []
     private var managedLocalModelOperationTask: Task<Void, Never>?
     private var managedLocalModelOperationSessionID: UUID?
     private var chatGPTSignInSessionID: UUID?
@@ -197,6 +262,9 @@ final class AppModel: ObservableObject {
         accountClient: OpenAIAccountClient? = nil,
         accountOperations: (any AppModelOpenAIAccountClient)? = nil,
         signInCoordinator: (any AppModelChatGPTSignInCoordinating)? = nil,
+        officialAccountClient: OfficialAccountClient? = nil,
+        officialAccountOperations: (any AppModelOfficialAccountClient)? = nil,
+        officialAccountSignInCoordinator: (any AppModelOfficialAccountSignInCoordinating)? = nil,
         providerModelCatalog: (any AppModelProviderModelCatalogClient)? = nil
     ) {
         self.init(
@@ -210,6 +278,9 @@ final class AppModel: ObservableObject {
             accountClientOverride: accountClient,
             accountOperationsOverride: accountOperations,
             signInCoordinatorOverride: signInCoordinator,
+            officialAccountClientOverride: officialAccountClient,
+            officialAccountOperationsOverride: officialAccountOperations,
+            officialAccountSignInCoordinatorOverride: officialAccountSignInCoordinator,
             providerModelCatalogOverride: providerModelCatalog
         )
     }
@@ -230,6 +301,9 @@ final class AppModel: ObservableObject {
         accountClientOverride: OpenAIAccountClient? = nil,
         accountOperationsOverride: (any AppModelOpenAIAccountClient)? = nil,
         signInCoordinatorOverride: (any AppModelChatGPTSignInCoordinating)? = nil,
+        officialAccountClientOverride: OfficialAccountClient? = nil,
+        officialAccountOperationsOverride: (any AppModelOfficialAccountClient)? = nil,
+        officialAccountSignInCoordinatorOverride: (any AppModelOfficialAccountSignInCoordinating)? = nil,
         providerModelCatalogOverride: (any AppModelProviderModelCatalogClient)? = nil
     ) {
         let store = configurationStoreOverride ?? ConfigurationStore(root: Self.applicationSupportURL)
@@ -278,13 +352,45 @@ final class AppModel: ObservableObject {
             accountClient = accountOperationsOverride ?? accountClientOverride
             signInCoordinator = signInCoordinatorOverride
         }
+        let runtimeOfficialAccountClient: OfficialAccountClient?
+        let officialAccountOperationsClient: (any AppModelOfficialAccountClient)?
+        let officialAccountSignInCoordinator: (any AppModelOfficialAccountSignInCoordinating)?
+        if !isPreviewMode && engineOverride == nil {
+            runtimeOfficialAccountClient = officialAccountClientOverride ?? OfficialAccountClient(credentials: credentialStore)
+            officialAccountOperationsClient = officialAccountOperationsOverride ?? runtimeOfficialAccountClient
+            officialAccountSignInCoordinator = officialAccountSignInCoordinatorOverride ?? OfficialAccountSignInCoordinator()
+        } else {
+            runtimeOfficialAccountClient = officialAccountClientOverride
+            officialAccountOperationsClient = officialAccountOperationsOverride ?? officialAccountClientOverride
+            officialAccountSignInCoordinator = officialAccountSignInCoordinatorOverride
+        }
+        let copilotRuntime: (any CopilotRuntime)?
+        if !isPreviewMode, engineOverride == nil, let executableURL = Self.copilotRuntimeExecutableURL() {
+            copilotRuntime = CopilotProcessRuntime(executableURL: executableURL)
+        } else {
+            copilotRuntime = nil
+        }
         let compatibleProvider = OpenAICompatibleProvider(credentials: credentialStore)
+        let anthropicProvider = AnthropicTextProvider(credentials: credentialStore)
         let accountProvider = runtimeAccountClient.map { OpenAIResponsesTextProvider(accountClient: $0) }
+        let officialAccountProvider = runtimeOfficialAccountClient.map { OfficialAccountTextProvider(accountClient: $0) }
+        let copilotProvider: CopilotTextProvider?
+        if let runtimeOfficialAccountClient, let copilotRuntime {
+            copilotProvider = CopilotTextProvider(
+                accountClient: runtimeOfficialAccountClient,
+                runtime: copilotRuntime
+            )
+        } else {
+            copilotProvider = nil
+        }
         let localProvider = managedLocalModelStore.map { ManagedLocalTextProvider(store: $0) }
         let dispatchProvider = ProviderDispatchProvider(
             compatible: compatibleProvider,
             account: accountProvider,
-            local: localProvider
+            local: localProvider,
+            anthropic: anthropicProvider,
+            officialAccount: officialAccountProvider,
+            copilot: copilotProvider
         )
         let textProvider = RoutedTextProvider(primary: dispatchProvider)
         let engine = engineOverride ?? TransformationEngine(selectionAccess: selectionAccess, textProvider: textProvider)
@@ -311,8 +417,11 @@ final class AppModel: ObservableObject {
         self.configurationIssue = issue
         self.connectedChatGPTProviderID = connectedChatGPTProviderID
         self.openAIAccountClient = accountClient
+        self.officialAccountClient = officialAccountOperationsClient
         self.providerModelCatalogClient = providerModelCatalogOverride ?? ProviderModelCatalogClient(credentials: credentialStore)
         self.chatGPTSignInCoordinator = signInCoordinator
+        self.officialAccountSignInCoordinator = officialAccountSignInCoordinator
+        self.copilotRuntime = copilotRuntime
         self.managedLocalModelStore = managedLocalModelStore
         self.allowsGlobalShortcutMonitoring = !isPreviewMode
             && ((loadSettingsFromDisk && engineOverride == nil) || shortcutMonitorOverride != nil)
@@ -455,6 +564,8 @@ final class AppModel: ObservableObject {
         isTerminating = true
         accountStatusRefreshTask?.cancel()
         accountStatusRefreshTask = nil
+        cancelOfficialAccountStatusRefresh()
+        cancelOfficialAccountSignIn()
         cancelChatGPTSignIn()
         let localModelOperationPending = managedLocalModelOperationTask != nil
         if managedLocalModelDownloadID != nil { managedLocalModelOperationTask?.cancel() }
@@ -480,12 +591,28 @@ final class AppModel: ObservableObject {
             terminationReplies.append(reply)
             return .terminateLater
         }
+        if !officialAccountOperationIDs.isEmpty || !officialAccountDeletionProviderIDs.isEmpty {
+            terminationReplies.append(reply)
+            return .terminateLater
+        }
         return .terminateNow
     }
 
     func saveConfiguration(_ updated: AppConfiguration) throws {
         try ensureWritableConfiguration()
         try ensureSettingsCanChange()
+        guard !updated.providers.contains(where: { officialAccountDeletionProviderIDs.contains($0.id) }) else {
+            throw AppSettingsError.officialAccountOperationInProgress
+        }
+        if let activeProvider = officialAccountSignInProvider {
+            guard let replacement = updated.providers.first(where: { $0.id == activeProvider.id }),
+                  OfficialAccountProviderBinding(replacement) == OfficialAccountProviderBinding(activeProvider)
+            else { throw AppSettingsError.officialAccountOperationInProgress }
+        }
+        try persistConfiguration(updated)
+    }
+
+    private func persistConfiguration(_ updated: AppConfiguration) throws {
         let previous = configuration
         try configurationStore.save(updated)
         configuration = updated
@@ -497,6 +624,21 @@ final class AppModel: ObservableObject {
         applyPendingRuntimeSettingsIfSafe()
     }
 
+    private func restoreAccountProviderAfterRemovalFailure(
+        _ provider: ProviderConfiguration,
+        wasSelectedProvider: Bool
+    ) throws {
+        try ensureWritableConfiguration()
+        var updated = configuration
+        if !updated.providers.contains(where: { $0.id == provider.id }) {
+            updated.providers.append(provider)
+        }
+        if wasSelectedProvider, updated.selectedProviderID == nil {
+            updated.selectedProviderID = provider.id
+        }
+        try persistConfiguration(updated)
+    }
+
     func saveDefaultInstruction(_ instruction: String) throws {
         try ensureWritableConfiguration()
         try ensureSettingsCanChange()
@@ -506,7 +648,11 @@ final class AppModel: ObservableObject {
     }
 
     func saveProvider(_ provider: ProviderConfiguration) throws {
+        guard !Self.isOfficialAccountProvider(provider.kind) || provider.model != Self.unselectedOfficialAccountModelID else {
+            throw AppSettingsError.providerModelNotSelected
+        }
         var updated = configuration
+        let previous = updated.providers.first(where: { $0.id == provider.id })
         if let index = updated.providers.firstIndex(where: { $0.id == provider.id }) {
             updated.providers[index] = provider
         } else {
@@ -514,7 +660,392 @@ final class AppModel: ObservableObject {
         }
         updated.selectedProviderID = provider.id
         try saveConfiguration(updated)
+        invalidateOfficialAccountStateIfBindingChanged(from: previous, to: provider)
     }
+
+    func saveOfficialAccountRegistration(_ provider: ProviderConfiguration) throws {
+        try ensureWritableConfiguration()
+        try ensureSettingsCanChange()
+        guard Self.isOfficialAccountProvider(provider.kind) else { throw ImrseError.invalidConfiguration }
+        var updated = configuration
+        let previous = updated.providers.first(where: { $0.id == provider.id })
+        if let index = updated.providers.firstIndex(where: { $0.id == provider.id }) {
+            updated.providers[index] = provider
+        } else {
+            updated.providers.append(provider)
+        }
+        try saveConfiguration(updated)
+        invalidateOfficialAccountStateIfBindingChanged(from: previous, to: provider)
+    }
+
+    func officialAccountStatus(for provider: ProviderConfiguration) -> OfficialAccountConnectionStatus? {
+        guard isCurrentOfficialAccountBinding(provider),
+              officialAccountStatusBindings[provider.id] == OfficialAccountProviderBinding(provider)
+        else { return nil }
+        return officialAccountStatuses[provider.id]
+    }
+
+    func officialAccountModels(for provider: ProviderConfiguration) -> [OfficialAccountModel] {
+        guard isCurrentOfficialAccountBinding(provider),
+              officialAccountStatusBindings[provider.id] == OfficialAccountProviderBinding(provider)
+        else { return [] }
+        return officialAccountModels[provider.id] ?? []
+    }
+
+    func officialAccountIssue(for provider: ProviderConfiguration) -> String? {
+        guard officialAccountStatusBindings[provider.id] == OfficialAccountProviderBinding(provider)
+        else { return nil }
+        return officialAccountIssues[provider.id]
+    }
+
+    func connectOfficialAccount(_ provider: ProviderConfiguration) {
+        guard canChangeSettings,
+              Self.isOfficialAccountProvider(provider.kind),
+              !isConnectingOfficialAccount(for: provider.id),
+              !isDisconnectingOfficialAccount(for: provider.id),
+              !officialAccountDeletionProviderIDs.contains(provider.id),
+              officialAccountSignInTask == nil,
+              let officialAccountClient,
+              let officialAccountSignInCoordinator
+        else { return }
+
+        do {
+            try saveOfficialAccountRegistration(provider)
+        } catch {
+            officialAccountIssues[provider.id] = Self.userMessage(for: error)
+            officialAccountStatusBindings[provider.id] = OfficialAccountProviderBinding(provider)
+            return
+        }
+
+        cancelOfficialAccountStatusRefresh(for: provider.id)
+        let sessionID = UUID()
+        officialAccountSignInSessionID = sessionID
+        officialAccountSigningInProviderID = provider.id
+        officialAccountSignInProvider = provider
+        officialAccountAttemptID = nil
+        officialAccountDeviceCode = nil
+        officialAccountDeviceVerificationURL = nil
+        officialAccountDeviceCodeExpiresAt = nil
+        officialAccountSignInCancellationRequestedProviderID = nil
+        setOfficialAccountIssue(nil, for: provider)
+        officialAccountOperationIDs.insert(sessionID)
+        let signInTask = Task { [weak self] in
+            var attemptID: UUID?
+            defer { self?.finishOfficialAccountSignIn(sessionID: sessionID) }
+            do {
+                let redirectURI: URL?
+                if provider.kind == .githubCopilot {
+                    redirectURI = nil
+                } else {
+                    do {
+                        redirectURI = try await officialAccountSignInCoordinator.prepareCallback()
+                    } catch is CancellationError {
+                        throw CancellationError()
+                    } catch {
+                        throw AppModelOfficialAccountSignInError.callbackUnavailable
+                    }
+                }
+                try Task.checkCancellation()
+                guard let self,
+                      self.officialAccountSignInSessionID == sessionID,
+                      self.isCurrentOfficialAccountBinding(provider),
+                      !self.terminationRequested
+                else {
+                    return
+                }
+                let authorization = try await officialAccountClient.beginAuthorization(for: provider, redirectURI: redirectURI)
+                switch authorization {
+                case let .browser(authorizationURL, callbackURL, authorizationAttemptID):
+                    attemptID = authorizationAttemptID
+                    guard let redirectURI, callbackURL == redirectURI else {
+                        throw OfficialAccountClientError.invalidCallback
+                    }
+                    try Task.checkCancellation()
+                    guard self.officialAccountSignInSessionID == sessionID,
+                          self.isCurrentOfficialAccountBinding(provider)
+                    else {
+                        await officialAccountClient.cancelAuthorizationAndWait(for: provider, attemptID: authorizationAttemptID)
+                        return
+                    }
+                    self.officialAccountAttemptID = authorizationAttemptID
+                    let callback: URL
+                    do {
+                        callback = try await officialAccountSignInCoordinator.openAndWait(
+                            for: authorizationURL,
+                            timeout: .seconds(180)
+                        )
+                    } catch is CancellationError {
+                        throw CancellationError()
+                    } catch {
+                        throw AppModelOfficialAccountSignInError.browserUnavailable
+                    }
+                    try Task.checkCancellation()
+                    guard self.officialAccountSignInSessionID == sessionID,
+                          self.isCurrentOfficialAccountBinding(provider)
+                    else {
+                        await officialAccountClient.cancelAuthorizationAndWait(for: provider, attemptID: authorizationAttemptID)
+                        return
+                    }
+                    let status = try await officialAccountClient.completeAuthorization(for: provider, callbackURL: callback)
+                    guard self.officialAccountSignInSessionID == sessionID,
+                          self.isCurrentOfficialAccountBinding(provider),
+                          !Task.isCancelled,
+                          !self.terminationRequested
+                    else {
+                        await officialAccountClient.cancelAuthorizationAndWait(for: provider, attemptID: authorizationAttemptID)
+                        return
+                    }
+                    self.setOfficialAccountStatus(status, for: provider)
+                    if status.isConnected {
+                        let models = try await officialAccountClient.availableModels(for: provider)
+                        guard self.officialAccountSignInSessionID == sessionID,
+                              self.isCurrentOfficialAccountBinding(provider),
+                              !Task.isCancelled,
+                              !self.terminationRequested
+                        else { return }
+                        self.officialAccountModels[provider.id] = models
+                    } else {
+                        self.officialAccountModels[provider.id] = []
+                    }
+
+                case let .deviceCode(userCode, verificationURL, expiresAt, authorizationAttemptID):
+                    attemptID = authorizationAttemptID
+                    guard provider.kind == .githubCopilot else { throw OfficialAccountClientError.unsupportedOperation }
+                    try Task.checkCancellation()
+                    guard self.officialAccountSignInSessionID == sessionID,
+                          self.isCurrentOfficialAccountBinding(provider)
+                    else {
+                        await officialAccountClient.cancelAuthorizationAndWait(for: provider, attemptID: authorizationAttemptID)
+                        return
+                    }
+                    self.officialAccountAttemptID = authorizationAttemptID
+                    self.officialAccountDeviceCode = userCode
+                    self.officialAccountDeviceVerificationURL = verificationURL
+                    self.officialAccountDeviceCodeExpiresAt = expiresAt
+                    guard officialAccountSignInCoordinator.openDeviceVerificationPage(for: verificationURL) else {
+                        throw AppModelOfficialAccountSignInError.verificationPageUnavailable
+                    }
+                    let status = try await officialAccountClient.completeDeviceAuthorization(for: provider, attemptID: authorizationAttemptID)
+                    guard self.officialAccountSignInSessionID == sessionID,
+                          self.isCurrentOfficialAccountBinding(provider),
+                          !Task.isCancelled,
+                          !self.terminationRequested
+                    else {
+                        await officialAccountClient.cancelAuthorizationAndWait(for: provider, attemptID: authorizationAttemptID)
+                        return
+                    }
+                    self.setOfficialAccountStatus(status, for: provider)
+                    self.officialAccountModels[provider.id] = []
+                }
+                guard self.officialAccountSignInSessionID == sessionID,
+                      self.isCurrentOfficialAccountBinding(provider),
+                      !Task.isCancelled,
+                      !self.terminationRequested
+                else { return }
+                self.setOfficialAccountIssue(nil, for: provider)
+            } catch {
+                guard let self,
+                      self.officialAccountSignInSessionID == sessionID
+                else {
+                    if let attemptID {
+                        await officialAccountClient.cancelAuthorizationAndWait(for: provider, attemptID: attemptID)
+                    }
+                    return
+                }
+                if !Task.isCancelled && !self.terminationRequested {
+                    officialAccountSignInCoordinator.cancel()
+                }
+                if let attemptID {
+                    await officialAccountClient.cancelAuthorizationAndWait(for: provider, attemptID: attemptID)
+                }
+                guard self.officialAccountSignInSessionID == sessionID else { return }
+                if !Task.isCancelled,
+                   !self.terminationRequested,
+                   self.isCurrentOfficialAccountBinding(provider)
+                {
+                    self.setOfficialAccountIssue(Self.userMessage(for: error), for: provider)
+                }
+            }
+        }
+        officialAccountSignInTask = signInTask
+    }
+
+    func cancelOfficialAccountSignIn(for providerID: String? = nil) {
+        guard let activeProvider = officialAccountSignInProvider,
+              providerID == nil || activeProvider.id == providerID,
+              let sessionID = officialAccountSignInSessionID,
+              officialAccountSignInTask != nil
+        else { return }
+        guard officialAccountSignInSessionID == sessionID else { return }
+        officialAccountSignInCancellationRequestedProviderID = activeProvider.id
+        officialAccountSignInTask?.cancel()
+        officialAccountSignInCoordinator?.cancel()
+    }
+
+    func disconnectOfficialAccount(for providerID: String) {
+        guard canChangeSettings,
+              !isConnectingOfficialAccount(for: providerID),
+              !isDisconnectingOfficialAccount(for: providerID),
+              !officialAccountDeletionProviderIDs.contains(providerID),
+              let provider = configuration.providers.first(where: { $0.id == providerID && Self.isOfficialAccountProvider($0.kind) }),
+              isCurrentOfficialAccountBinding(provider),
+              let officialAccountClient
+        else { return }
+        cancelOfficialAccountStatusRefresh(for: providerID)
+        officialAccountDisconnectingProviderIDs.insert(providerID)
+        setOfficialAccountIssue(nil, for: provider)
+        let operationID = UUID()
+        officialAccountDisconnectTaskIDs[providerID] = operationID
+        officialAccountOperationIDs.insert(operationID)
+        let disconnectTask = Task { [weak self] in
+            defer { self?.finishOfficialAccountDisconnect(providerID: providerID, operationID: operationID) }
+            do {
+                try await officialAccountClient.disconnect(for: provider)
+                guard let self,
+                      !self.terminationRequested,
+                      self.isCurrentOfficialAccountBinding(provider)
+                else { return }
+                self.setOfficialAccountStatus(OfficialAccountConnectionStatus(isConnected: false, accountLabel: nil), for: provider)
+                self.officialAccountModels[providerID] = []
+                self.setOfficialAccountIssue(nil, for: provider)
+            } catch {
+                guard let self,
+                      !self.terminationRequested,
+                      self.isCurrentOfficialAccountBinding(provider)
+                else { return }
+                self.setOfficialAccountIssue(Self.userMessage(for: error), for: provider)
+            }
+        }
+        officialAccountDisconnectTasks[providerID] = disconnectTask
+    }
+
+    func refreshOfficialAccount(for provider: ProviderConfiguration) {
+        guard canChangeSettings,
+              Self.isOfficialAccountProvider(provider.kind),
+              !isConnectingOfficialAccount(for: provider.id),
+              !isDisconnectingOfficialAccount(for: provider.id),
+              !officialAccountDeletionProviderIDs.contains(provider.id),
+              isCurrentOfficialAccountBinding(provider),
+              let officialAccountClient
+        else { return }
+        let requiresClientID = provider.kind == .huggingFaceAccount || provider.kind == .githubCopilot
+        guard !requiresClientID || !(provider.oauthClientID?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true) else {
+            cancelOfficialAccountStatusRefresh(for: provider.id)
+            setOfficialAccountStatus(OfficialAccountConnectionStatus(isConnected: false, accountLabel: nil), for: provider)
+            officialAccountModels[provider.id] = []
+            setOfficialAccountIssue(nil, for: provider)
+            return
+        }
+        cancelOfficialAccountStatusRefresh()
+        let sessionID = UUID()
+        officialAccountStatusRefreshSessionID = sessionID
+        officialAccountStatusRefreshTaskID = sessionID
+        officialAccountRefreshingProviderID = provider.id
+        setOfficialAccountIssue(nil, for: provider)
+        officialAccountOperationIDs.insert(sessionID)
+        let refreshTask = Task { [weak self] in
+            defer { self?.finishOfficialAccountStatusRefresh(sessionID: sessionID) }
+            do {
+                let status = try await officialAccountClient.connectionStatus(for: provider)
+                guard let self,
+                      self.officialAccountStatusRefreshSessionID == sessionID,
+                      !Task.isCancelled,
+                      !self.terminationRequested,
+                      self.isCurrentOfficialAccountBinding(provider)
+                else { return }
+                self.setOfficialAccountStatus(status, for: provider)
+                if status.isConnected {
+                    if provider.kind == .githubCopilot {
+                        self.officialAccountModels[provider.id] = []
+                    } else {
+                        let models = try await officialAccountClient.availableModels(for: provider)
+                        guard self.officialAccountStatusRefreshSessionID == sessionID,
+                              !Task.isCancelled,
+                              !self.terminationRequested,
+                              self.isCurrentOfficialAccountBinding(provider)
+                        else { return }
+                        self.officialAccountModels[provider.id] = models
+                    }
+                } else {
+                    self.officialAccountModels[provider.id] = []
+                }
+                guard self.officialAccountStatusRefreshSessionID == sessionID,
+                      !Task.isCancelled,
+                      !self.terminationRequested,
+                      self.isCurrentOfficialAccountBinding(provider)
+                else { return }
+            } catch {
+                guard let self,
+                      self.officialAccountStatusRefreshSessionID == sessionID,
+                      !Task.isCancelled,
+                      !self.terminationRequested,
+                      self.isCurrentOfficialAccountBinding(provider)
+                else { return }
+                self.setOfficialAccountIssue(Self.userMessage(for: error), for: provider)
+            }
+        }
+        officialAccountStatusRefreshTask = refreshTask
+    }
+
+    func cancelOfficialAccountStatusRefresh(for providerID: String? = nil) {
+        guard officialAccountRefreshingProviderID != nil,
+              providerID == nil || officialAccountRefreshingProviderID == providerID
+        else { return }
+        officialAccountStatusRefreshSessionID = nil
+        officialAccountRefreshingProviderID = nil
+        officialAccountStatusRefreshTask?.cancel()
+    }
+
+    func isConnectingOfficialAccount(for providerID: String) -> Bool {
+        officialAccountSigningInProviderID == providerID
+    }
+
+    func isDisconnectingOfficialAccount(for providerID: String) -> Bool {
+        officialAccountDisconnectingProviderIDs.contains(providerID)
+    }
+
+    private func finishOfficialAccountSignIn(sessionID: UUID) {
+        if officialAccountSignInSessionID == sessionID {
+            officialAccountSignInSessionID = nil
+            officialAccountSigningInProviderID = nil
+            officialAccountSignInProvider = nil
+            officialAccountAttemptID = nil
+            officialAccountDeviceCode = nil
+            officialAccountDeviceVerificationURL = nil
+            officialAccountDeviceCodeExpiresAt = nil
+            officialAccountSignInCancellationRequestedProviderID = nil
+            officialAccountSignInTask = nil
+        }
+        finishOfficialAccountOperation(sessionID)
+    }
+
+    private func finishOfficialAccountStatusRefresh(sessionID: UUID) {
+        if officialAccountStatusRefreshSessionID == sessionID {
+            officialAccountStatusRefreshSessionID = nil
+            officialAccountRefreshingProviderID = nil
+        }
+        if officialAccountStatusRefreshTaskID == sessionID {
+            officialAccountStatusRefreshTaskID = nil
+            officialAccountStatusRefreshTask = nil
+        }
+        finishOfficialAccountOperation(sessionID)
+    }
+
+    private func finishOfficialAccountDisconnect(providerID: String, operationID: UUID) {
+        if officialAccountDisconnectTaskIDs[providerID] == operationID {
+            officialAccountDisconnectTaskIDs[providerID] = nil
+            officialAccountDisconnectingProviderIDs.remove(providerID)
+            officialAccountDisconnectTasks[providerID] = nil
+        }
+        finishOfficialAccountOperation(operationID)
+    }
+
+    private func finishOfficialAccountOperation(_ operationID: UUID) {
+        officialAccountOperationIDs.remove(operationID)
+        finishTerminationIfSettled()
+    }
+
+    var copilotRuntimeIsAvailable: Bool { copilotRuntime != nil }
 
     func saveCredential(_ credential: String, for providerID: String) async throws {
         try ensureWritableConfiguration()
@@ -558,6 +1089,44 @@ final class AppModel: ObservableObject {
             } catch {
                 chatGPTIssue = Self.userMessage(for: error)
                 throw error
+            }
+            return
+        }
+        if let provider = configuration.providers.first(where: { $0.id == id && Self.isOfficialAccountProvider($0.kind) }) {
+            guard !isConnectingOfficialAccount(for: id),
+                  !isDisconnectingOfficialAccount(for: id),
+                  !officialAccountDeletionProviderIDs.contains(id),
+                  let officialAccountClient
+            else { throw OfficialAccountClientError.invalidConfiguration }
+            cancelOfficialAccountStatusRefresh(for: id)
+            let wasSelectedProvider = configuration.selectedProviderID == id
+            var updated = configuration
+            updated.providers.removeAll { $0.id == id }
+            if wasSelectedProvider { updated.selectedProviderID = nil }
+            let operationID = UUID()
+            officialAccountDeletionProviderIDs.insert(id)
+            officialAccountOperationIDs.insert(operationID)
+            defer {
+                officialAccountDeletionProviderIDs.remove(id)
+                finishOfficialAccountOperation(operationID)
+            }
+            try saveConfiguration(updated)
+            do {
+                try await officialAccountClient.disconnect(for: provider)
+                clearOfficialAccountState(for: id)
+            } catch {
+                let removalError = error
+                do {
+                    try restoreAccountProviderAfterRemovalFailure(
+                        provider,
+                        wasSelectedProvider: wasSelectedProvider
+                    )
+                    clearOfficialAccountState(for: id)
+                    setOfficialAccountIssue(Self.userMessage(for: removalError), for: provider)
+                } catch let rollbackError {
+                    configurationIssue = Self.userMessage(for: rollbackError)
+                }
+                throw removalError
             }
             return
         }
@@ -973,6 +1542,10 @@ final class AppModel: ObservableObject {
                 return "Settings aren't available while imrse is quitting."
             case .providerInUse:
                 return "Edit presets that use this provider before removing it."
+            case .providerModelNotSelected:
+                return "Choose a model ID before saving this account as the default."
+            case .officialAccountOperationInProgress:
+                return "Wait for account sign-in or removal to finish before changing its registration."
             #if DEBUG
             case .previewMode:
                 return "Settings are read-only in preview mode."
@@ -1008,6 +1581,71 @@ final class AppModel: ObservableObject {
             suffix += 1
         }
         return identifier
+    }
+
+    private static func isOfficialAccountProvider(_ kind: ProviderKind) -> Bool {
+        switch kind {
+        case .openRouterAccount, .huggingFaceAccount, .githubCopilot: true
+        default: false
+        }
+    }
+
+    private func isCurrentOfficialAccountBinding(_ provider: ProviderConfiguration) -> Bool {
+        guard Self.isOfficialAccountProvider(provider.kind),
+              let current = configuration.providers.first(where: { $0.id == provider.id })
+        else { return false }
+        return OfficialAccountProviderBinding(current) == OfficialAccountProviderBinding(provider)
+    }
+
+    private func invalidateOfficialAccountStateIfBindingChanged(
+        from previous: ProviderConfiguration?,
+        to provider: ProviderConfiguration
+    ) {
+        guard Self.isOfficialAccountProvider(provider.kind) else { return }
+        let previousBinding = previous.map(OfficialAccountProviderBinding.init)
+        let nextBinding = OfficialAccountProviderBinding(provider)
+        guard previousBinding != nextBinding
+                || (previous == nil && officialAccountStatusBindings[provider.id] != nextBinding)
+        else { return }
+        cancelOfficialAccountStatusRefresh(for: provider.id)
+        cancelOfficialAccountSignIn(for: provider.id)
+        clearOfficialAccountState(for: provider.id)
+    }
+
+    private func clearOfficialAccountState(for providerID: String) {
+        officialAccountStatuses[providerID] = nil
+        officialAccountModels[providerID] = nil
+        officialAccountIssues[providerID] = nil
+        officialAccountStatusBindings[providerID] = nil
+    }
+
+    private func setOfficialAccountStatus(
+        _ status: OfficialAccountConnectionStatus,
+        for provider: ProviderConfiguration
+    ) {
+        guard isCurrentOfficialAccountBinding(provider) else { return }
+        officialAccountStatuses[provider.id] = status
+        officialAccountStatusBindings[provider.id] = OfficialAccountProviderBinding(provider)
+    }
+
+    private func setOfficialAccountIssue(_ issue: String?, for provider: ProviderConfiguration) {
+        guard isCurrentOfficialAccountBinding(provider) else { return }
+        officialAccountIssues[provider.id] = issue
+        officialAccountStatusBindings[provider.id] = OfficialAccountProviderBinding(provider)
+    }
+
+    private static func copilotRuntimeExecutableURL() -> URL? {
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        let candidates = [
+            URL(fileURLWithPath: "/opt/homebrew/bin/copilot"),
+            URL(fileURLWithPath: "/usr/local/bin/copilot"),
+            home.appendingPathComponent(".local/bin/copilot"),
+            home.appendingPathComponent(".npm-global/bin/copilot"),
+            home.appendingPathComponent(".volta/bin/copilot"),
+            home.appendingPathComponent(".bun/bin/copilot"),
+            home.appendingPathComponent(".local/share/mise/shims/copilot")
+        ]
+        return candidates.first { FileManager.default.isExecutableFile(atPath: $0.path) }
     }
 
     private func handleEngineState(_ state: TransformationState) {
@@ -1151,6 +1789,8 @@ final class AppModel: ObservableObject {
         guard !terminationReplies.isEmpty,
               undoTask == nil,
               managedLocalModelOperationTask == nil,
+              officialAccountOperationIDs.isEmpty,
+              officialAccountDeletionProviderIDs.isEmpty,
               state != .replacing,
               state != .undoing
         else { return }
@@ -1162,7 +1802,9 @@ final class AppModel: ObservableObject {
 
     #if DEBUG
     var hasAccountRuntime: Bool { openAIAccountClient != nil }
+    var hasOfficialAccountClient: Bool { officialAccountClient != nil }
     var hasManagedLocalModelStore: Bool { managedLocalModelStore != nil }
+    var hasPendingOfficialAccountOperationsForTesting: Bool { !officialAccountOperationIDs.isEmpty }
     var chatGPTSignInTaskForTesting: Task<Void, Never>? { chatGPTSignInTask }
 
     private static let previewConfiguration = AppConfiguration(
@@ -1190,15 +1832,32 @@ final class AppModel: ObservableObject {
     #endif
 
     static let defaultChatGPTProviderID = "imrse-chatgpt"
+    static let unselectedOfficialAccountModelID = "__select_model__"
 }
 
 private enum AppSettingsError: Error {
     case transformationInProgress
     case terminationInProgress
     case providerInUse
+    case providerModelNotSelected
+    case officialAccountOperationInProgress
     #if DEBUG
     case previewMode
     #endif
+}
+
+private enum AppModelOfficialAccountSignInError: Error, LocalizedError {
+    case callbackUnavailable
+    case browserUnavailable
+    case verificationPageUnavailable
+
+    var errorDescription: String? {
+        switch self {
+        case .callbackUnavailable: "The local sign-in callback couldn't start. Try again."
+        case .browserUnavailable: "The browser sign-in didn't finish. Return to imrse and try again."
+        case .verificationPageUnavailable: "The GitHub device-verification page couldn't be opened. Try again."
+        }
+    }
 }
 
 private final class ManagedLocalProgressThrottle: @unchecked Sendable {

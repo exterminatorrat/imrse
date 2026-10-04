@@ -24,7 +24,9 @@ struct APIKeyProviderSettingsPane: View {
 
     private var kind: ProviderKind { section.kind ?? .compatible }
     private var endpoint: URL { section.endpoint ?? URL(fileURLWithPath: "/") }
-    private var choices: [CuratedModelChoice] { CuratedModelCatalog.recommendations(for: kind) }
+    private var choices: [CuratedModelChoice] {
+        section.usesExplicitModelID ? [] : CuratedModelCatalog.recommendations(for: kind)
+    }
 
     private var configuredProvider: ProviderConfiguration? {
         if let initialProviderID {
@@ -49,7 +51,7 @@ struct APIKeyProviderSettingsPane: View {
             model.configuration.providers.first { $0.id == identifier && $0.kind == kind && $0.endpoint == endpoint }
         } ?? (providerID == nil ? model.configuration.providers.first { $0.kind == kind && $0.endpoint == endpoint } : nil)
         self.initialProviderID = existing?.id
-        let recommendation = CuratedModelCatalog.recommendations(for: kind).first?.id ?? ""
+        let recommendation = section.usesExplicitModelID ? "" : CuratedModelCatalog.recommendations(for: kind).first?.id ?? ""
         _selectedModelID = State(initialValue: existing?.model ?? recommendation)
         _selectedReasoningEffort = State(initialValue: existing?.reasoningEffort)
         _providerID = State(initialValue: Self.providerID(for: section, existing: existing, configuration: model.configuration))
@@ -63,8 +65,19 @@ struct APIKeyProviderSettingsPane: View {
                 symbol: section.symbolName
             )
 
-            CuratedModelChoicesView(choices: choices, selection: $selectedModelID)
-                .disabled(!model.canChangeSettings || isSaving || choices.isEmpty)
+            if section.usesExplicitModelID {
+                SettingsSection(
+                    title: "Model ID",
+                    symbol: "number",
+                    detail: "Enter the exact model ID listed by the provider."
+                ) {
+                    TextField("Model ID", text: $selectedModelID)
+                        .disabled(!model.canChangeSettings || isSaving)
+                }
+            } else {
+                CuratedModelChoicesView(choices: choices, selection: $selectedModelID)
+                    .disabled(!model.canChangeSettings || isSaving || choices.isEmpty)
+            }
 
             if let capabilities = selectedReasoningCapabilitiesForProvider {
                 ReasoningEffortControl(effort: $selectedReasoningEffort, capabilities: capabilities)
@@ -82,7 +95,8 @@ struct APIKeyProviderSettingsPane: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
 
-            if let configuredProvider,
+            if !section.usesExplicitModelID,
+               let configuredProvider,
                !choices.contains(where: { $0.id == configuredProvider.model }) {
                 Text("Your saved model ID is \(configuredProvider.model). Change it under Custom advanced; it will stay unchanged unless you choose a model here.")
                     .font(.system(size: 11))
@@ -158,9 +172,11 @@ struct APIKeyProviderSettingsPane: View {
     }
 
     private var billingDetail: String {
-        section == .openAIAPI
-            ? "Use an OpenAI API key. Requests are billed by OpenAI API usage."
-            : "Use an OpenRouter API key. Requests are billed through OpenRouter."
+        switch section {
+        case .openAIAPI: "Use an OpenAI API key. Requests are billed by OpenAI API usage."
+        case .openRouter: "Use an OpenRouter API key. Requests are billed through OpenRouter."
+        default: section.listDescription
+        }
     }
 
     private var primaryActionTitle: String {

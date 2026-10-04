@@ -73,13 +73,16 @@ struct ProviderEditorSheet: View {
             }
 
             if isAddTypeSelection {
-                SettingsSection(
-                    title: "Provider type",
-                    symbol: "square.stack.3d.up",
-                    detail: "Choose how model requests are handled."
-                ) {
-                    ProviderAddChoiceList { selectedSection = $0 }
+                SettingsScrollView {
+                    SettingsSection(
+                        title: "Provider type",
+                        symbol: "square.stack.3d.up",
+                        detail: "Choose how model requests are handled."
+                    ) {
+                        ProviderAddChoiceList { selectedSection = $0 }
+                    }
                 }
+                .frame(maxHeight: .infinity)
             } else if let providerRemovalFeedback {
                 SettingsHint(
                     title: "Provider removed",
@@ -190,6 +193,13 @@ struct ProviderEditorSheet: View {
         activeProvider?.kind == .openAIChatGPT
     }
 
+    private var isOfficialAccountProvider: Bool {
+        switch activeProvider?.kind {
+        case .openRouterAccount, .huggingFaceAccount, .githubCopilot: true
+        default: false
+        }
+    }
+
     private var hasUnsupportedChatGPTIdentity: Bool {
         guard let activeProvider, activeProvider.kind == .openAIChatGPT else { return false }
         return activeProvider.id != model.chatGPTProviderID
@@ -199,13 +209,21 @@ struct ProviderEditorSheet: View {
         isChatGPTAccountProvider && (model.isConnectingChatGPT || model.isDisconnectingChatGPT)
     }
 
+    private var isOfficialAccountOperationBusy: Bool {
+        guard let providerID = activeProvider?.id, isOfficialAccountProvider else { return false }
+        return model.isConnectingOfficialAccount(for: providerID) || model.isDisconnectingOfficialAccount(for: providerID)
+    }
+
     private var providerRemovalActionTitle: String {
-        isChatGPTAccountProvider ? "Disconnect & Remove" : "Remove Provider"
+        isChatGPTAccountProvider || isOfficialAccountProvider ? "Disconnect & Remove" : "Remove Provider"
     }
 
     private var providerRemovalConfirmationTitle: String {
         if isChatGPTAccountProvider {
             return "Disconnect and remove \(activeProvider?.name ?? "ChatGPT account")?"
+        }
+        if isOfficialAccountProvider {
+            return "Disconnect and remove \(activeProvider?.name ?? "account")?"
         }
         return "Remove \(activeProvider?.name ?? "provider")?"
     }
@@ -217,6 +235,9 @@ struct ProviderEditorSheet: View {
         if isChatGPTAccountOperationBusy {
             return "Wait for ChatGPT sign-in or disconnect to finish before removing this provider."
         }
+        if isOfficialAccountOperationBusy {
+            return "Wait for account sign-in or disconnect to finish before removing this provider."
+        }
         return nil
     }
 
@@ -226,6 +247,9 @@ struct ProviderEditorSheet: View {
         }
         if isChatGPTAccountProvider {
             return "This signs out of the connected ChatGPT account and removes its provider configuration. OpenAI API keys and the token-free registration remain unchanged."
+        }
+        if isOfficialAccountProvider {
+            return "This signs out of the connected account and removes its token-free provider configuration. API keys and other account registrations remain unchanged."
         }
         return "This removes the provider from settings and clears its saved credential. Downloaded local model files remain unchanged."
     }
@@ -242,6 +266,7 @@ struct ProviderEditorSheet: View {
             && !providerIsInUse
             && !hasUnsupportedChatGPTIdentity
             && !isChatGPTAccountOperationBusy
+            && !isOfficialAccountOperationBusy
     }
 
     private var activeProvider: ProviderConfiguration? {
@@ -277,7 +302,9 @@ struct ProviderEditorSheet: View {
             LocalModelSettingsPane(model: model, providerID: activeProvider?.id)
         case .chatGPTAccount:
             ChatGPTAccountSettingsPane(model: model, providerID: activeProvider?.id)
-        case .openAIAPI, .openRouter:
+        case .openRouterAccount, .huggingFaceAccount, .githubCopilot:
+            OfficialAccountSettingsPane(model: model, section: section, providerID: activeProvider?.id)
+        case .openAIAPI, .openRouter, .anthropicAPI, .deepSeekAPI, .geminiAPI, .xAIAPI, .mistralAPI, .togetherAPI, .fireworksAPI, .cerebrasAPI:
             APIKeyProviderSettingsPane(model: model, section: section, providerID: activeProvider?.id)
         case .custom:
             CustomProviderSettingsPane(
@@ -303,6 +330,8 @@ struct ProviderEditorSheet: View {
                     providerRemovalFeedback = "Provider removed. Downloaded local model files were left unchanged."
                 case .openAIChatGPT:
                     providerRemovalFeedback = "ChatGPT account signed out and its provider configuration removed. OpenAI API keys and the token-free registration remain unchanged."
+                case .openRouterAccount, .huggingFaceAccount, .githubCopilot:
+                    providerRemovalFeedback = "Account signed out and its provider configuration removed. API keys and other account registrations remain unchanged."
                 default:
                     providerRemovalFeedback = "Provider and its saved credential were removed."
                 }
