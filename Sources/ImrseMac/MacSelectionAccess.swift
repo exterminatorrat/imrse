@@ -73,6 +73,47 @@ enum UTF16SelectionRange {
     }
 }
 
+enum AccessibilityFocusAcquisition {
+    static func acquire<Element>(
+        requestManualAccessibility: () throws -> Void,
+        hasTimeForRetry: () -> Bool,
+        readFocusedElement: () throws -> Element?,
+        validate: (Element) throws -> Void,
+        waitBeforeRetry: () -> Void
+    ) throws -> Element? {
+        _ = try? requestManualAccessibility()
+        while true {
+            guard let element = try readFocusedElement() else {
+                guard hasTimeForRetry() else { return nil }
+                waitBeforeRetry()
+                guard hasTimeForRetry() else { return nil }
+                continue
+            }
+            try validate(element)
+            return element
+        }
+    }
+}
+
+enum SelectedTextRangeFallback {
+    static func resolve(
+        directText: String?,
+        range: ImrseCore.TextRange,
+        failure: ImrseError,
+        readStringForRange: () throws -> String?
+    ) throws -> String? {
+        guard UTF16SelectionRange.isValid(range), range.length > 0 else { throw failure }
+        if let directText, !directText.isEmpty {
+            guard directText.utf16.count == range.length else { throw failure }
+            return directText
+        }
+        guard UTF16SelectionRange.isWithinSupportedRange(range) else { throw failure }
+        guard let rangeText = try readStringForRange() else { return nil }
+        guard rangeText.utf16.count == range.length else { throw failure }
+        return rangeText
+    }
+}
+
 @MainActor
 struct ClipboardPasteboardTransaction {
     private struct Backup {
@@ -419,6 +460,8 @@ public final class MacSelectionAccess: SelectionAccess {
 
     private static let axMessagingTimeout: Float = 0.1
     private static let captureBudget = Duration.seconds(1)
+    private static let focusRetryDelayMilliseconds: Int64 = 10
+    private static let manualAccessibilityAttribute = "AXManualAccessibility"
     private static let protectedContentAttribute = "AXProtectedContent"
 
     private struct TargetHandle {
@@ -509,10 +552,21 @@ public final class MacSelectionAccess: SelectionAccess {
         guard processID != ProcessInfo.processInfo.processIdentifier else { throw ImrseError.noSelection }
         let application = AXUIElementCreateApplication(processID)
         try configureAXMessaging(application)
-        guard let element = try elementAttribute(application, kAXFocusedUIElementAttribute, failure: .noSelection) else {
+        guard let element = try AccessibilityFocusAcquisition.acquire(
+            requestManualAccessibility: { try self.requestManualAccessibility(on: application) },
+            hasTimeForRetry: { self.hasCaptureTimeForFocusRetry() },
+            readFocusedElement: {
+                try self.elementAttribute(application, kAXFocusedUIElementAttribute, failure: .noSelection)
+            },
+            validate: { element in
+                guard try !self.isSecure(element, in: application) else { throw ImrseError.secureInput }
+            },
+            waitBeforeRetry: {
+                Thread.sleep(forTimeInterval: Double(Self.focusRetryDelayMilliseconds) / 1_000.0)
+            }
+        ) else {
             throw ImrseError.noSelection
         }
-        guard try !isSecure(element, in: application) else { throw ImrseError.secureInput }
         guard let role = try stringAttribute(element, kAXRoleAttribute, failure: .noSelection) else {
             throw ImrseError.noSelection
         }
@@ -1440,6 +1494,21 @@ public final class MacSelectionAccess: SelectionAccess {
         }
     }
 
+    private func requestManualAccessibility(on application: AXUIElement) throws {
+        guard try attributeIsSettable(application, Self.manualAccessibilityAttribute) else { return }
+        _ = try setAttribute(
+            application,
+            Self.manualAccessibilityAttribute,
+            value: kCFBooleanTrue
+        )
+    }
+
+    private func hasCaptureTimeForFocusRetry() -> Bool {
+        guard let captureDeadline else { return true }
+        let requiredMilliseconds = Self.focusRetryDelayMilliseconds + Int64(Self.axMessagingTimeout * 1_000)
+        return clock.now.advanced(by: .milliseconds(requiredMilliseconds)) < captureDeadline
+    }
+
     private func supportsPlainTextValueReplacement(_ element: AXUIElement, role: String) -> Bool {
         guard role == (kAXTextFieldRole as String) else { return false }
         do {
@@ -1628,10 +1697,18 @@ public final class MacSelectionAccess: SelectionAccess {
         else {
             throw failure
         }
-        if let selected = try stringAttribute(element, kAXSelectedTextAttribute, failure: failure) {
+        let directText = try stringAttribute(element, kAXSelectedTextAttribute, failure: failure)
+        if allowingEmpty, range.length == 0 { return directText ?? "" }
+        if let selected = try SelectedTextRangeFallback.resolve(
+            directText: directText,
+            range: range,
+            failure: failure,
+            readStringForRange: {
+                try stringForRange(element, range: range, failure: failure)
+            }
+        ) {
             return selected
         }
-        if allowingEmpty, range.length == 0 { return "" }
         guard allowValueFallback,
               let value = try wholeValue(element, failure: failure),
               let selected = substring(value, range: range)
