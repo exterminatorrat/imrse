@@ -37,8 +37,7 @@ public struct RoutedTextProvider: TextProvider, Sendable {
             guard ProviderValidation.isLocal(request.provider) else { throw ImrseError.localModelUnavailable }
             if safeFallback.map({ !ProviderValidation.isLocal($0) }) == true { safeFallback = nil }
         }
-        if request.provider.kind == .openAIChatGPT, let candidate = safeFallback,
-           candidate.kind != .openAIChatGPT, !ProviderValidation.isLocal(candidate) {
+        if ProviderValidation.isAccount(request.provider), let candidate = safeFallback, !ProviderValidation.isLocal(candidate) {
             safeFallback = nil
         }
 

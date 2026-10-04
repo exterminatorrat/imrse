@@ -31,7 +31,7 @@ public enum CuratedModelCatalog {
                 CuratedModelChoice(id: "openai/gpt-6-luna", name: "GPT-6 Luna", detail: "Everyday text transformations"),
                 CuratedModelChoice(id: "anthropic/claude-sonnet-4.6", name: "Claude Sonnet 4.6", detail: "Writing, tone and longer instructions")
             ]
-        case .managedLocal, .compatible:
+        case .managedLocal, .compatible, .anthropic, .openRouterAccount, .huggingFaceAccount, .githubCopilot:
             return []
         }
     }

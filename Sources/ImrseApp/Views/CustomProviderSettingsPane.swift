@@ -464,6 +464,10 @@ private extension ProviderKind {
         case .openAI: "OpenAI-compatible"
         case .openAIChatGPT: "OpenAI ChatGPT account"
         case .openRouter: "OpenRouter"
+        case .openRouterAccount: "OpenRouter account"
+        case .huggingFaceAccount: "Hugging Face account"
+        case .githubCopilot: "GitHub Copilot account"
+        case .anthropic: "Anthropic"
         case .managedLocal: "Local on this Mac"
         case .compatible: "Compatible endpoint"
         }

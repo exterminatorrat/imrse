@@ -63,8 +63,7 @@ public struct ProviderRouter: Sendable {
         if isLocalOnly {
             guard ProviderValidation.isLocal(primary) else { throw ImrseError.localModelUnavailable }
         }
-        if primary.kind == .openAIChatGPT, let candidate = fallback,
-           candidate.kind != .openAIChatGPT, !ProviderValidation.isLocal(candidate) {
+        if ProviderValidation.isAccount(primary), let candidate = fallback, !ProviderValidation.isLocal(candidate) {
             fallback = nil
         }
 

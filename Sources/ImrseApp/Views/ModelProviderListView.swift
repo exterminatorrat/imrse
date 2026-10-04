@@ -11,7 +11,7 @@ struct ModelProviderListView: View {
     var body: some View {
         SettingsPage(
             title: "Models",
-            subtitle: "Use local inference, your ChatGPT plan, or an API provider billed separately.",
+            subtitle: "Use local inference, connected accounts, or separately billed API providers.",
             symbol: "cpu"
         ) {
             SettingsSection(
@@ -22,7 +22,7 @@ struct ModelProviderListView: View {
                 if providers.isEmpty {
                     SettingsHint(
                         title: "No providers yet",
-                        detail: "Add a model on this Mac, use models available to your ChatGPT plan, or choose an API provider billed separately.",
+                        detail: "Add a model on this Mac, connect a supported account, or choose an API-key provider billed separately.",
                         symbol: "plus.circle"
                     )
                     .padding(.vertical, 8)
@@ -127,41 +127,57 @@ struct ProviderAddChoiceList: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            ForEach(ModelProviderSection.allCases) { section in
-                Button {
-                    onSelect(section)
-                } label: {
-                    HStack(spacing: 12) {
-                        SettingsIcon(symbol: section.symbolName, size: 26)
+            ForEach(ModelProviderChoiceGroup.allCases) { group in
+                let sections = group.sections
+                if !sections.isEmpty {
+                    Text(group.title)
+                        .font(.imrseCaption.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.horizontal, 13)
+                        .padding(.top, 12)
+                        .padding(.bottom, 5)
+                        .accessibilityAddTraits(.isHeader)
 
-                        VStack(alignment: .leading, spacing: 3) {
-                            Text(section.title)
-                                .font(.imrseBodyStrong)
-                                .foregroundStyle(.primary)
+                    ForEach(sections.indices, id: \.self) { index in
+                        let section = sections[index]
+                        Button {
+                            onSelect(section)
+                        } label: {
+                            HStack(spacing: 12) {
+                                SettingsIcon(symbol: section.symbolName, size: 26)
 
-                            Text(section.listDescription)
-                                .font(.imrseCaption)
-                                .foregroundStyle(.secondary)
-                                .fixedSize(horizontal: false, vertical: true)
+                                VStack(alignment: .leading, spacing: 3) {
+                                    Text(section.title)
+                                        .font(.imrseBodyStrong)
+                                        .foregroundStyle(.primary)
+
+                                    Text(section.listDescription)
+                                        .font(.imrseCaption)
+                                        .foregroundStyle(.secondary)
+                                        .fixedSize(horizontal: false, vertical: true)
+                                }
+
+                                Spacer(minLength: 12)
+
+                                Image(systemName: "chevron.right")
+                                    .font(.system(size: 9.5, weight: .semibold))
+                                    .foregroundStyle(.tertiary)
+                            }
+                            .padding(.horizontal, 13)
+                            .padding(.vertical, 11)
+                            .frame(maxWidth: .infinity, minHeight: 58, alignment: .leading)
+                            .contentShape(Rectangle())
                         }
+                        .buttonStyle(.plain)
+                        .accessibilityElement(children: .combine)
+                        .accessibilityHint("Add \(section.title)")
 
-                        Spacer(minLength: 12)
-
-                        Image(systemName: "chevron.right")
-                            .font(.system(size: 9.5, weight: .semibold))
-                            .foregroundStyle(.tertiary)
+                        if index < sections.count - 1 {
+                            ImrseDivider()
+                                .padding(.leading, 52)
+                        }
                     }
-                    .padding(.horizontal, 13)
-                    .padding(.vertical, 11)
-                    .frame(maxWidth: .infinity, minHeight: 58, alignment: .leading)
-                    .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .accessibilityElement(children: .combine)
-                .accessibilityHint("Add \(section.title)")
-                if section != ModelProviderSection.allCases.last {
-                    ImrseDivider()
-                        .padding(.leading, 52)
                 }
             }
         }
