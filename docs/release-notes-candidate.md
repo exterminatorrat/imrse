@@ -1,9 +1,10 @@
 # Candidate first-preview release notes
 
 **Draft only — not published.** Harry selected **`v0.2.0-beta.1`** for preparation
-as a downloadable ARM64 preview. The tag, bundle, archive and public assets do not
-yet exist; public release and asset upload still need separate approval. The
-candidate bundle is planned to use numeric metadata version `0.2.0`, build `12`.
+as a downloadable ARM64 preview. Private candidate preparation is separate from
+publication: no public tag, release or assets exist, and publication still needs
+separate approval. The candidate bundle is planned to use numeric metadata
+version `0.2.0`, build `12`.
 Current `main` still declares version `0.1.2`, build `11`; this documentation
 does not change version metadata. See the [release-readiness checklist](release-readiness.md).
 
