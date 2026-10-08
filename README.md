@@ -46,18 +46,18 @@ swift test --jobs 1 -Xswiftc -warnings-as-errors
 open dist/imrse.app
 ```
 
-The build script uses SwiftBuild, assembles the app resources, verifies the bundle, and writes `dist/imrse.app`. It produces a local ad-hoc-signed app unless you configure a signing identity; it does not notarize the app. Updates and rollback are manual; the inspected source has no automatic updater. Before rebuilding over an existing `dist/imrse.app`, make a separate Finder copy elsewhere if you want to keep that older bundle. To install the new app, use Finder to copy it to `~/Applications` or `/Applications`; back up an existing `imrse.app` before replacing it, and launch only the copy you intend to use. Keep the previous bundle until the new one works. Do not delete `~/Library/Application Support/imrse` or imrse's Keychain items to troubleshoot an update.
+The build script uses SwiftBuild, assembles the app resources, verifies the bundle, and writes `dist/imrse.app`. It uses the ad-hoc identity (`-`) by default, or an existing identity supplied through `SIGNING_IDENTITY`; it does not notarize the app. Updates and rollback are manual; the inspected source has no automatic updater. Before rebuilding over an existing `dist/imrse.app`, make a separate Finder copy elsewhere if you want to keep that older bundle. To install the new app, use Finder to copy it to `~/Applications` or `/Applications`; back up an existing `imrse.app` before replacing it, and launch only the copy you intend to use. Keep the previous bundle until the new one works. Do not delete `~/Library/Application Support/imrse` or imrse's Keychain items to troubleshoot an update.
 
 ## First run
 
 1. Click the imrse menu-bar icon to open Settings, then go to **Models → Add Provider**. Choose an available provider or model, complete any explicit local-model download or account setup, then choose your default model.
-2. Allow **Input Monitoring** for the global shortcut and **Accessibility** for reading and replacing the selected text. macOS manages these separately in **System Settings → Privacy & Security**.
+2. Allow **Input Monitoring** for the global shortcut and **Accessibility** for reading and replacing the selected text. macOS manages these separately in **System Settings → Privacy & Security**. Code signing does not grant either permission, and a Keychain prompt is not a grant.
 3. For a safe first try, create a disposable TextEdit document and choose **Format → Make Plain Text**. Select a short paragraph, double-tap **Control**, enter an instruction such as “Make this concise,” and press **Return**. An empty instruction uses your `default.md` instruction or the built-in default.
 4. Wait for the completed replacement. Right-click or Control-click the imrse menu-bar icon and choose **Undo** while the target is unchanged to restore the original. Press **Escape** before completion to cancel.
 
 imrse only replaces a target it can still verify. An unsupported, secure, read-only, or changed selection is left unchanged rather than pasted into a guessed field. The completed TextEdit plain-text probe does not establish compatibility with every app or rich-text editor.
 
-After an ad-hoc app update, macOS may show a login-Keychain password prompt. Handle any such prompt locally on your own Mac; never give your password, API key, or token to another person or put it in an issue.
+Re-signing an ad-hoc build or changing `SIGNING_IDENTITY` can cause macOS to ask again for access to the login Keychain. Reusing a stable `SIGNING_IDENTITY` may preserve the code identity Keychain recognizes across builds, but it preserves the signer identity—not the executable contents—and cannot guarantee byte-identical builds or that every prompt will disappear. Keychain access is separate from Accessibility and Input Monitoring: signing the app or responding to a Keychain prompt grants neither privacy permission. Review the app and prompt locally; never share your login-Keychain password, API key, or token, and do not delete Keychain items to troubleshoot.
 
 ## Models and provider billing
 
@@ -100,7 +100,7 @@ Replacement checks are bounded to measured targets: disposable plain text in Tex
 - **A model request fails:** Check that the provider is reachable, the exact model ID is supported by your account, and the provider has available API quota, credits, plan entitlement, and organization approval. An account login alone may not include inference.
 - **Ollama is not found:** Start the Ollama server, check its model tag with `ollama list`, and verify the endpoint is exactly `http://localhost:11434/v1` with API-key authentication off.
 - **A new account option is unavailable:** Hugging Face and Copilot need app-owned public OAuth client IDs; Copilot also needs the compatible runtime described above. See [Official provider connections](docs/official-provider-connections.md).
-- **macOS asks for a Keychain password after an ad-hoc update:** Review and handle the prompt locally. Do not send anyone your password or delete Keychain items as a workaround.
+- **macOS asks for a login-Keychain password:** Review the app and prompt locally. This is separate from Accessibility and Input Monitoring; check those permissions separately in System Settings. Do not share your password or delete Keychain items as a workaround.
 
 When reporting a problem, use disposable non-sensitive text. Never include selected or generated text, passwords, API keys, tokens, or confidential content in issues. An ad-hoc download may be blocked by Gatekeeper. Only for an app you have independently confirmed is the expected, unmodified, nonmalicious build from a source you trust, Apple may offer **Open Anyway** in **System Settings → Privacy & Security** after the first blocked launch. Review the alert and confirm **Open** yourself; managed Macs may disallow this app-specific exception. It does not verify the publisher or make the app notarized. See Apple's [Open Anyway instructions](https://support.apple.com/en-us/102445). Never disable Gatekeeper globally, strip quarantine flags, bypass a suspected tampered or malicious app, or automate security or Keychain consent.
 
