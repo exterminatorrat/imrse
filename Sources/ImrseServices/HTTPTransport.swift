@@ -65,7 +65,7 @@ private struct HTTPResponseHead: Sendable {
     let headers: [String: String]
 }
 
-private final class URLSessionStreamDriver: NSObject, URLSessionDataDelegate, @unchecked Sendable {
+final class URLSessionStreamDriver: NSObject, URLSessionDataDelegate, @unchecked Sendable {
     private let lock = NSLock()
     private let configuration: URLSessionConfiguration
     private var body: AsyncThrowingStream<Data, any Error>.Continuation?
@@ -79,7 +79,7 @@ private final class URLSessionStreamDriver: NSObject, URLSessionDataDelegate, @u
         self.body = body
     }
 
-    func start(_ request: URLRequest) async throws -> HTTPResponseHead {
+    fileprivate func start(_ request: URLRequest) async throws -> HTTPResponseHead {
         try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { continuation in
                 let session = URLSession(configuration: configuration, delegate: self, delegateQueue: nil)
@@ -153,7 +153,7 @@ private final class URLSessionStreamDriver: NSObject, URLSessionDataDelegate, @u
             case .enqueued:
                 offset = end
             case .dropped:
-                terminate(with: ImrseError.outputTooLarge)
+                terminate(with: ImrseError.interruptedStream)
                 return
             case .terminated:
                 cancel()
