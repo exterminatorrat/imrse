@@ -6,454 +6,6 @@ import CoreGraphics
 import Foundation
 import ImrseCore
 
-public typealias ClipboardPastePreparation = @MainActor () async throws -> Void
-
-enum UTF16SelectionRange {
-    static func isValid(_ range: ImrseCore.TextRange) -> Bool {
-        guard range.location >= 0, range.length >= 0 else { return false }
-        let (_, overflow) = range.location.addingReportingOverflow(range.length)
-        return !overflow
-    }
-
-    static func make(at location: Int, length: Int) -> ImrseCore.TextRange? {
-        let range = ImrseCore.TextRange(location: location, length: length)
-        return isValid(range) ? range : nil
-    }
-
-    static func isWithinSupportedRange(_ range: ImrseCore.TextRange) -> Bool {
-        guard isValid(range) else { return false }
-        return range.location + range.length <= PlainTextUndoValidation.maximumWholeValueUTF16Length
-    }
-
-    static func isCollapsedCaret(
-        _ selection: ImrseCore.TextRange,
-        selectedText: String,
-        atEndOf range: ImrseCore.TextRange
-    ) -> Bool {
-        guard isValid(selection), isValid(range), selection.length == 0, selectedText.isEmpty else {
-            return false
-        }
-        return selection.location == range.location + range.length
-    }
-
-    static func substring(_ value: String, range: ImrseCore.TextRange) -> String? {
-        guard isValid(range) else { return nil }
-        let string = value as NSString
-        guard range.location <= string.length,
-              range.length <= string.length - range.location
-        else {
-            return nil
-        }
-        let end = range.location + range.length
-        guard isScalarBoundary(in: string, at: range.location),
-              isScalarBoundary(in: string, at: end)
-        else {
-            return nil
-        }
-        return string.substring(with: NSRange(location: range.location, length: range.length))
-    }
-
-    static func replacing(_ value: String, range: ImrseCore.TextRange, with replacement: String) -> String? {
-        guard substring(value, range: range) != nil,
-              !range.location.addingReportingOverflow(replacement.utf16.count).overflow
-        else {
-            return nil
-        }
-        return (value as NSString).replacingCharacters(
-            in: NSRange(location: range.location, length: range.length),
-            with: replacement
-        )
-    }
-
-    private static func isScalarBoundary(in value: NSString, at offset: Int) -> Bool {
-        guard offset > 0, offset < value.length else { return true }
-        let previous = value.character(at: offset - 1)
-        let next = value.character(at: offset)
-        return !(0xD800...0xDBFF).contains(previous) || !(0xDC00...0xDFFF).contains(next)
-    }
-}
-
-enum AccessibilityFocusAcquisition {
-    static func acquire<Element>(
-        requestManualAccessibility: () throws -> Void,
-        hasTimeForRetry: () -> Bool,
-        readFocusedElement: () throws -> Element?,
-        validate: (Element) throws -> Void,
-        waitBeforeRetry: () -> Void
-    ) throws -> Element? {
-        _ = try? requestManualAccessibility()
-        while true {
-            guard let element = try readFocusedElement() else {
-                guard hasTimeForRetry() else { return nil }
-                waitBeforeRetry()
-                guard hasTimeForRetry() else { return nil }
-                continue
-            }
-            try validate(element)
-            return element
-        }
-    }
-}
-
-enum SelectedTextRangeFallback {
-    static func resolve(
-        directText: String?,
-        range: ImrseCore.TextRange,
-        failure: ImrseError,
-        readStringForRange: () throws -> String?
-    ) throws -> String? {
-        guard UTF16SelectionRange.isValid(range), range.length > 0 else { throw failure }
-        if let directText, !directText.isEmpty {
-            guard directText.utf16.count == range.length else { throw failure }
-            return directText
-        }
-        guard UTF16SelectionRange.isWithinSupportedRange(range) else { throw failure }
-        guard let rangeText = try readStringForRange() else { return nil }
-        guard rangeText.utf16.count == range.length else { throw failure }
-        return rangeText
-    }
-}
-
-@MainActor
-struct ClipboardPasteboardTransaction {
-    private struct Backup {
-        let items: [[(String, Data)]]
-        let changeCount: Int
-
-        static let maximumItems = 64
-        static let maximumRepresentations = 128
-        static let maximumBytes = 4 * 1_024 * 1_024
-
-        /// NSPasteboard returns materialized Data, so this limits retained bytes but can't cap one fetch's transient allocation.
-        static func capture(from pasteboard: NSPasteboard) throws -> Backup {
-            let changeCount = pasteboard.changeCount
-            guard let pasteboardItems = pasteboard.pasteboardItems else {
-                guard pasteboard.types?.isEmpty ?? true,
-                      pasteboard.changeCount == changeCount
-                else {
-                    throw ImrseError.clipboardFailed
-                }
-                return Backup(items: [], changeCount: changeCount)
-            }
-            guard pasteboardItems.count <= maximumItems else { throw ImrseError.clipboardFailed }
-
-            var totalRepresentations = 0
-            var totalBytes = 0
-            var items: [[(String, Data)]] = []
-            for item in pasteboardItems {
-                let types = item.types
-                let (nextRepresentationCount, representationOverflow) = totalRepresentations.addingReportingOverflow(types.count)
-                guard !types.isEmpty,
-                      !representationOverflow,
-                      nextRepresentationCount <= maximumRepresentations
-                else {
-                    throw ImrseError.clipboardFailed
-                }
-                totalRepresentations = nextRepresentationCount
-
-                var representations: [(String, Data)] = []
-                for type in types {
-                    guard let data = item.data(forType: type) else { throw ImrseError.clipboardFailed }
-                    let (nextByteCount, byteOverflow) = totalBytes.addingReportingOverflow(data.count)
-                    guard !byteOverflow, nextByteCount <= maximumBytes else { throw ImrseError.clipboardFailed }
-                    totalBytes = nextByteCount
-                    representations.append((type.rawValue, data))
-                }
-                items.append(representations)
-            }
-            guard pasteboard.changeCount == changeCount else { throw ImrseError.clipboardFailed }
-            return Backup(items: items, changeCount: changeCount)
-        }
-
-        func restore(to pasteboard: NSPasteboard) throws {
-            _ = pasteboard.clearContents()
-            guard !items.isEmpty else { return }
-            let restoredItems: [NSPasteboardWriting] = items.map { representations in
-                let item = NSPasteboardItem()
-                for (type, data) in representations {
-                    item.setData(data, forType: NSPasteboard.PasteboardType(rawValue: type))
-                }
-                return item
-            }
-            guard pasteboard.writeObjects(restoredItems) else { throw ImrseError.clipboardFailed }
-        }
-    }
-
-    private static let markerTypePrefix = "com.imrse.private-paste-owner."
-    private let backup: Backup
-    private let markerType: NSPasteboard.PasteboardType
-    private let markerData: Data
-    private var ownedChangeCount: Int?
-    private var stagedText: String?
-
-    private init(backup: Backup, markerID: UUID) {
-        self.backup = backup
-        markerType = NSPasteboard.PasteboardType(Self.markerTypePrefix + markerID.uuidString)
-        markerData = Data(markerID.uuidString.utf8)
-    }
-
-    static func capture(from pasteboard: NSPasteboard) throws -> ClipboardPasteboardTransaction {
-        ClipboardPasteboardTransaction(backup: try Backup.capture(from: pasteboard), markerID: UUID())
-    }
-
-    mutating func stage(_ text: String, on pasteboard: NSPasteboard) throws {
-        guard pasteboard.changeCount == backup.changeCount else { throw ImrseError.clipboardFailed }
-        let clearedCount = pasteboard.clearContents()
-        let (expectedClearCount, overflow) = backup.changeCount.addingReportingOverflow(1)
-        guard !overflow, clearedCount == expectedClearCount, pasteboard.changeCount == clearedCount else {
-            throw ImrseError.clipboardFailed
-        }
-        let item = NSPasteboardItem()
-        item.setString(text, forType: .string)
-        item.setData(markerData, forType: markerType)
-        let writeSucceeded = pasteboard.writeObjects([item])
-        let writtenChangeCount = pasteboard.changeCount
-        let markerMatches = pasteboard.data(forType: markerType) == markerData
-        let items = pasteboard.pasteboardItems
-        let singleMarkedItem = items?.count == 1
-            && items?.first?.data(forType: markerType) == markerData
-            && items?.first?.string(forType: .string) == text
-        let countMatches = pasteboard.changeCount == writtenChangeCount
-        if markerMatches, countMatches, singleMarkedItem {
-            ownedChangeCount = writtenChangeCount
-            stagedText = text
-        }
-        guard writeSucceeded, markerMatches, countMatches, singleMarkedItem else {
-            throw ImrseError.clipboardFailed
-        }
-    }
-
-    func stillOwns(_ pasteboard: NSPasteboard) -> Bool {
-        guard let ownedChangeCount, pasteboard.changeCount == ownedChangeCount,
-              pasteboard.data(forType: markerType) == markerData,
-              let stagedText,
-              pasteboard.pasteboardItems?.count == 1,
-              pasteboard.pasteboardItems?.first?.string(forType: .string) == stagedText
-        else {
-            return false
-        }
-        return pasteboard.changeCount == ownedChangeCount
-    }
-
-    mutating func restoreIfOwned(on pasteboard: NSPasteboard) throws -> Bool {
-        guard stillOwns(pasteboard) else { return false }
-        try backup.restore(to: pasteboard)
-        ownedChangeCount = nil
-        stagedText = nil
-        return true
-    }
-}
-
-struct UndoSelectionProof {
-    let text: String
-    let range: ImrseCore.TextRange
-}
-
-enum PlainTextUndoValidation {
-    static let maximumWholeValueUTF16Length = 1_000_000
-
-    static func restoredValue(
-        currentValue: String,
-        receipt: ReplacementReceipt,
-        replacementRange: ImrseCore.TextRange,
-        currentSelection: UndoSelectionProof,
-        receiptSelection: UndoSelectionProof
-    ) -> String? {
-        guard currentValue.utf16.count <= maximumWholeValueUTF16Length,
-              currentSelection.range == receiptSelection.range,
-              currentSelection.text.utf16.elementsEqual(receiptSelection.text.utf16),
-              let originalRange = receipt.target.range,
-              UTF16SelectionRange.make(
-                at: originalRange.location,
-                length: receipt.target.text.utf16.count
-              ) == originalRange,
-              originalRange.length == receipt.target.text.utf16.count,
-              UTF16SelectionRange.make(
-                at: originalRange.location,
-                length: receipt.replacement.utf16.count
-              ) == replacementRange,
-              let currentReplacement = UTF16SelectionRange.substring(currentValue, range: replacementRange),
-              currentReplacement.utf16.elementsEqual(receipt.replacement.utf16)
-        else {
-            return nil
-        }
-        guard let restoredValue = UTF16SelectionRange.replacing(
-            currentValue,
-            range: replacementRange,
-            with: receipt.target.text
-        ), restoredValue.utf16.count <= maximumWholeValueUTF16Length else { return nil }
-        return restoredValue
-    }
-}
-
-@MainActor
-enum UndoSelectionConsistencyValidation {
-    static let maximumAttempts = 6
-
-    static func firstMatching(
-        expected: UndoSelectionProof,
-        read: () throws -> UndoSelectionProof?,
-        wait: () async -> Void
-    ) async throws -> UndoSelectionProof? {
-        for attempt in 0..<maximumAttempts {
-            if let value = try read(),
-               value.range == expected.range,
-               value.text.utf16.elementsEqual(expected.text.utf16) {
-                return value
-            }
-            if attempt + 1 < maximumAttempts { await wait() }
-        }
-        return nil
-    }
-}
-
-enum ClipboardFallbackNoOpValidation {
-    static func baseline(
-        value: String?,
-        range: ImrseCore.TextRange,
-        selectedText: String
-    ) -> String? {
-        guard let value,
-              range.length > 0,
-              range.length == selectedText.utf16.count,
-              !selectedText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-              let valueText = UTF16SelectionRange.substring(value, range: range),
-              valueText.utf16.elementsEqual(selectedText.utf16)
-        else {
-            return nil
-        }
-        return value
-    }
-
-    static func permits(
-        enabled: Bool,
-        targetIsSafeAndFocused: Bool,
-        range: ImrseCore.TextRange,
-        beforeText: String,
-        afterRange: ImrseCore.TextRange?,
-        afterText: String?,
-        beforeValue: String?,
-        afterValue: String?
-    ) -> Bool {
-        guard enabled,
-              targetIsSafeAndFocused,
-              range.length > 0,
-              range.length == beforeText.utf16.count,
-              !beforeText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-              afterRange == range,
-              let afterText,
-              beforeText.utf16.elementsEqual(afterText.utf16),
-              let beforeValue,
-              let afterValue,
-              beforeValue.utf16.elementsEqual(afterValue.utf16),
-              let selectedText = UTF16SelectionRange.substring(beforeValue, range: range),
-              selectedText.utf16.elementsEqual(beforeText.utf16)
-        else {
-            return false
-        }
-        return true
-    }
-}
-
-enum SelectedTextReplacementValidation {
-    static func confirms(
-        afterValue: String?,
-        expectedValue: String?,
-        afterRange: ImrseCore.TextRange,
-        afterText: String,
-        replacementRange: ImrseCore.TextRange,
-        replacement: String
-    ) -> Bool {
-        if let afterValue, let expectedValue,
-           afterValue.utf16.elementsEqual(expectedValue.utf16) {
-            return true
-        }
-        return afterRange == replacementRange
-            && afterText.utf16.elementsEqual(replacement.utf16)
-    }
-}
-
-enum ClipboardTargetStructureValidation {
-    static let maximumNodes = 8
-
-    static func permits<Element>(
-        root: Element,
-        readRole: (Element) throws -> String,
-        readChildren: (Element) throws -> [Element],
-        sameElement: (Element, Element) -> Bool
-    ) -> Bool {
-        do {
-            let rootRole = try readRole(root)
-            guard rootRole == "AXTextField" || rootRole == "AXTextArea" else { return false }
-            let rootChildren = try readChildren(root)
-            guard rootChildren.count <= 1 else { return false }
-            guard var element = rootChildren.first else { return true }
-
-            var visited = [root]
-            var hasGroup = false
-            while visited.count < maximumNodes {
-                guard !visited.contains(where: { sameElement($0, element) }) else { return false }
-                visited.append(element)
-                let role = try readRole(element)
-                if role == "AXStaticText" {
-                    guard hasGroup else { return false }
-                    return try readChildren(element).isEmpty
-                }
-                guard role == "AXGroup" else { return false }
-                let children = try readChildren(element)
-                guard children.count == 1, let child = children.first else { return false }
-                hasGroup = true
-                element = child
-            }
-        } catch {
-            return false
-        }
-        return false
-    }
-}
-
-enum NSScreenCoordinateConversion {
-    static func cocoaRect(from quartzRect: CGRect, displayBounds: CGRect, screenFrame: CGRect) -> CGRect? {
-        guard quartzRect.origin.x.isFinite,
-              quartzRect.origin.y.isFinite,
-              quartzRect.width.isFinite,
-              quartzRect.height.isFinite,
-              displayBounds.width.isFinite,
-              displayBounds.height.isFinite,
-              screenFrame.origin.x.isFinite,
-              screenFrame.origin.y.isFinite,
-              screenFrame.width.isFinite,
-              screenFrame.height.isFinite,
-              quartzRect.width > 0,
-              quartzRect.height > 0,
-              displayBounds.width > 0,
-              displayBounds.height > 0,
-              screenFrame.width > 0,
-              screenFrame.height > 0
-        else {
-            return nil
-        }
-        let scaleX = screenFrame.width / displayBounds.width
-        let scaleY = screenFrame.height / displayBounds.height
-        let rect = CGRect(
-            x: screenFrame.minX + (quartzRect.minX - displayBounds.minX) * scaleX,
-            y: screenFrame.maxY - (quartzRect.maxY - displayBounds.minY) * scaleY,
-            width: quartzRect.width * scaleX,
-            height: quartzRect.height * scaleY
-        )
-        guard rect.origin.x.isFinite,
-              rect.origin.y.isFinite,
-              rect.width.isFinite,
-              rect.height.isFinite,
-              rect.maxX.isFinite,
-              rect.maxY.isFinite
-        else {
-            return nil
-        }
-        return rect
-    }
-}
-
 @MainActor
 public final class MacSelectionAccess: SelectionAccess {
     private typealias TextRange = ImrseCore.TextRange
@@ -778,14 +330,24 @@ public final class MacSelectionAccess: SelectionAccess {
             && sameText(currentSelection.text, receipt.replacement)
         let canWriteSelectedText = (try? attributeIsSettable(target.element, kAXSelectedTextAttribute)) == true
         if selectedReplacement, canWriteSelectedText {
-            let beforeWrite = try self.currentSelection(target, allowingEmpty: true)
-            guard sameSelection(beforeWrite, currentSelection),
-                  let valueBeforeWrite = try wholeValue(target.element, failure: .undoUnavailable),
-                  sameText(valueBeforeWrite, currentValue)
-            else {
-                throw ImrseError.undoUnavailable
-            }
-            let status = try setAttribute(target.element, kAXSelectedTextAttribute, value: receipt.target.text as CFString)
+            let status = try VerifiedAction.perform(
+                verify: {
+                    let beforeWrite = try self.currentSelection(target, allowingEmpty: true)
+                    guard self.sameSelection(beforeWrite, currentSelection),
+                          let valueBeforeWrite = try self.wholeValue(target.element, failure: .undoUnavailable),
+                          self.sameText(valueBeforeWrite, currentValue)
+                    else {
+                        throw ImrseError.undoUnavailable
+                    }
+                },
+                action: {
+                    try self.setAttribute(
+                        target.element,
+                        kAXSelectedTextAttribute,
+                        value: receipt.target.text as CFString
+                    )
+                }
+            )
             guard status == .success else {
                 invalidateAfterUnverifiedWrite(target.id)
                 throw ImrseError.undoUnavailable
@@ -794,14 +356,20 @@ public final class MacSelectionAccess: SelectionAccess {
             guard (try? attributeIsSettable(target.element, kAXValueAttribute)) == true else {
                 throw ImrseError.undoUnavailable
             }
-            let beforeWrite = try self.currentSelection(target, allowingEmpty: true)
-            guard sameSelection(beforeWrite, currentSelection),
-                  let valueBeforeWrite = try wholeValue(target.element, failure: .undoUnavailable),
-                  sameText(valueBeforeWrite, currentValue)
-            else {
-                throw ImrseError.undoUnavailable
-            }
-            let status = try setAttribute(target.element, kAXValueAttribute, value: restoredValue as CFString)
+            let status = try VerifiedAction.perform(
+                verify: {
+                    let beforeWrite = try self.currentSelection(target, allowingEmpty: true)
+                    guard self.sameSelection(beforeWrite, currentSelection),
+                          let valueBeforeWrite = try self.wholeValue(target.element, failure: .undoUnavailable),
+                          self.sameText(valueBeforeWrite, currentValue)
+                    else {
+                        throw ImrseError.undoUnavailable
+                    }
+                },
+                action: {
+                    try self.setAttribute(target.element, kAXValueAttribute, value: restoredValue as CFString)
+                }
+            )
             guard status == .success else {
                 invalidateAfterUnverifiedWrite(target.id)
                 throw ImrseError.undoUnavailable
@@ -1155,25 +723,31 @@ public final class MacSelectionAccess: SelectionAccess {
         var selectedTextNoOpValidated = false
         if before.range == range, sameText(before.text, expectedText),
            try attributeIsSettable(target.element, kAXSelectedTextAttribute) {
-            let current = try currentSelection(target, allowingEmpty: true)
-            guard sameSelection(current, before) else {
-                throw ImrseError.staleSelection
-            }
-            if let oldValue {
-                guard let currentValue = try wholeValue(target.element, failure: .replacementFailed),
-                      sameText(currentValue, oldValue)
-                else {
-                    throw ImrseError.staleSelection
+            let status = try VerifiedAction.perform(
+                verify: {
+                    let current = try self.currentSelection(target, allowingEmpty: true)
+                    guard self.sameSelection(current, before) else {
+                        throw ImrseError.staleSelection
+                    }
+                    if let oldValue {
+                        guard let currentValue = try self.wholeValue(target.element, failure: .replacementFailed),
+                              self.sameText(currentValue, oldValue)
+                        else {
+                            throw ImrseError.staleSelection
+                        }
+                    }
+                    if self.clipboardFallbackEnabled {
+                        selectedTextFallbackBaseline = ClipboardFallbackNoOpValidation.baseline(
+                            value: oldValue ?? (try? self.wholeValue(target.element, failure: .replacementFailed)),
+                            range: range,
+                            selectedText: expectedText
+                        )
+                    }
+                },
+                action: {
+                    try self.setAttribute(target.element, kAXSelectedTextAttribute, value: replacement as CFString)
                 }
-            }
-            if clipboardFallbackEnabled {
-                selectedTextFallbackBaseline = ClipboardFallbackNoOpValidation.baseline(
-                    value: oldValue ?? (try? wholeValue(target.element, failure: .replacementFailed)),
-                    range: range,
-                    selectedText: expectedText
-                )
-            }
-            let status = try setAttribute(target.element, kAXSelectedTextAttribute, value: replacement as CFString)
+            )
             guard status == .success else {
                 invalidateAfterUnverifiedWrite(target.id)
                 throw ImrseError.replacementFailed
@@ -1265,14 +839,20 @@ public final class MacSelectionAccess: SelectionAccess {
            let oldValue,
            let expectedValue,
            try attributeIsSettable(target.element, kAXValueAttribute) {
-            let stillCurrent = try currentSelection(target, allowingEmpty: true)
-            guard sameSelection(stillCurrent, before),
-                  let currentValue = try wholeValue(target.element, failure: .replacementFailed),
-                  sameText(currentValue, oldValue)
-            else {
-                throw ImrseError.staleSelection
-            }
-            let status = try setAttribute(target.element, kAXValueAttribute, value: expectedValue as CFString)
+            let status = try VerifiedAction.perform(
+                verify: {
+                    let stillCurrent = try self.currentSelection(target, allowingEmpty: true)
+                    guard self.sameSelection(stillCurrent, before),
+                          let currentValue = try self.wholeValue(target.element, failure: .replacementFailed),
+                          self.sameText(currentValue, oldValue)
+                    else {
+                        throw ImrseError.staleSelection
+                    }
+                },
+                action: {
+                    try self.setAttribute(target.element, kAXValueAttribute, value: expectedValue as CFString)
+                }
+            )
             guard status == .success else {
                 invalidateAfterUnverifiedWrite(target.id)
                 throw ImrseError.replacementFailed
@@ -1388,21 +968,29 @@ public final class MacSelectionAccess: SelectionAccess {
             else {
                 throw ImrseError.clipboardFailed
             }
-            try requireTargetForeground(target)
-            guard clipboardFallbackTargetIsEligible(target) else { throw ImrseError.staleSelection }
-            let beforePost = try currentSelection(target)
-            guard beforePost.range == range,
-                  sameText(beforePost.text, expectedText),
-                  let valueBeforePost = try wholeValue(target.element, failure: .staleSelection),
-                  sameText(valueBeforePost, oldValue)
-            else {
-                throw ImrseError.staleSelection
-            }
-            guard transaction.stillOwns(pasteboard) else { throw ImrseError.clipboardFailed }
-            keyDown.flags = .maskCommand
-            keyUp.flags = .maskCommand
-            keyDown.postToPid(target.processID)
-            keyUp.postToPid(target.processID)
+            try VerifiedAction.perform(
+                verify: {
+                    try self.requireTargetForeground(target)
+                    guard self.clipboardFallbackTargetIsEligible(target) else {
+                        throw ImrseError.staleSelection
+                    }
+                    let beforePost = try self.currentSelection(target)
+                    guard beforePost.range == range,
+                          self.sameText(beforePost.text, expectedText),
+                          let valueBeforePost = try self.wholeValue(target.element, failure: .staleSelection),
+                          self.sameText(valueBeforePost, oldValue)
+                    else {
+                        throw ImrseError.staleSelection
+                    }
+                    guard transaction.stillOwns(pasteboard) else { throw ImrseError.clipboardFailed }
+                },
+                action: {
+                    keyDown.flags = .maskCommand
+                    keyUp.flags = .maskCommand
+                    keyDown.postToPid(target.processID)
+                    keyUp.postToPid(target.processID)
+                }
+            )
 
             guard try await waitForValue(expectedValue, in: target.element) else {
                 throw ImrseError.replacementFailed
