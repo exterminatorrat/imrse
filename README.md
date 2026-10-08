@@ -91,7 +91,7 @@ Cloud providers handle text sent to them under their own data policies. Local-on
 
 A recent locally validated app bundle contains both `arm64` and `x86_64` slices. That does **not** claim that imrse has been smoke-tested on Intel Macs or on the macOS 14 minimum version. Managed on-device models are limited to Apple silicon.
 
-Replacement checks are bounded to measured targets: disposable plain text in TextEdit and input/textarea fixtures in Safari, Chrome, and Vivaldi. Rich-text editors, web `contenteditable` fields, and other unmeasured apps are not claimed as supported. See the [verification report](VERIFICATION.md) for test scope and [remaining macOS gates](UNVERIFIED_MACOS.md) for what is still unverified.
+Replacement checks are bounded to measured targets: disposable plain text in TextEdit and input/textarea fixtures in Safari, Chrome, and Vivaldi. Rich-text editors, web `contenteditable` fields, and other unmeasured apps are not claimed as supported. See the [verification report](VERIFICATION.md) for test scope, [remaining macOS gates](UNVERIFIED_MACOS.md) for what is still unverified, and the [web editor investigation roadmap](docs/web-editor-roadmap.md) for future validation gates; the roadmap is not a support commitment.
 
 ## Troubleshooting
 
