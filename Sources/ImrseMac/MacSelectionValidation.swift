@@ -275,4 +275,16 @@ enum ClipboardTargetStructureValidation {
         return false
     }
 }
+
+@MainActor
+enum VerifiedAction {
+    static func perform<Output>(
+        verify: () throws -> Void,
+        action: () throws -> Output
+    ) throws -> Output {
+        try verify()
+        return try action()
+    }
+}
+
 #endif

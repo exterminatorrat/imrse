@@ -330,14 +330,24 @@ public final class MacSelectionAccess: SelectionAccess {
             && sameText(currentSelection.text, receipt.replacement)
         let canWriteSelectedText = (try? attributeIsSettable(target.element, kAXSelectedTextAttribute)) == true
         if selectedReplacement, canWriteSelectedText {
-            let beforeWrite = try self.currentSelection(target, allowingEmpty: true)
-            guard sameSelection(beforeWrite, currentSelection),
-                  let valueBeforeWrite = try wholeValue(target.element, failure: .undoUnavailable),
-                  sameText(valueBeforeWrite, currentValue)
-            else {
-                throw ImrseError.undoUnavailable
-            }
-            let status = try setAttribute(target.element, kAXSelectedTextAttribute, value: receipt.target.text as CFString)
+            let status = try VerifiedAction.perform(
+                verify: {
+                    let beforeWrite = try self.currentSelection(target, allowingEmpty: true)
+                    guard self.sameSelection(beforeWrite, currentSelection),
+                          let valueBeforeWrite = try self.wholeValue(target.element, failure: .undoUnavailable),
+                          self.sameText(valueBeforeWrite, currentValue)
+                    else {
+                        throw ImrseError.undoUnavailable
+                    }
+                },
+                action: {
+                    try self.setAttribute(
+                        target.element,
+                        kAXSelectedTextAttribute,
+                        value: receipt.target.text as CFString
+                    )
+                }
+            )
             guard status == .success else {
                 invalidateAfterUnverifiedWrite(target.id)
                 throw ImrseError.undoUnavailable
@@ -346,14 +356,20 @@ public final class MacSelectionAccess: SelectionAccess {
             guard (try? attributeIsSettable(target.element, kAXValueAttribute)) == true else {
                 throw ImrseError.undoUnavailable
             }
-            let beforeWrite = try self.currentSelection(target, allowingEmpty: true)
-            guard sameSelection(beforeWrite, currentSelection),
-                  let valueBeforeWrite = try wholeValue(target.element, failure: .undoUnavailable),
-                  sameText(valueBeforeWrite, currentValue)
-            else {
-                throw ImrseError.undoUnavailable
-            }
-            let status = try setAttribute(target.element, kAXValueAttribute, value: restoredValue as CFString)
+            let status = try VerifiedAction.perform(
+                verify: {
+                    let beforeWrite = try self.currentSelection(target, allowingEmpty: true)
+                    guard self.sameSelection(beforeWrite, currentSelection),
+                          let valueBeforeWrite = try self.wholeValue(target.element, failure: .undoUnavailable),
+                          self.sameText(valueBeforeWrite, currentValue)
+                    else {
+                        throw ImrseError.undoUnavailable
+                    }
+                },
+                action: {
+                    try self.setAttribute(target.element, kAXValueAttribute, value: restoredValue as CFString)
+                }
+            )
             guard status == .success else {
                 invalidateAfterUnverifiedWrite(target.id)
                 throw ImrseError.undoUnavailable
@@ -707,25 +723,31 @@ public final class MacSelectionAccess: SelectionAccess {
         var selectedTextNoOpValidated = false
         if before.range == range, sameText(before.text, expectedText),
            try attributeIsSettable(target.element, kAXSelectedTextAttribute) {
-            let current = try currentSelection(target, allowingEmpty: true)
-            guard sameSelection(current, before) else {
-                throw ImrseError.staleSelection
-            }
-            if let oldValue {
-                guard let currentValue = try wholeValue(target.element, failure: .replacementFailed),
-                      sameText(currentValue, oldValue)
-                else {
-                    throw ImrseError.staleSelection
+            let status = try VerifiedAction.perform(
+                verify: {
+                    let current = try self.currentSelection(target, allowingEmpty: true)
+                    guard self.sameSelection(current, before) else {
+                        throw ImrseError.staleSelection
+                    }
+                    if let oldValue {
+                        guard let currentValue = try self.wholeValue(target.element, failure: .replacementFailed),
+                              self.sameText(currentValue, oldValue)
+                        else {
+                            throw ImrseError.staleSelection
+                        }
+                    }
+                    if self.clipboardFallbackEnabled {
+                        selectedTextFallbackBaseline = ClipboardFallbackNoOpValidation.baseline(
+                            value: oldValue ?? (try? self.wholeValue(target.element, failure: .replacementFailed)),
+                            range: range,
+                            selectedText: expectedText
+                        )
+                    }
+                },
+                action: {
+                    try self.setAttribute(target.element, kAXSelectedTextAttribute, value: replacement as CFString)
                 }
-            }
-            if clipboardFallbackEnabled {
-                selectedTextFallbackBaseline = ClipboardFallbackNoOpValidation.baseline(
-                    value: oldValue ?? (try? wholeValue(target.element, failure: .replacementFailed)),
-                    range: range,
-                    selectedText: expectedText
-                )
-            }
-            let status = try setAttribute(target.element, kAXSelectedTextAttribute, value: replacement as CFString)
+            )
             guard status == .success else {
                 invalidateAfterUnverifiedWrite(target.id)
                 throw ImrseError.replacementFailed
@@ -817,14 +839,20 @@ public final class MacSelectionAccess: SelectionAccess {
            let oldValue,
            let expectedValue,
            try attributeIsSettable(target.element, kAXValueAttribute) {
-            let stillCurrent = try currentSelection(target, allowingEmpty: true)
-            guard sameSelection(stillCurrent, before),
-                  let currentValue = try wholeValue(target.element, failure: .replacementFailed),
-                  sameText(currentValue, oldValue)
-            else {
-                throw ImrseError.staleSelection
-            }
-            let status = try setAttribute(target.element, kAXValueAttribute, value: expectedValue as CFString)
+            let status = try VerifiedAction.perform(
+                verify: {
+                    let stillCurrent = try self.currentSelection(target, allowingEmpty: true)
+                    guard self.sameSelection(stillCurrent, before),
+                          let currentValue = try self.wholeValue(target.element, failure: .replacementFailed),
+                          self.sameText(currentValue, oldValue)
+                    else {
+                        throw ImrseError.staleSelection
+                    }
+                },
+                action: {
+                    try self.setAttribute(target.element, kAXValueAttribute, value: expectedValue as CFString)
+                }
+            )
             guard status == .success else {
                 invalidateAfterUnverifiedWrite(target.id)
                 throw ImrseError.replacementFailed
@@ -940,21 +968,29 @@ public final class MacSelectionAccess: SelectionAccess {
             else {
                 throw ImrseError.clipboardFailed
             }
-            try requireTargetForeground(target)
-            guard clipboardFallbackTargetIsEligible(target) else { throw ImrseError.staleSelection }
-            let beforePost = try currentSelection(target)
-            guard beforePost.range == range,
-                  sameText(beforePost.text, expectedText),
-                  let valueBeforePost = try wholeValue(target.element, failure: .staleSelection),
-                  sameText(valueBeforePost, oldValue)
-            else {
-                throw ImrseError.staleSelection
-            }
-            guard transaction.stillOwns(pasteboard) else { throw ImrseError.clipboardFailed }
-            keyDown.flags = .maskCommand
-            keyUp.flags = .maskCommand
-            keyDown.postToPid(target.processID)
-            keyUp.postToPid(target.processID)
+            try VerifiedAction.perform(
+                verify: {
+                    try self.requireTargetForeground(target)
+                    guard self.clipboardFallbackTargetIsEligible(target) else {
+                        throw ImrseError.staleSelection
+                    }
+                    let beforePost = try self.currentSelection(target)
+                    guard beforePost.range == range,
+                          self.sameText(beforePost.text, expectedText),
+                          let valueBeforePost = try self.wholeValue(target.element, failure: .staleSelection),
+                          self.sameText(valueBeforePost, oldValue)
+                    else {
+                        throw ImrseError.staleSelection
+                    }
+                    guard transaction.stillOwns(pasteboard) else { throw ImrseError.clipboardFailed }
+                },
+                action: {
+                    keyDown.flags = .maskCommand
+                    keyUp.flags = .maskCommand
+                    keyDown.postToPid(target.processID)
+                    keyUp.postToPid(target.processID)
+                }
+            )
 
             guard try await waitForValue(expectedValue, in: target.element) else {
                 throw ImrseError.replacementFailed
