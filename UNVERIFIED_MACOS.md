@@ -4,6 +4,16 @@ The current measured results are in [VERIFICATION.md](VERIFICATION.md). Passing
 tests, a signed local bundle or a browser DOM harness does not prove installed
 host compatibility, production account policy or physical shortcut delivery.
 
+## Synchronous selection capture and responsiveness
+
+`TransformationEngine.invoke()` calls `SelectionAccess.capture()` synchronously, and both the engine and `MacSelectionAccess` are `@MainActor`-isolated. Capture first clears the prior target, then starts a one-second `ContinuousClock` budget. If the focused element is temporarily unavailable, it sleeps synchronously for 10 ms and retries while the remaining-time check predicts room for another wait and AX message; there is no fixed retry count. Only a `nil` focused-element result is retried; focused-element read errors and validation failures exit. The request to mark the application for manual Accessibility is best-effort. The current retry tests intentionally cover focus appearing after three waits and more than three focus reads while a scripted budget remains.
+
+The one-second value is a cooperative pre-call deadline, not an end-to-end latency guarantee. AX messaging is configured with a 100 ms timeout, and deadline checks run before selected requests, but they cannot interrupt a request already in flight. Some steps can issue additional AX calls after an earlier deadline check, observer setup/cleanup is not fully bounded by it, and clearing the previous capture happens before the new deadline starts. Actual host latency and total blocking time therefore depend on the operating system, target app, and scheduling; no exact maximum or live responsiveness measurement is established here.
+
+Because capture runs synchronously on the main actor, main-actor UI work—including a cancellation action—cannot run until capture returns; there is no task-cancellation check inside this path. The unit tests exercise scripted retry and budget predicates, not a live Accessibility host or the duration of native AX calls. Do not describe capture as guaranteed to finish in one second, infer a fixed retry count, or claim cancellation is immediate during capture.
+
+A fixed retry cap could reduce waiting but would reject delayed focus that the current deadline-driven path and tests permit. Moving AX work to another executor would change the `SelectionAccess`/engine contract and require a separate design for AX observer ownership and main-runloop lifecycle; moving it off-main alone does not establish safe observer behavior. Neither alternative is implemented or selected here. Source references: `Sources/ImrseCore/TransformationEngine.swift`, `Sources/ImrseMac/MacSelectionAccess.swift`, and `Tests/ImrseMacTests/MacSelectionAccessSelectionTests.swift`.
+
 ## Before distribution
 
 1. Use a stable Developer ID signature and notarization. Recheck installed
