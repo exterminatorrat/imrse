@@ -17,6 +17,7 @@ from scripts.package_local_candidate import (
     CERTIFICATE_SIGNING_LABEL,
     CANDIDATE_VERSION,
     C_RUNTIME_DEPENDENCIES,
+    CI_VALIDATION_RECEIPT_FILE,
     EXPECTED_APP_VERSION,
     EXPECTED_BUNDLE_ID,
     EXPECTED_BUILD_VERSION,
@@ -128,6 +129,7 @@ class PackageLocalCandidateTests(unittest.TestCase):
         cls.source_temp.cleanup()
 
     def make_build_fixture(self, base):
+        base = Path(base).resolve(strict=True)
         build_root = base / "isolated-build"
         copy_root, manifest_path = copy_source_inputs(
             self.source_root,
@@ -149,6 +151,51 @@ class PackageLocalCandidateTests(unittest.TestCase):
             TEST_CERTIFICATE_SHA1,
         )
         return build_root, copy_root, manifest_path, product, provenance_path
+
+    def invoke_ci_build_with_stubbed_swift(self, base, host_architecture):
+        stub_directory = Path(base) / "stubs"
+        stub_directory.mkdir()
+        uname = stub_directory / "uname"
+        uname.write_text(
+            "#!/bin/sh\n"
+            "case \"$1\" in\n"
+            "  -s) printf 'Darwin\\n' ;;\n"
+            "  -m) printf '%s\\n' \"$IMRSE_TEST_HOST_ARCHITECTURE\" ;;\n"
+            "  *) exit 2 ;;\n"
+            "esac\n"
+        )
+        uname.chmod(0o755)
+        swift = stub_directory / "swift"
+        swift.write_text(
+            "#!/bin/sh\n"
+            "printf '%s\\0' \"$@\" > \"$IMRSE_TEST_SWIFT_ARGV_CAPTURE\"\n"
+            "exit 97\n"
+        )
+        swift.chmod(0o755)
+        capture = Path(base) / "swift-argv"
+        output = Path(base) / "ci-output"
+        environment = os.environ.copy()
+        environment.update({
+            "IMRSE_CI_PACKAGE_VALIDATION": "1",
+            "IMRSE_DIST_DIR": str(output),
+            "IMRSE_TEST_HOST_ARCHITECTURE": host_architecture,
+            "IMRSE_TEST_SWIFT_ARGV_CAPTURE": str(capture),
+            "PATH": os.pathsep.join((str(stub_directory), environment["PATH"])),
+        })
+        environment.pop("IMRSE_SIGNING_CERTIFICATE_SHA1", None)
+        for key in ("IMRSE_RELEASE_SOURCE_COMMIT", "IMRSE_RELEASE_SOURCE_TREE", "IMRSE_RELEASE_BUILD_ROOT"):
+            environment.pop(key, None)
+        result = subprocess.run(
+            ["bash", str(ROOT / "scripts/build-app.sh")],
+            cwd=ROOT,
+            env=environment,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            check=False,
+        )
+        argv = capture.read_bytes().split(b"\0")[:-1] if capture.exists() else None
+        return result, argv, output
 
     def clone_source(self, parent):
         source = parent / "dirty-source"
@@ -369,8 +416,8 @@ class PackageLocalCandidateTests(unittest.TestCase):
             nested.parent.mkdir(parents=True)
             main.write_bytes(b"\xcf\xfa\xed\xfe fake main Mach-O")
             nested.write_bytes(b"\xcf\xfa\xed\xfe fake nested Mach-O")
-            self.codesign_identifiers[str(nested)] = "com.example.helper"
-            self.codesign_commented_designated_requirements.add(str(nested))
+            self.codesign_identifiers[str(nested.resolve())] = "com.example.helper"
+            self.codesign_commented_designated_requirements.add(str(nested.resolve()))
             receipt = packager.sign_app_bundle(bundle, TEST_CERTIFICATE_SHA1.upper())
         self.assertEqual(receipt["certificateSHA1"], TEST_CERTIFICATE_SHA1)
         self.assertEqual(receipt["bundle"]["identifier"], EXPECTED_BUNDLE_ID)
@@ -400,7 +447,7 @@ class PackageLocalCandidateTests(unittest.TestCase):
                 main = bundle / "Contents/MacOS/imrse"
                 main.parent.mkdir(parents=True)
                 main.write_bytes(b"\xcf\xfa\xed\xfe fake main Mach-O")
-                self.codesign_designated_outputs[str(main)] = output
+                self.codesign_designated_outputs[str(main.resolve())] = output
                 with self.assertRaisesRegex(PackageError, "default designated requirement is missing or ambiguous"):
                     sign_and_verify(bundle, [main], TEST_CERTIFICATE_SHA1)
 
@@ -422,7 +469,7 @@ class PackageLocalCandidateTests(unittest.TestCase):
 
     def test_build_provenance_rejects_wrong_builder_argv_paths_and_working_directory(self):
         with tempfile.TemporaryDirectory() as temp:
-            base = Path(temp)
+            base = Path(temp).resolve(strict=True)
             build_root = base / "isolated-build"
             copy_root, _ = copy_source_inputs(
                 self.source_root,
@@ -638,6 +685,88 @@ class PackageLocalCandidateTests(unittest.TestCase):
                     TEST_CERTIFICATE_SHA1,
                 )
 
+    def test_ci_validation_receipt_blocks_signing_and_release_provenance(self):
+        with tempfile.TemporaryDirectory() as temp:
+            bundle = Path(temp) / "imrse.app"
+            executable = bundle / "Contents/MacOS/imrse"
+            receipt = bundle / "Contents/Resources" / CI_VALIDATION_RECEIPT_FILE
+            executable.parent.mkdir(parents=True)
+            receipt.parent.mkdir(parents=True)
+            executable.write_bytes(b"\xcf\xfa\xed\xfe fake executable")
+            receipt.write_text('{"distributionEligible":false}')
+            with self.assertRaisesRegex(PackageError, "cannot be signed"):
+                packager.sign_app_bundle(bundle, TEST_CERTIFICATE_SHA1)
+            self.assertEqual(self.codesign_calls, [])
+
+        with tempfile.TemporaryDirectory() as temp:
+            build_root, copy_root, _, product, provenance_path = self.make_build_fixture(Path(temp))
+            provenance_path.unlink()
+            receipt = product / "Contents/Resources" / CI_VALIDATION_RECEIPT_FILE
+            receipt.parent.mkdir(parents=True, exist_ok=True)
+            receipt.write_text('{"distributionEligible":false}')
+            with self.assertRaisesRegex(PackageError, "cannot be signed"):
+                record_build_provenance(
+                    self.source_root,
+                    self.source_commit,
+                    self.source_tree,
+                    build_root,
+                    copy_root,
+                    expected_release_build_command(build_root),
+                    TEST_CERTIFICATE_SHA1,
+                )
+            self.assertFalse(provenance_path.exists())
+
+        with tempfile.TemporaryDirectory() as temp:
+            build_root, _, _, product, provenance_path = self.make_build_fixture(Path(temp))
+            receipt = product / "Contents/Resources" / CI_VALIDATION_RECEIPT_FILE
+            receipt.parent.mkdir(parents=True, exist_ok=True)
+            receipt.write_text('{"distributionEligible":false}')
+            with self.assertRaisesRegex(PackageError, "cannot be signed"):
+                validate_build_provenance(
+                    provenance_path,
+                    self.source_root,
+                    product,
+                    build_root,
+                    self.source_commit,
+                    self.source_tree,
+                    TEST_CERTIFICATE_SHA1,
+                )
+
+    def test_ci_package_validation_writes_only_a_non_distribution_receipt(self):
+        runtime_modules = {module for dependency in RUNTIME_DEPENDENCIES for module in dependency[3]}
+        runtime_symbols = {symbol for dependency in C_RUNTIME_DEPENDENCIES for symbol in dependency[3]}
+        for host, architecture in (("arm64", "arm64"), ("x86_64", "x86_64")):
+            with self.subTest(host=host), tempfile.TemporaryDirectory() as temp:
+                app = Path(temp) / "imrse.app"
+                main_binary = app / "Contents/MacOS/imrse"
+                resources = app / "Contents/Resources"
+                (resources / "Brand").mkdir(parents=True)
+                main_binary.parent.mkdir(parents=True)
+                main_binary.write_bytes(b"\xcf\xfa\xed\xfe fake CI executable")
+                (app / "Contents/Info.plist").write_bytes((self.source_root / "Resources/Info.plist").read_bytes())
+                (resources / "Brand/imrse-menubar-template.pdf").write_bytes(b"fixture")
+                with patch.object(packager, "validate_required_resources") as required_resources, \
+                        patch.object(packager, "macho_architectures", return_value={architecture}), \
+                        patch.object(packager, "validate_runtime_modules", return_value=runtime_modules) as modules_check, \
+                        patch.object(packager, "validate_runtime_symbols", return_value=runtime_symbols) as symbols_check, \
+                        patch.object(packager.platform, "machine", return_value=host):
+                    receipt_path = packager.validate_ci_package_app(app, self.source_root, "release")
+                receipt = json.loads(receipt_path.read_text())
+                self.assertEqual(receipt_path.name, CI_VALIDATION_RECEIPT_FILE)
+                self.assertEqual(receipt["validationMode"], "unsigned-ci-package-validation-only")
+                self.assertFalse(receipt["distributionEligible"])
+                self.assertFalse(receipt["codeSigningPerformed"])
+                self.assertFalse(receipt["releaseBuildProvenanceCreated"])
+                self.assertIsNone(receipt["signingCertificateSHA1"])
+                self.assertIsNone(receipt["signatureReceipt"])
+                self.assertEqual(receipt["product"]["hostArchitecture"], architecture)
+                self.assertEqual(receipt["product"]["machoArchitectures"], {"Contents/MacOS/imrse": architecture})
+                self.assertEqual(receipt["checks"]["requiredResourcesAndLegalNotices"], "passed")
+                required_resources.assert_called_once()
+                modules_check.assert_called_once_with(main_binary.resolve(), architecture)
+                symbols_check.assert_called_once_with(main_binary.resolve(), architecture)
+        self.assertEqual(self.codesign_calls, [])
+
     def test_missing_or_invalid_input_bundle_fails_without_touching_it(self):
         source_info = read_source_info(ROOT)
         with self.assertRaises(PackageError):
@@ -668,15 +797,17 @@ class PackageLocalCandidateTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             output = Path(temp) / "products"
             output.mkdir()
+            environment = os.environ.copy()
+            environment.pop("IMRSE_CI_PACKAGE_VALIDATION", None)
+            environment.update({
+                "IMRSE_DIST_DIR": str(output),
+                "IMRSE_REQUIRE_EMPTY_APP_OUTPUT": "1",
+                "IMRSE_SIGNING_CERTIFICATE_SHA1": TEST_CERTIFICATE_SHA1,
+            })
             result = subprocess.run(
                 ["bash", str(ROOT / "scripts/build-app.sh")],
                 cwd=ROOT,
-                env={
-                    **os.environ,
-                    "IMRSE_DIST_DIR": str(output),
-                    "IMRSE_REQUIRE_EMPTY_APP_OUTPUT": "1",
-                    "IMRSE_SIGNING_CERTIFICATE_SHA1": TEST_CERTIFICATE_SHA1,
-                },
+                env=environment,
                 text=True,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
@@ -694,6 +825,7 @@ class PackageLocalCandidateTests(unittest.TestCase):
             marker.write_text("preserve")
             (build_root / "cache").symlink_to(external_cache, target_is_directory=True)
             environment = os.environ.copy()
+            environment.pop("IMRSE_CI_PACKAGE_VALIDATION", None)
             environment.pop("SWIFTPM_CACHE_PATH", None)
             environment.update({
                 "IMRSE_RELEASE_SOURCE_COMMIT": self.source_commit,
@@ -718,6 +850,7 @@ class PackageLocalCandidateTests(unittest.TestCase):
             build_root = Path(temp) / "release-build"
             external_cache = Path(temp) / "external-cache"
             environment = os.environ.copy()
+            environment.pop("IMRSE_CI_PACKAGE_VALIDATION", None)
             environment.update({
                 "IMRSE_RELEASE_SOURCE_COMMIT": self.source_commit,
                 "IMRSE_RELEASE_SOURCE_TREE": self.source_tree,
@@ -738,6 +871,7 @@ class PackageLocalCandidateTests(unittest.TestCase):
             self.assertIn("isolated SwiftPM cache path", result.stdout)
             self.assertFalse(build_root.exists())
         environment = os.environ.copy()
+        environment.pop("IMRSE_CI_PACKAGE_VALIDATION", None)
         for key in ("IMRSE_RELEASE_SOURCE_COMMIT", "IMRSE_RELEASE_SOURCE_TREE", "IMRSE_RELEASE_BUILD_ROOT"):
             environment.pop(key, None)
         environment.pop("SWIFTPM_CACHE_PATH", None)
@@ -758,7 +892,9 @@ class PackageLocalCandidateTests(unittest.TestCase):
     def test_build_script_fails_closed_without_certificate_selector(self):
         script = (ROOT / "scripts/build-app.sh").read_text()
         self.assertIn('SIGNING_CERTIFICATE_SHA1="${IMRSE_SIGNING_CERTIFICATE_SHA1:-}"', script)
+        self.assertIn('CI_PACKAGE_VALIDATION="${IMRSE_CI_PACKAGE_VALIDATION:-0}"', script)
         self.assertIn('"$ROOT/scripts/package_local_candidate.py" sign-app', script)
+        self.assertIn('"$ROOT/scripts/package_local_candidate.py" validate-ci-app', script)
         self.assertIn('--app "$STAGED_APP"', script)
         self.assertIn('--signing-certificate-sha1 "$SIGNING_CERTIFICATE_SHA1"', script)
         self.assertNotIn('SIGNING_IDENTITY="${SIGNING_IDENTITY:--}"', script)
@@ -767,6 +903,7 @@ class PackageLocalCandidateTests(unittest.TestCase):
             with self.subTest(invalid=invalid), tempfile.TemporaryDirectory() as temp:
                 output = Path(temp) / "dist"
                 environment = os.environ.copy()
+                environment.pop("IMRSE_CI_PACKAGE_VALIDATION", None)
                 environment.pop("IMRSE_SIGNING_CERTIFICATE_SHA1", None)
                 environment["IMRSE_DIST_DIR"] = str(output)
                 if invalid is not None:
@@ -783,6 +920,81 @@ class PackageLocalCandidateTests(unittest.TestCase):
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn("caller-selected 40-hex certificate SHA-1", result.stdout)
                 self.assertFalse(output.exists())
+
+    def test_ci_build_validation_rejects_signers_release_inputs_and_unsafe_mode(self):
+        cases = (
+            ("signer", {"IMRSE_SIGNING_CERTIFICATE_SHA1": "not-a-selected-cert"}, "cannot use a signing selector"),
+            ("release", {"IMRSE_RELEASE_SOURCE_COMMIT": "0" * 40}, "cannot use a signing selector or Release provenance inputs"),
+            ("configuration", {"CONFIGURATION": "debug"}, "requires CONFIGURATION=release"),
+            ("output", {"IMRSE_DIST_DIR": None}, "requires a new absolute IMRSE_DIST_DIR"),
+            ("mode", {"IMRSE_CI_PACKAGE_VALIDATION": "true"}, "must be 0 or 1"),
+        )
+        for label, updates, expected in cases:
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as temp:
+                output = Path(temp) / "ci-products"
+                environment = os.environ.copy()
+                environment.update({
+                    "IMRSE_CI_PACKAGE_VALIDATION": "1",
+                    "IMRSE_DIST_DIR": str(output),
+                })
+                environment.pop("IMRSE_SIGNING_CERTIFICATE_SHA1", None)
+                for key in ("IMRSE_RELEASE_SOURCE_COMMIT", "IMRSE_RELEASE_SOURCE_TREE", "IMRSE_RELEASE_BUILD_ROOT"):
+                    environment.pop(key, None)
+                for key, value in updates.items():
+                    if value is None:
+                        environment.pop(key, None)
+                    else:
+                        environment[key] = value
+                result = subprocess.run(
+                    ["bash", str(ROOT / "scripts/build-app.sh")],
+                    cwd=ROOT,
+                    env=environment,
+                    text=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    check=False,
+                )
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(expected, result.stdout)
+                self.assertFalse(output.exists())
+
+    def test_ci_build_passes_the_validated_host_architecture_to_swift(self):
+        for host_architecture, expected_triple in (
+            ("arm64", "arm64-apple-macosx14.0"),
+            ("x86_64", "x86_64-apple-macosx14.0"),
+        ):
+            with self.subTest(host_architecture=host_architecture), tempfile.TemporaryDirectory() as temp:
+                result, argv, output = self.invoke_ci_build_with_stubbed_swift(Path(temp), host_architecture)
+                self.assertEqual(result.returncode, 97, result.stdout)
+                self.assertIsNotNone(argv)
+                self.assertEqual(argv[0], b"build")
+                self.assertEqual(argv[argv.index(b"--configuration") + 1], b"release")
+                self.assertEqual(argv[argv.index(b"--triple") + 1].decode(), expected_triple)
+                self.assertIn(b"--only-use-versions-from-resolved-file", argv)
+                self.assertEqual(argv[-2:], [b"--product", b"imrse"])
+                self.assertTrue(output.is_dir())
+
+    def test_ci_build_rejects_unsupported_host_before_invoking_swift(self):
+        with tempfile.TemporaryDirectory() as temp:
+            base = Path(temp)
+            result, argv, output = self.invoke_ci_build_with_stubbed_swift(base, "sparc")
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("CI package validation does not support host architecture sparc", result.stdout)
+            self.assertIsNone(argv)
+            self.assertFalse(output.exists())
+
+    def test_package_workflow_selects_unsigned_ci_validation_and_never_publishes_it(self):
+        workflow = (ROOT / ".github/workflows/verify.yml").read_text()
+        package_job = workflow.partition("  package:\n")[2].partition("\n  design:\n")[0]
+        self.assertIn('IMRSE_CI_PACKAGE_VALIDATION: "1"', package_job)
+        self.assertIn("IMRSE_DIST_DIR: ${{ runner.temp }}/imrse-ci-package-validation", package_job)
+        self.assertNotIn("IMRSE_SIGNING_CERTIFICATE_SHA1", package_job)
+        self.assertIn("bash -n scripts/build-app.sh", package_job)
+        self.assertIn("plutil -lint Resources/Info.plist", package_job)
+        self.assertIn("python3 -m unittest discover -s scripts/tests -p 'test_package_local_candidate.py' -v", package_job)
+        self.assertIn("./scripts/build-app.sh", package_job)
+        self.assertNotIn("upload-artifact", package_job)
+        self.assertNotIn("continue-on-error", package_job)
 
     def test_package_cli_propagates_the_same_certificate_selector(self):
         argv = [
@@ -816,6 +1028,20 @@ class PackageLocalCandidateTests(unittest.TestCase):
                 ]), 0)
         self.assertEqual(signer.call_args.args, (Path("/tmp/build/products/imrse.app"), TEST_CERTIFICATE_SHA1))
         self.assertIn("Signed and verified certificate-selected app", output.getvalue())
+
+    def test_validate_ci_cli_routes_only_to_validation_receipt_creation(self):
+        output = StringIO()
+        receipt = Path("/tmp/imrse-ci/CI-PACKAGE-VALIDATION.json")
+        with patch.object(packager, "validate_ci_package_app", return_value=receipt) as validator:
+            with redirect_stdout(output):
+                self.assertEqual(packager.main([
+                    "validate-ci-app",
+                    "--app", "/tmp/imrse-ci/imrse.app",
+                    "--source-root", str(self.source_root),
+                    "--configuration", "release",
+                ]), 0)
+        self.assertEqual(validator.call_args.args, (Path("/tmp/imrse-ci/imrse.app"), self.source_root, "release"))
+        self.assertIn("CI validation-only receipt", output.getvalue())
 
     def test_manifest_records_runtime_dependency_and_license_hashes_without_old_delta_claims(self):
         with tempfile.TemporaryDirectory() as temp:

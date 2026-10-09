@@ -30,11 +30,15 @@ jobs:
     runs-on: macos-26
     env:
       DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
+      IMRSE_CI_PACKAGE_VALIDATION: "1"
     steps:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
       - run: xcodebuild -version && swift --version
+      - run: bash -n scripts/build-app.sh
+      - run: plutil -lint Resources/Info.plist
+      - run: python3 -m unittest discover -s scripts/tests -p 'test_package_local_candidate.py' -v
       - name: Ensure Metal compiler is available
         run: |
           if ! xcrun --sdk macosx metal --version; then
@@ -42,6 +46,8 @@ jobs:
           fi
           xcrun --sdk macosx metal --version
       - run: ./scripts/build-app.sh
+        env:
+          IMRSE_DIST_DIR: ${{ runner.temp }}/imrse-ci-package-validation
   design:
     runs-on: ubuntu-latest
     defaults:

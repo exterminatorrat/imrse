@@ -7,15 +7,54 @@ if [[ "$(uname -s)" != "Darwin" ]]; then
   exit 1
 fi
 CONFIGURATION="${CONFIGURATION:-release}"
-SIGNING_CERTIFICATE_SHA1="${IMRSE_SIGNING_CERTIFICATE_SHA1:-}"
-if [[ ! "$SIGNING_CERTIFICATE_SHA1" =~ ^[[:xdigit:]]{40}$ ]]; then
-  printf 'Set IMRSE_SIGNING_CERTIFICATE_SHA1 to the caller-selected 40-hex certificate SHA-1; ad-hoc signing is not supported.\n' >&2
+CI_PACKAGE_VALIDATION="${IMRSE_CI_PACKAGE_VALIDATION:-0}"
+CI_BUILD_TRIPLE=""
+if [[ "$CI_PACKAGE_VALIDATION" != "0" && "$CI_PACKAGE_VALIDATION" != "1" ]]; then
+  printf 'IMRSE_CI_PACKAGE_VALIDATION must be 0 or 1.\n' >&2
   exit 1
 fi
-SIGNING_CERTIFICATE_SHA1="$(printf '%s' "$SIGNING_CERTIFICATE_SHA1" | tr '[:upper:]' '[:lower:]')"
 RELEASE_COMMIT="${IMRSE_RELEASE_SOURCE_COMMIT:-}"
 RELEASE_TREE="${IMRSE_RELEASE_SOURCE_TREE:-}"
 RELEASE_BUILD_ROOT="${IMRSE_RELEASE_BUILD_ROOT:-}"
+SIGNING_CERTIFICATE_SHA1="${IMRSE_SIGNING_CERTIFICATE_SHA1:-}"
+if [[ "$CI_PACKAGE_VALIDATION" == "1" ]]; then
+  if [[ -n "$SIGNING_CERTIFICATE_SHA1" || -n "$RELEASE_COMMIT$RELEASE_TREE$RELEASE_BUILD_ROOT" ]]; then
+    printf 'CI package validation cannot use a signing selector or Release provenance inputs.\n' >&2
+    exit 1
+  fi
+  if [[ "$CONFIGURATION" != "release" ]]; then
+    printf 'CI package validation requires CONFIGURATION=release.\n' >&2
+    exit 1
+  fi
+  CI_HOST_ARCHITECTURE="$(uname -m)"
+  case "$CI_HOST_ARCHITECTURE" in
+    arm64|aarch64) CI_BUILD_TRIPLE="arm64-apple-macosx14.0" ;;
+    x86_64|amd64) CI_BUILD_TRIPLE="x86_64-apple-macosx14.0" ;;
+    *)
+      printf 'CI package validation does not support host architecture %s.\n' "$CI_HOST_ARCHITECTURE" >&2
+      exit 1
+      ;;
+  esac
+  CI_DIST_DIR="${IMRSE_DIST_DIR:-}"
+  if [[ -z "$CI_DIST_DIR" || "$CI_DIST_DIR" != /* || -e "$CI_DIST_DIR" || -L "$CI_DIST_DIR" ]]; then
+    printf 'CI package validation requires a new absolute IMRSE_DIST_DIR outside the source checkout.\n' >&2
+    exit 1
+  fi
+  CI_DIST_PARENT="$(cd "$(dirname "$CI_DIST_DIR")" && pwd -P)"
+  CI_DIST_NAME="$(basename "$CI_DIST_DIR")"
+  if [[ "$CI_DIST_NAME" == "." || "$CI_DIST_NAME" == ".." || "$CI_DIST_PARENT" == "$SOURCE_ROOT" || "$CI_DIST_PARENT" == "$SOURCE_ROOT/"* ]]; then
+    printf 'CI package validation output must be outside the source checkout.\n' >&2
+    exit 1
+  fi
+  IMRSE_DIST_DIR="$CI_DIST_PARENT/$CI_DIST_NAME"
+  IMRSE_REQUIRE_EMPTY_APP_OUTPUT=1
+else
+  if [[ ! "$SIGNING_CERTIFICATE_SHA1" =~ ^[[:xdigit:]]{40}$ ]]; then
+    printf 'Set IMRSE_SIGNING_CERTIFICATE_SHA1 to the caller-selected 40-hex certificate SHA-1; ad-hoc signing is not supported.\n' >&2
+    exit 1
+  fi
+  SIGNING_CERTIFICATE_SHA1="$(printf '%s' "$SIGNING_CERTIFICATE_SHA1" | tr '[:upper:]' '[:lower:]')"
+fi
 if [[ -n "$RELEASE_COMMIT$RELEASE_TREE$RELEASE_BUILD_ROOT" ]]; then
   if [[ -z "$RELEASE_COMMIT" || -z "$RELEASE_TREE" || -z "$RELEASE_BUILD_ROOT" ]]; then
     printf 'Release mode requires IMRSE_RELEASE_SOURCE_COMMIT, IMRSE_RELEASE_SOURCE_TREE, and IMRSE_RELEASE_BUILD_ROOT.\n' >&2
@@ -94,6 +133,9 @@ SWIFT_FLAGS=(
   --security-path "$SECURITY_PATH"
   --only-use-versions-from-resolved-file
 )
+if [[ -n "$CI_BUILD_TRIPLE" ]]; then
+  SWIFT_FLAGS+=(--triple "$CI_BUILD_TRIPLE")
+fi
 BUILD_COMMAND=(swift build "${SWIFT_FLAGS[@]}" --product imrse)
 "${BUILD_COMMAND[@]}"
 BIN="$(swift build "${SWIFT_FLAGS[@]}" --show-bin-path)"
@@ -139,9 +181,16 @@ fi
 swift "$ROOT/Resources/GenerateIcon.swift" "$STAGING/imrse.iconset"
 iconutil --convert icns "$STAGING/imrse.iconset" --output "$STAGED_APP/Contents/Resources/imrse.icns"
 plutil -lint "$STAGED_APP/Contents/Info.plist"
-python3 "$ROOT/scripts/package_local_candidate.py" sign-app \
-  --app "$STAGED_APP" \
-  --signing-certificate-sha1 "$SIGNING_CERTIFICATE_SHA1"
+if [[ "$CI_PACKAGE_VALIDATION" == "1" ]]; then
+  python3 "$ROOT/scripts/package_local_candidate.py" validate-ci-app \
+    --app "$STAGED_APP" \
+    --source-root "$SOURCE_ROOT" \
+    --configuration "$CONFIGURATION"
+else
+  python3 "$ROOT/scripts/package_local_candidate.py" sign-app \
+    --app "$STAGED_APP" \
+    --signing-certificate-sha1 "$SIGNING_CERTIFICATE_SHA1"
+fi
 if [[ "${IMRSE_REQUIRE_EMPTY_APP_OUTPUT:-0}" == "1" ]]; then
   if [[ -e "$APP" || -L "$APP" ]]; then
     printf 'The required fresh app output appeared during the build: %s\n' "$APP" >&2
@@ -159,7 +208,11 @@ else
     exit 1
   fi
 fi
-printf '\nBuilt %s\nThis local bundle is not notarized.\n' "$APP"
+if [[ "$CI_PACKAGE_VALIDATION" == "1" ]]; then
+  printf '\nCI package validation only: unsigned non-distribution app at %s\n' "$APP"
+else
+  printf '\nBuilt %s\nThis local bundle is not notarized.\n' "$APP"
+fi
 if [[ -n "$RELEASE_COMMIT" ]]; then
   BUILD_COMMAND_ARGS=()
   for argument in "${BUILD_COMMAND[@]}"; do

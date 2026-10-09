@@ -23,6 +23,7 @@ EXPECTED_MINIMUM_OS = "14.0"
 OUTPUT_NAME = f"imrse-{CANDIDATE_VERSION}-macos-arm64.zip"
 BUILD_PROVENANCE_FILE = "BUILD-PROVENANCE.json"
 SOURCE_INPUT_MANIFEST_FILE = "SOURCE-INPUT-MANIFEST.json"
+CI_VALIDATION_RECEIPT_FILE = "CI-PACKAGE-VALIDATION.json"
 LOCK_FILES = (
     "Package.swift",
     "Package.resolved",
@@ -254,32 +255,110 @@ def validate_required_resources(bundle, root):
     validate_no_bundled_user_data(bundle)
 
 
-def runtime_modules_from_binary(binary):
-    raw = run(["nm", "-arch", "arm64", "-j", str(binary)])
+def reject_ci_validation_app(bundle):
+    receipt = Path(bundle) / "Contents/Resources" / CI_VALIDATION_RECEIPT_FILE
+    if os.path.lexists(receipt):
+        raise PackageError("CI validation-only app cannot be signed, recorded as release provenance, or distributed")
+
+
+def validate_ci_package_app(app, source_root, configuration):
+    if configuration != "release":
+        raise PackageError("CI package validation requires a Release build")
+    source_root = Path(source_root)
+    source_commit = run(["git", "rev-parse", "HEAD^{commit}"], cwd=source_root).strip()
+    source_tree = run(["git", "rev-parse", "HEAD^{tree}"], cwd=source_root).strip()
+    source_root = validate_source_checkout(source_root, source_commit, source_tree)
+    source_info = read_source_info(source_root)
+    bundle, info = validate_built_app_bundle(app, source_info)
+    reject_ci_validation_app(bundle)
+    validate_required_resources(bundle, source_root)
+    resources = bundle / "Contents/Resources"
+    if not any(path.is_file() and path.parent.name == "Brand" for path in resources.rglob("imrse-menubar-template.pdf")):
+        raise PackageError("the packaged menu-bar template is missing")
+    binaries = macho_files(bundle)
+    main_binary = bundle / "Contents/MacOS/imrse"
+    if not binaries or main_binary not in binaries:
+        raise PackageError("CI package validation requires the main Mach-O executable")
+    host_architecture = {
+        "arm64": "arm64",
+        "aarch64": "arm64",
+        "x86_64": "x86_64",
+        "amd64": "x86_64",
+    }.get(platform.machine().lower())
+    if host_architecture is None:
+        raise PackageError(f"CI package validation does not support host architecture {platform.machine()}")
+    architectures = {}
+    for binary in binaries:
+        actual_architectures = macho_architectures(binary)
+        if actual_architectures != {host_architecture}:
+            raise PackageError(f"built Mach-O architecture does not match the {host_architecture} CI host: {binary.relative_to(bundle)}")
+        architectures[binary.relative_to(bundle).as_posix()] = host_architecture
+    read_pins(source_root)
+    runtime_modules = validate_runtime_modules(main_binary, host_architecture)
+    runtime_symbols = validate_runtime_symbols(main_binary, host_architecture)
+    receipt_path = resources / CI_VALIDATION_RECEIPT_FILE
+    receipt = {
+        "schemaVersion": 1,
+        "validationMode": "unsigned-ci-package-validation-only",
+        "distributionEligible": False,
+        "codeSigningPerformed": False,
+        "signingCertificateSHA1": None,
+        "signatureReceipt": None,
+        "releaseBuildProvenanceCreated": False,
+        "provenanceScope": "CI validation receipt only; not a release record or compiler attestation",
+        "source": {"commitSHA": source_commit, "treeSHA": source_tree},
+        "product": {
+            "bundleIdentifier": info["CFBundleIdentifier"],
+            "version": info["CFBundleShortVersionString"],
+            "build": info["CFBundleVersion"],
+            "executableSHA256": sha256_file(main_binary),
+            "infoPlistSHA256": sha256_file(bundle / "Contents/Info.plist"),
+            "hostArchitecture": host_architecture,
+            "machoArchitectures": architectures,
+        },
+        "checks": {
+            "cleanCommittedSourceAndVersionMatch": "passed",
+            "runtimeModulesMatchedToPackageResolved": sorted(runtime_modules),
+            "runtimeCExportedSymbolsMatchedToPackageResolved": sorted(runtime_symbols),
+            "requiredResourcesAndLegalNotices": "passed",
+            "menuBarTemplateAndMetalShaderResources": "passed",
+        },
+        "limitations": [
+            "No code signature, signer receipt, or Release build provenance was created.",
+            "This validation-only output is not eligible for candidate packaging or distribution.",
+        ],
+    }
+    with receipt_path.open("x") as destination:
+        destination.write(json.dumps(receipt, indent=2, sort_keys=True) + "\n")
+    return receipt_path
+
+
+def runtime_modules_from_binary(binary, architecture="arm64"):
+    raw = run(["nm", "-arch", architecture, "-j", str(binary)])
     symbols = [line[1:] if line.startswith("_$s") else line for line in raw.splitlines() if line.startswith(("$s", "_$s"))]
     if not symbols:
-        raise PackageError("could not read Swift symbol modules from the arm64 executable")
+        raise PackageError(f"could not read Swift symbol modules from the {architecture} executable")
     demangled = run(["xcrun", "swift-demangle"], input_text="\n".join(symbols))
     expected = {module for dependency in RUNTIME_DEPENDENCIES for module in dependency[3]}
     lines = demangled.splitlines()
     return {module for module in expected if any(re.search(rf"\b{re.escape(module)}\.", line) for line in lines)}
 
 
-def validate_runtime_modules(binary):
-    observed = runtime_modules_from_binary(binary)
+def validate_runtime_modules(binary, architecture="arm64"):
+    observed = runtime_modules_from_binary(binary, architecture)
     expected = {module for dependency in RUNTIME_DEPENDENCIES for module in dependency[3]}
     missing = sorted(expected - observed)
     if missing:
-        raise PackageError(f"arm64 executable is missing expected runtime module symbols: {', '.join(missing)}")
+        raise PackageError(f"{architecture} executable is missing expected runtime module symbols: {', '.join(missing)}")
     return expected
 
 
-def validate_runtime_symbols(binary):
-    observed = set(run(["nm", "-arch", "arm64", "-gU", "-j", str(binary)]).splitlines())
+def validate_runtime_symbols(binary, architecture="arm64"):
+    observed = set(run(["nm", "-arch", architecture, "-gU", "-j", str(binary)]).splitlines())
     expected = {symbol for dependency in C_RUNTIME_DEPENDENCIES for symbol in dependency[3]}
     missing = sorted(expected - observed)
     if missing:
-        raise PackageError(f"arm64 executable is missing expected C runtime symbols: {', '.join(missing)}")
+        raise PackageError(f"{architecture} executable is missing expected C runtime symbols: {', '.join(missing)}")
     return expected
 
 
@@ -407,10 +486,15 @@ def sign_and_verify(bundle, binaries, certificate_sha1):
         raise PackageError("signed app bundle must be a real directory")
     bundle = bundle_path.resolve(strict=True)
     certificate_sha1 = normalize_certificate_sha1(certificate_sha1)
-    binaries = list(binaries)
-    if set(binaries) != set(macho_files(bundle)) or (bundle / "Contents/MacOS/imrse") not in binaries or any(
-        binary.is_symlink() or not binary.is_file() or not binary.resolve(strict=True).is_relative_to(bundle)
-        for binary in binaries
+    binary_paths = [Path(binary) for binary in binaries]
+    if any(binary.is_symlink() or not binary.is_file() for binary in binary_paths):
+        raise PackageError("signing must cover every real Mach-O inside the staged app bundle")
+    binaries = [binary.resolve(strict=True) for binary in binary_paths]
+    if (
+        len(set(binaries)) != len(binaries)
+        or set(binaries) != set(macho_files(bundle))
+        or (bundle / "Contents/MacOS/imrse") not in binaries
+        or any(not binary.is_relative_to(bundle) for binary in binaries)
     ):
         raise PackageError("signing must cover every real Mach-O inside the staged app bundle")
     for binary in binaries:
@@ -420,6 +504,7 @@ def sign_and_verify(bundle, binaries, certificate_sha1):
 
 
 def sign_app_bundle(bundle, certificate_sha1):
+    reject_ci_validation_app(bundle)
     validate_symlinks(bundle)
     return sign_and_verify(bundle, macho_files(bundle), certificate_sha1)
 
@@ -744,6 +829,7 @@ def record_build_provenance(root, source_commit, source_tree, build_root, workin
     product = product.resolve(strict=True)
     if not product.is_relative_to(build_root):
         raise PackageError("built product must remain inside the isolated build root")
+    reject_ci_validation_app(product)
     source_info = read_source_info(source_root)
     product_info = read_plist(product / "Contents/Info.plist")
     if product_info != source_info:
@@ -829,6 +915,7 @@ def validate_build_provenance(provenance_path, root, product, expected_build_roo
         product_path = Path(product).resolve(strict=True)
     except OSError as error:
         raise PackageError("fresh Release product app is missing") from error
+    reject_ci_validation_app(product_path)
     if (
         product_path != expected_product.resolve(strict=True)
         or product_record.get("relativePath") != "products/imrse.app"
@@ -1072,6 +1159,7 @@ def create_candidate(input_app, source_commit, source_tree, build_root, output, 
     source_info = read_source_info(root)
     validate_app_version_metadata(source_info, source_info)
     source, _ = validate_built_app_bundle(input_app, source_info)
+    reject_ci_validation_app(source)
     source_tree_hash = bundle_tree_sha256(source)
     build_record = validate_build_provenance(provenance_path, root, source, build_root, source_commit, source_tree, signing_certificate_sha1)
     build_record_hash = sha256_file(provenance_path)
@@ -1175,6 +1263,10 @@ def main(argv=None):
     record_parser.add_argument("--working-directory", required=True, type=Path)
     record_parser.add_argument("--build-command-arg", action="append", required=True)
     record_parser.add_argument("--signing-certificate-sha1", required=True)
+    ci_parser = subparsers.add_parser("validate-ci-app", help="validate an unsigned, non-distribution CI package build")
+    ci_parser.add_argument("--app", required=True, type=Path)
+    ci_parser.add_argument("--source-root", type=Path, default=Path(__file__).resolve().parent.parent)
+    ci_parser.add_argument("--configuration", required=True)
     sign_parser = subparsers.add_parser("sign-app", help="explicitly sign each bundled Mach-O and the app bundle")
     sign_parser.add_argument("--app", required=True, type=Path)
     sign_parser.add_argument("--signing-certificate-sha1", required=True)
@@ -1196,6 +1288,9 @@ def main(argv=None):
             print(f"Source input manifest: {manifest_path}")
         elif args.action == "record-build":
             print(record_build_provenance(args.source_root, args.source_commit, args.source_tree, args.build_root, args.working_directory, args.build_command_arg, args.signing_certificate_sha1))
+        elif args.action == "validate-ci-app":
+            receipt_path = validate_ci_package_app(args.app.expanduser(), args.source_root, args.configuration)
+            print(f"CI validation-only receipt: {receipt_path}")
         elif args.action == "sign-app":
             sign_app_bundle(args.app.expanduser(), args.signing_certificate_sha1)
             print(f"Signed and verified certificate-selected app: {args.app}")
