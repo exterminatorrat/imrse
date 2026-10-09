@@ -980,9 +980,10 @@ class PackageLocalCandidateTests(unittest.TestCase):
                 self.assertFalse(output.exists())
 
     def test_ci_build_passes_the_validated_host_architecture_to_swift(self):
-        for host_architecture, expected_triple in (
-            ("arm64", "arm64-apple-macosx14.0"),
-            ("x86_64", "x86_64-apple-macosx14.0"),
+        self.assertIn("platforms: [.macOS(.v14)]", (ROOT / "Package.swift").read_text())
+        for host_architecture, expected_architecture in (
+            ("arm64", "arm64"),
+            ("x86_64", "x86_64"),
         ):
             with self.subTest(host_architecture=host_architecture), tempfile.TemporaryDirectory() as temp:
                 result, argv, output = self.invoke_ci_build_with_stubbed_swift(Path(temp), host_architecture)
@@ -990,7 +991,10 @@ class PackageLocalCandidateTests(unittest.TestCase):
                 self.assertIsNotNone(argv)
                 self.assertEqual(argv[0], b"build")
                 self.assertEqual(argv[argv.index(b"--configuration") + 1], b"release")
-                self.assertEqual(argv[argv.index(b"--triple") + 1].decode(), expected_triple)
+                architecture_options = [index for index, argument in enumerate(argv) if argument == b"--arch"]
+                self.assertEqual(len(architecture_options), 1)
+                self.assertEqual(argv[architecture_options[0] + 1].decode(), expected_architecture)
+                self.assertNotIn(b"--triple", argv)
                 self.assertIn(b"--only-use-versions-from-resolved-file", argv)
                 self.assertEqual(argv[-2:], [b"--product", b"imrse"])
                 self.assertTrue(output.is_dir())

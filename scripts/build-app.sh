@@ -8,7 +8,7 @@ if [[ "$(uname -s)" != "Darwin" ]]; then
 fi
 CONFIGURATION="${CONFIGURATION:-release}"
 CI_PACKAGE_VALIDATION="${IMRSE_CI_PACKAGE_VALIDATION:-0}"
-CI_BUILD_TRIPLE=""
+CI_BUILD_ARCHITECTURE=""
 if [[ "$CI_PACKAGE_VALIDATION" != "0" && "$CI_PACKAGE_VALIDATION" != "1" ]]; then
   printf 'IMRSE_CI_PACKAGE_VALIDATION must be 0 or 1.\n' >&2
   exit 1
@@ -28,8 +28,8 @@ if [[ "$CI_PACKAGE_VALIDATION" == "1" ]]; then
   fi
   CI_HOST_ARCHITECTURE="$(uname -m)"
   case "$CI_HOST_ARCHITECTURE" in
-    arm64|aarch64) CI_BUILD_TRIPLE="arm64-apple-macosx14.0" ;;
-    x86_64|amd64) CI_BUILD_TRIPLE="x86_64-apple-macosx14.0" ;;
+    arm64|aarch64) CI_BUILD_ARCHITECTURE="arm64" ;;
+    x86_64|amd64) CI_BUILD_ARCHITECTURE="x86_64" ;;
     *)
       printf 'CI package validation does not support host architecture %s.\n' "$CI_HOST_ARCHITECTURE" >&2
       exit 1
@@ -133,8 +133,8 @@ SWIFT_FLAGS=(
   --security-path "$SECURITY_PATH"
   --only-use-versions-from-resolved-file
 )
-if [[ -n "$CI_BUILD_TRIPLE" ]]; then
-  SWIFT_FLAGS+=(--triple "$CI_BUILD_TRIPLE")
+if [[ -n "$CI_BUILD_ARCHITECTURE" ]]; then
+  SWIFT_FLAGS+=(--arch "$CI_BUILD_ARCHITECTURE")
 fi
 BUILD_COMMAND=(swift build "${SWIFT_FLAGS[@]}" --product imrse)
 "${BUILD_COMMAND[@]}"
