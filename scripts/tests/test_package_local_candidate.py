@@ -768,6 +768,26 @@ class PackageLocalCandidateTests(unittest.TestCase):
                 symbols_check.assert_called_once_with(main_binary.resolve(), architecture)
         self.assertEqual(self.codesign_calls, [])
 
+    def test_ci_package_validation_reports_sorted_actual_architectures_on_mismatch(self):
+        with tempfile.TemporaryDirectory() as temp:
+            app = Path(temp) / "imrse.app"
+            main_binary = app / "Contents/MacOS/imrse"
+            resources = app / "Contents/Resources"
+            (resources / "Brand").mkdir(parents=True)
+            main_binary.parent.mkdir(parents=True)
+            main_binary.write_bytes(b"\xcf\xfa\xed\xfe fake CI executable")
+            (app / "Contents/Info.plist").write_bytes((self.source_root / "Resources/Info.plist").read_bytes())
+            (resources / "Brand/imrse-menubar-template.pdf").write_bytes(b"fixture")
+            with patch.object(packager, "validate_required_resources"), \
+                    patch.object(packager, "macho_architectures", return_value={"x86_64", "arm64"}), \
+                    patch.object(packager.platform, "machine", return_value="arm64"):
+                with self.assertRaisesRegex(
+                    PackageError,
+                    r"does not match the arm64 CI host; found \['arm64', 'x86_64'\]: Contents/MacOS/imrse",
+                ):
+                    packager.validate_ci_package_app(app, self.source_root, "release")
+            self.assertFalse((resources / CI_VALIDATION_RECEIPT_FILE).exists())
+
     def test_missing_or_invalid_input_bundle_fails_without_touching_it(self):
         source_info = read_source_info(ROOT)
         with self.assertRaises(PackageError):

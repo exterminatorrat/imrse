@@ -291,7 +291,10 @@ def validate_ci_package_app(app, source_root, configuration):
     for binary in binaries:
         actual_architectures = macho_architectures(binary)
         if actual_architectures != {host_architecture}:
-            raise PackageError(f"built Mach-O architecture does not match the {host_architecture} CI host: {binary.relative_to(bundle)}")
+            raise PackageError(
+                f"built Mach-O architecture does not match the {host_architecture} CI host; "
+                f"found {sorted(actual_architectures)}: {binary.relative_to(bundle)}"
+            )
         architectures[binary.relative_to(bundle).as_posix()] = host_architecture
     read_pins(source_root)
     runtime_modules = validate_runtime_modules(main_binary, host_architecture)
