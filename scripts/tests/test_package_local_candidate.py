@@ -14,9 +14,11 @@ from unittest.mock import patch
 from scripts import package_local_candidate as packager
 from scripts.package_local_candidate import (
     BUILD_PROVENANCE_FILE,
+    CERTIFICATE_SIGNING_LABEL,
     CANDIDATE_VERSION,
     C_RUNTIME_DEPENDENCIES,
     EXPECTED_APP_VERSION,
+    EXPECTED_BUNDLE_ID,
     EXPECTED_BUILD_VERSION,
     FORBIDDEN_FILE_NAMES,
     FORBIDDEN_PATH_COMPONENTS,
@@ -37,6 +39,8 @@ from scripts.package_local_candidate import (
     record_build_provenance,
     sha256_file,
     source_git_files,
+    sign_and_verify,
+    normalize_certificate_sha1,
     validate_app_version_metadata,
     validate_build_provenance,
     validate_built_app_bundle,
@@ -48,9 +52,63 @@ from scripts.package_local_candidate import (
 
 
 ROOT = Path(__file__).resolve().parents[2]
+TEST_CERTIFICATE_SHA1 = "0123456789abcdef0123456789abcdef01234567"
 
 
 class PackageLocalCandidateTests(unittest.TestCase):
+    def setUp(self):
+        self.real_packager_run = packager.run
+        self.codesign_calls = []
+        self.codesign_signers = []
+        self.codesign_available_sha1 = TEST_CERTIFICATE_SHA1
+        self.codesign_actual_sha1 = TEST_CERTIFICATE_SHA1
+        self.codesign_signature_type = "certificate-signed"
+        self.codesign_identifiers = {}
+        self.codesign_designated_requirements = {}
+        self.codesign_commented_designated_requirements = set()
+        self.codesign_designated_outputs = {}
+        self.codesign_patcher = patch.object(packager, "run", side_effect=self.stub_packager_run)
+        self.codesign_patcher.start()
+        self.addCleanup(self.codesign_patcher.stop)
+
+    def stub_packager_run(self, command, **kwargs):
+        if command[0] != "codesign":
+            return self.real_packager_run(command, **kwargs)
+        command = [str(argument) for argument in command]
+        self.codesign_calls.append(command)
+        path = Path(command[-1])
+        if "--sign" in command:
+            selected_sha1 = command[command.index("--sign") + 1]
+            self.codesign_signers.append(selected_sha1)
+            if selected_sha1 != self.codesign_available_sha1:
+                raise PackageError("stubbed codesign has no matching signing identity")
+            if any(argument in {"-r", "-r-", "--requirements"} or argument.startswith("-r=") for argument in command):
+                raise AssertionError("signing must keep the system default designated requirement")
+            return ""
+        if "--verify" in command:
+            requirements = [argument for argument in command if argument.startswith("-R=")]
+            expected = f'-R=certificate leaf H"{self.codesign_actual_sha1.lower()}"'
+            if self.codesign_signature_type != "certificate-signed" or requirements != [expected]:
+                raise PackageError("stubbed code signature does not satisfy the selected certificate requirement")
+            return "valid signature"
+        if "-dv" in command:
+            identifier = self.codesign_identifiers.get(str(path), EXPECTED_BUNDLE_ID)
+            if self.codesign_signature_type == "ad-hoc":
+                return f"Executable={path}\nIdentifier={identifier}\nSignature=adhoc\nTeamIdentifier=not set\n"
+            return f"Executable={path}\nIdentifier={identifier}\nAuthority=Stub Certificate\nTeamIdentifier=not set\n"
+        if "-d" in command and "-r-" in command:
+            output = self.codesign_designated_outputs.get(str(path))
+            if output is not None:
+                return output
+            identifier = self.codesign_identifiers.get(str(path), EXPECTED_BUNDLE_ID)
+            requirement = self.codesign_designated_requirements.get(
+                str(path),
+                f'identifier "{identifier}" and anchor apple generic and certificate leaf H"{self.codesign_actual_sha1.lower()}"',
+            )
+            comment = "# " if str(path) in self.codesign_commented_designated_requirements else ""
+            return f"Executable={path}\n{comment}designated => {requirement}\n"
+        raise AssertionError(f"unexpected codesign command in unit stub: {command}")
+
     @classmethod
     def setUpClass(cls):
         cls.source_temp = tempfile.TemporaryDirectory()
@@ -79,7 +137,7 @@ class PackageLocalCandidateTests(unittest.TestCase):
         )
         product = build_root / "products/imrse.app"
         (product / "Contents/MacOS").mkdir(parents=True)
-        (product / "Contents/MacOS/imrse").write_bytes(b"test product executable")
+        (product / "Contents/MacOS/imrse").write_bytes(b"\xcf\xfa\xed\xfe fake product executable")
         (product / "Contents/Info.plist").write_bytes((self.source_root / "Resources/Info.plist").read_bytes())
         provenance_path = record_build_provenance(
             self.source_root,
@@ -88,6 +146,7 @@ class PackageLocalCandidateTests(unittest.TestCase):
             build_root,
             copy_root,
             expected_release_build_command(build_root),
+            TEST_CERTIFICATE_SHA1,
         )
         return build_root, copy_root, manifest_path, product, provenance_path
 
@@ -238,13 +297,18 @@ class PackageLocalCandidateTests(unittest.TestCase):
                 build_root,
                 self.source_commit,
                 self.source_tree,
+                TEST_CERTIFICATE_SHA1,
             )
             self.assertEqual(record["sourceCommitSHA"], self.source_commit)
             self.assertEqual(record["sourceTreeSHA"], self.source_tree)
+            self.assertEqual(record["schemaVersion"], 4)
             self.assertEqual(record["inputCopyRelativePath"], "source")
             self.assertEqual(record["buildInputs"]["lockFilesSHA256"], {path: sha256_file(self.source_root / path) for path in LOCK_FILES})
             self.assertEqual(record["build"]["command"], normalized_release_build_command())
             self.assertEqual(record["build"]["workingDirectoryRelativePath"], "source")
+            self.assertEqual(record["build"]["signingCertificateSHA1"], TEST_CERTIFICATE_SHA1)
+            self.assertEqual(record["product"]["signatureReceipt"]["certificateSHA1"], TEST_CERTIFICATE_SHA1)
+            self.assertEqual(record["product"]["signatureReceipt"]["bundle"]["identifier"], EXPECTED_BUNDLE_ID)
             self.assertIn("not an independent compiler attestation", record["build"]["provenanceScope"])
             self.assertNotIn(str(build_root), json.dumps(record["build"]))
             self.assertEqual(manifest_path.name, SOURCE_INPUT_MANIFEST_FILE)
@@ -258,6 +322,7 @@ class PackageLocalCandidateTests(unittest.TestCase):
                     build_root,
                     self.source_commit,
                     self.source_tree,
+                    TEST_CERTIFICATE_SHA1,
                 )
 
     def test_record_build_cli_preserves_option_like_builder_argv_values(self):
@@ -276,6 +341,8 @@ class PackageLocalCandidateTests(unittest.TestCase):
             str(build_root),
             "--working-directory",
             str(working_directory),
+            "--signing-certificate-sha1",
+            TEST_CERTIFICATE_SHA1,
             *(f"--build-command-arg={argument}" for argument in command),
         ]
         with patch.object(packager, "record_build_provenance", return_value=build_root / BUILD_PROVENANCE_FILE) as recorder:
@@ -284,6 +351,74 @@ class PackageLocalCandidateTests(unittest.TestCase):
         self.assertEqual(result, 0)
         self.assertEqual(recorder.call_args.args[4], working_directory)
         self.assertEqual(recorder.call_args.args[5], command)
+        self.assertEqual(recorder.call_args.args[6], TEST_CERTIFICATE_SHA1)
+
+    def test_certificate_sha1_requires_one_explicit_40_hex_selector(self):
+        self.assertEqual(normalize_certificate_sha1(TEST_CERTIFICATE_SHA1.upper()), TEST_CERTIFICATE_SHA1)
+        for invalid in (None, "", "-", "a" * 39, "g" * 40, "a" * 39 + ":"):
+            with self.subTest(invalid=invalid):
+                with self.assertRaisesRegex(PackageError, "caller-selected 40-hex certificate SHA-1"):
+                    normalize_certificate_sha1(invalid)
+
+    def test_final_signing_uses_same_certificate_for_bundle_and_nested_macho(self):
+        with tempfile.TemporaryDirectory() as temp:
+            bundle = Path(temp) / "imrse.app"
+            main = bundle / "Contents/MacOS/imrse"
+            nested = bundle / "Contents/Frameworks/helper"
+            main.parent.mkdir(parents=True)
+            nested.parent.mkdir(parents=True)
+            main.write_bytes(b"\xcf\xfa\xed\xfe fake main Mach-O")
+            nested.write_bytes(b"\xcf\xfa\xed\xfe fake nested Mach-O")
+            self.codesign_identifiers[str(nested)] = "com.example.helper"
+            self.codesign_commented_designated_requirements.add(str(nested))
+            receipt = packager.sign_app_bundle(bundle, TEST_CERTIFICATE_SHA1.upper())
+        self.assertEqual(receipt["certificateSHA1"], TEST_CERTIFICATE_SHA1)
+        self.assertEqual(receipt["bundle"]["identifier"], EXPECTED_BUNDLE_ID)
+        self.assertEqual(
+            {item["relativePath"]: item["identifier"] for item in receipt["codeItems"]},
+            {"Contents/MacOS/imrse": EXPECTED_BUNDLE_ID, "Contents/Frameworks/helper": "com.example.helper"},
+        )
+        self.assertEqual(self.codesign_signers, [TEST_CERTIFICATE_SHA1] * 3)
+        nested_receipt = next(item for item in receipt["codeItems"] if item["relativePath"] == "Contents/Frameworks/helper")
+        self.assertEqual(nested_receipt["defaultDesignatedRequirement"], f'identifier "com.example.helper" and anchor apple generic and certificate leaf H"{TEST_CERTIFICATE_SHA1}"')
+        verification_commands = [command for command in self.codesign_calls if "--verify" in command]
+        self.assertEqual(len(verification_commands), 3)
+        self.assertTrue(all(f'-R=certificate leaf H"{TEST_CERTIFICATE_SHA1}"' in command for command in verification_commands))
+        self.assertTrue(any("--deep" in command for command in verification_commands))
+        first_leaf_verification = next(index for index, command in enumerate(self.codesign_calls) if "--verify" in command)
+        first_default_requirement_read = next(index for index, command in enumerate(self.codesign_calls) if "-r-" in command)
+        self.assertLess(first_leaf_verification, first_default_requirement_read)
+
+    def test_designated_requirement_rejects_missing_empty_or_duplicate_lines(self):
+        for label, output in (
+            ("missing", ""),
+            ("empty", "# designated =>\n"),
+            ("ambiguous", 'designated => identifier "one"\n# designated => identifier "two"\n'),
+        ):
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as temp:
+                bundle = Path(temp) / "imrse.app"
+                main = bundle / "Contents/MacOS/imrse"
+                main.parent.mkdir(parents=True)
+                main.write_bytes(b"\xcf\xfa\xed\xfe fake main Mach-O")
+                self.codesign_designated_outputs[str(main)] = output
+                with self.assertRaisesRegex(PackageError, "default designated requirement is missing or ambiguous"):
+                    sign_and_verify(bundle, [main], TEST_CERTIFICATE_SHA1)
+
+    def test_certificate_signer_rejects_adhoc_and_mismatched_certificate_output(self):
+        with tempfile.TemporaryDirectory() as temp:
+            bundle = Path(temp) / "imrse.app"
+            main = bundle / "Contents/MacOS/imrse"
+            main.parent.mkdir(parents=True)
+            main.write_bytes(b"\xcf\xfa\xed\xfe fake main Mach-O")
+            self.codesign_signature_type = "ad-hoc"
+            with self.assertRaisesRegex(PackageError, "does not satisfy the selected certificate"):
+                sign_and_verify(bundle, [main], TEST_CERTIFICATE_SHA1)
+            self.codesign_signature_type = "certificate-signed"
+            self.codesign_actual_sha1 = "f" * 40
+            with self.assertRaisesRegex(PackageError, "does not satisfy the selected certificate"):
+                sign_and_verify(bundle, [main], TEST_CERTIFICATE_SHA1)
+            with self.assertRaisesRegex(PackageError, "no matching signing identity"):
+                sign_and_verify(bundle, [main], "f" * 40)
 
     def test_build_provenance_rejects_wrong_builder_argv_paths_and_working_directory(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -297,7 +432,7 @@ class PackageLocalCandidateTests(unittest.TestCase):
             )
             product = build_root / "products/imrse.app"
             (product / "Contents/MacOS").mkdir(parents=True)
-            (product / "Contents/MacOS/imrse").write_bytes(b"test product executable")
+            (product / "Contents/MacOS/imrse").write_bytes(b"\xcf\xfa\xed\xfe fake product executable")
             (product / "Contents/Info.plist").write_bytes((self.source_root / "Resources/Info.plist").read_bytes())
             expected = expected_release_build_command(build_root)
 
@@ -336,6 +471,7 @@ class PackageLocalCandidateTests(unittest.TestCase):
                             build_root,
                             copy_root,
                             command,
+                            TEST_CERTIFICATE_SHA1,
                         )
                     self.assertFalse((build_root / BUILD_PROVENANCE_FILE).exists())
 
@@ -347,6 +483,7 @@ class PackageLocalCandidateTests(unittest.TestCase):
                     build_root,
                     self.source_root,
                     expected,
+                    TEST_CERTIFICATE_SHA1,
                 )
             self.assertFalse((build_root / BUILD_PROVENANCE_FILE).exists())
 
@@ -357,6 +494,7 @@ class PackageLocalCandidateTests(unittest.TestCase):
                 build_root,
                 copy_root,
                 expected,
+                TEST_CERTIFICATE_SHA1,
             )
             record = json.loads(provenance_path.read_text())
             self.assertEqual(record["build"]["command"], normalized_release_build_command())
@@ -380,6 +518,7 @@ class PackageLocalCandidateTests(unittest.TestCase):
                     build_root,
                     self.source_commit,
                     self.source_tree,
+                    TEST_CERTIFICATE_SHA1,
                 )
 
     def test_build_provenance_rejects_manifest_changes_and_later_source_dirt(self):
@@ -396,6 +535,7 @@ class PackageLocalCandidateTests(unittest.TestCase):
                     build_root,
                     self.source_commit,
                     self.source_tree,
+                    TEST_CERTIFICATE_SHA1,
                 )
         with tempfile.TemporaryDirectory() as temp:
             source = self.clone_source(Path(temp))
@@ -409,6 +549,7 @@ class PackageLocalCandidateTests(unittest.TestCase):
                     build_root,
                     self.source_commit,
                     self.source_tree,
+                    TEST_CERTIFICATE_SHA1,
                 )
         with tempfile.TemporaryDirectory() as temp:
             source = self.clone_source(Path(temp))
@@ -432,6 +573,7 @@ class PackageLocalCandidateTests(unittest.TestCase):
                     build_root,
                     self.source_commit,
                     self.source_tree,
+                    TEST_CERTIFICATE_SHA1,
                 )
             provenance_path.unlink()
             with self.assertRaisesRegex(PackageError, "differs from committed Git blob: LICENSE"):
@@ -442,8 +584,59 @@ class PackageLocalCandidateTests(unittest.TestCase):
                     build_root,
                     copy_root,
                     expected_release_build_command(build_root),
+                    TEST_CERTIFICATE_SHA1,
                 )
             self.assertFalse(provenance_path.exists())
+
+    def test_build_provenance_rejects_forged_signer_and_designated_requirement_receipts(self):
+        for field, replacement in (
+            ("certificateSHA1", "f" * 40),
+            ("defaultDesignatedRequirement", 'identifier "forged.bundle" and anchor apple generic'),
+            ("identifier", "forged.bundle"),
+        ):
+            with self.subTest(field=field), tempfile.TemporaryDirectory() as temp:
+                build_root, _, _, product, provenance_path = self.make_build_fixture(Path(temp))
+                record = json.loads(provenance_path.read_text())
+                record["product"]["signatureReceipt"]["bundle"][field] = replacement
+                provenance_path.write_text(json.dumps(record))
+                with self.assertRaisesRegex(PackageError, "signature receipt does not match"):
+                    validate_build_provenance(
+                        provenance_path,
+                        self.source_root,
+                        product,
+                        build_root,
+                        self.source_commit,
+                        self.source_tree,
+                        TEST_CERTIFICATE_SHA1,
+                    )
+        with tempfile.TemporaryDirectory() as temp:
+            build_root, _, _, product, provenance_path = self.make_build_fixture(Path(temp))
+            record = json.loads(provenance_path.read_text())
+            record["build"]["signingCertificateSHA1"] = "f" * 40
+            provenance_path.write_text(json.dumps(record))
+            with self.assertRaisesRegex(PackageError, "isolated Release builder record"):
+                validate_build_provenance(
+                    provenance_path,
+                    self.source_root,
+                    product,
+                    build_root,
+                    self.source_commit,
+                    self.source_tree,
+                    TEST_CERTIFICATE_SHA1,
+                )
+        with tempfile.TemporaryDirectory() as temp:
+            build_root, _, _, product, provenance_path = self.make_build_fixture(Path(temp))
+            self.codesign_actual_sha1 = "f" * 40
+            with self.assertRaisesRegex(PackageError, "does not satisfy the selected certificate"):
+                validate_build_provenance(
+                    provenance_path,
+                    self.source_root,
+                    product,
+                    build_root,
+                    self.source_commit,
+                    self.source_tree,
+                    TEST_CERTIFICATE_SHA1,
+                )
 
     def test_missing_or_invalid_input_bundle_fails_without_touching_it(self):
         source_info = read_source_info(ROOT)
@@ -478,7 +671,12 @@ class PackageLocalCandidateTests(unittest.TestCase):
             result = subprocess.run(
                 ["bash", str(ROOT / "scripts/build-app.sh")],
                 cwd=ROOT,
-                env={**os.environ, "IMRSE_DIST_DIR": str(output), "IMRSE_REQUIRE_EMPTY_APP_OUTPUT": "1"},
+                env={
+                    **os.environ,
+                    "IMRSE_DIST_DIR": str(output),
+                    "IMRSE_REQUIRE_EMPTY_APP_OUTPUT": "1",
+                    "IMRSE_SIGNING_CERTIFICATE_SHA1": TEST_CERTIFICATE_SHA1,
+                },
                 text=True,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
@@ -501,6 +699,7 @@ class PackageLocalCandidateTests(unittest.TestCase):
                 "IMRSE_RELEASE_SOURCE_COMMIT": self.source_commit,
                 "IMRSE_RELEASE_SOURCE_TREE": self.source_tree,
                 "IMRSE_RELEASE_BUILD_ROOT": str(build_root),
+                "IMRSE_SIGNING_CERTIFICATE_SHA1": TEST_CERTIFICATE_SHA1,
             })
             result = subprocess.run(
                 ["bash", str(ROOT / "scripts/build-app.sh")],
@@ -524,6 +723,7 @@ class PackageLocalCandidateTests(unittest.TestCase):
                 "IMRSE_RELEASE_SOURCE_TREE": self.source_tree,
                 "IMRSE_RELEASE_BUILD_ROOT": str(build_root),
                 "SWIFTPM_CACHE_PATH": str(external_cache),
+                "IMRSE_SIGNING_CERTIFICATE_SHA1": TEST_CERTIFICATE_SHA1,
             })
             result = subprocess.run(
                 ["bash", str(ROOT / "scripts/build-app.sh")],
@@ -542,6 +742,7 @@ class PackageLocalCandidateTests(unittest.TestCase):
             environment.pop(key, None)
         environment.pop("SWIFTPM_CACHE_PATH", None)
         environment["IMRSE_RELEASE_SOURCE_COMMIT"] = self.source_commit
+        environment["IMRSE_SIGNING_CERTIFICATE_SHA1"] = TEST_CERTIFICATE_SHA1
         result = subprocess.run(
             ["bash", str(ROOT / "scripts/build-app.sh")],
             cwd=ROOT,
@@ -553,6 +754,68 @@ class PackageLocalCandidateTests(unittest.TestCase):
         )
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("Release mode requires", result.stdout)
+
+    def test_build_script_fails_closed_without_certificate_selector(self):
+        script = (ROOT / "scripts/build-app.sh").read_text()
+        self.assertIn('SIGNING_CERTIFICATE_SHA1="${IMRSE_SIGNING_CERTIFICATE_SHA1:-}"', script)
+        self.assertIn('"$ROOT/scripts/package_local_candidate.py" sign-app', script)
+        self.assertIn('--app "$STAGED_APP"', script)
+        self.assertIn('--signing-certificate-sha1 "$SIGNING_CERTIFICATE_SHA1"', script)
+        self.assertNotIn('SIGNING_IDENTITY="${SIGNING_IDENTITY:--}"', script)
+        self.assertNotIn('CODESIGN_ARGS=(--deep', script)
+        for invalid in (None, "-", "x" * 40):
+            with self.subTest(invalid=invalid), tempfile.TemporaryDirectory() as temp:
+                output = Path(temp) / "dist"
+                environment = os.environ.copy()
+                environment.pop("IMRSE_SIGNING_CERTIFICATE_SHA1", None)
+                environment["IMRSE_DIST_DIR"] = str(output)
+                if invalid is not None:
+                    environment["IMRSE_SIGNING_CERTIFICATE_SHA1"] = invalid
+                result = subprocess.run(
+                    ["bash", str(ROOT / "scripts/build-app.sh")],
+                    cwd=ROOT,
+                    env=environment,
+                    text=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    check=False,
+                )
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("caller-selected 40-hex certificate SHA-1", result.stdout)
+                self.assertFalse(output.exists())
+
+    def test_package_cli_propagates_the_same_certificate_selector(self):
+        argv = [
+            "package",
+            "--app", "/tmp/build/products/imrse.app",
+            "--source-commit", self.source_commit,
+            "--source-tree", self.source_tree,
+            "--build-root", "/tmp/build",
+            "--output", "/tmp/candidate",
+            "--signing-certificate-sha1", TEST_CERTIFICATE_SHA1,
+        ]
+        with patch.object(packager, "create_candidate") as create:
+            self.assertEqual(packager.main(argv), 0)
+        self.assertEqual(create.call_args.args, (
+            Path("/tmp/build/products/imrse.app"),
+            self.source_commit,
+            self.source_tree,
+            Path("/tmp/build"),
+            Path("/tmp/candidate"),
+            TEST_CERTIFICATE_SHA1,
+        ))
+
+    def test_sign_app_cli_routes_build_output_to_the_explicit_signer(self):
+        output = StringIO()
+        with patch.object(packager, "sign_app_bundle") as signer:
+            with redirect_stdout(output):
+                self.assertEqual(packager.main([
+                    "sign-app",
+                    "--app", "/tmp/build/products/imrse.app",
+                    "--signing-certificate-sha1", TEST_CERTIFICATE_SHA1,
+                ]), 0)
+        self.assertEqual(signer.call_args.args, (Path("/tmp/build/products/imrse.app"), TEST_CERTIFICATE_SHA1))
+        self.assertIn("Signed and verified certificate-selected app", output.getvalue())
 
     def test_manifest_records_runtime_dependency_and_license_hashes_without_old_delta_claims(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -571,16 +834,39 @@ class PackageLocalCandidateTests(unittest.TestCase):
                 (resources / dependency[4]).write_text(dependency[4])
             (resources / "mlx-core-LICENSE").write_text("mlx-core-LICENSE")
             yyjson_hash = hashlib.sha256(b"yyjson-LICENSE").hexdigest()
+            build_receipt = {
+                "certificateSHA1": TEST_CERTIFICATE_SHA1,
+                "signatureType": "certificate-signed",
+                "bundle": {
+                    "certificateSHA1": TEST_CERTIFICATE_SHA1,
+                    "signatureType": "certificate-signed",
+                    "identifier": EXPECTED_BUNDLE_ID,
+                    "defaultDesignatedRequirement": 'identifier "org.imrse.app" and anchor apple generic',
+                },
+                "codeItems": [{
+                    "relativePath": "Contents/MacOS/imrse",
+                    "certificateSHA1": TEST_CERTIFICATE_SHA1,
+                    "signatureType": "certificate-signed",
+                    "identifier": EXPECTED_BUNDLE_ID,
+                    "defaultDesignatedRequirement": 'identifier "org.imrse.app" and anchor apple generic',
+                }],
+            }
+            candidate_receipt = {
+                **build_receipt,
+                "bundle": {**build_receipt["bundle"], "defaultDesignatedRequirement": 'identifier "org.imrse.app" and anchor apple generic and candidate'},
+            }
             build_record = {
                 "build": {
                     "configuration": "release",
                     "workingDirectoryRelativePath": "source",
                     "command": normalized_release_build_command(),
                     "commandPathValuesRelativeToBuildRoot": True,
+                    "signingCertificateSHA1": TEST_CERTIFICATE_SHA1,
                     "provenanceScope": "local builder-supplied invocation metadata and product hashes; not an independent compiler attestation",
-                }
+                },
+                "product": {"signatureReceipt": build_receipt},
             }
-            manifest = candidate_manifest(
+            manifest_args = (
                 ROOT,
                 source,
                 bundle_tree_sha256(source),
@@ -595,7 +881,23 @@ class PackageLocalCandidateTests(unittest.TestCase):
                 self.source_commit,
                 self.source_tree,
                 "input-manifest-hash",
+                candidate_receipt,
             )
+            manifest = candidate_manifest(*manifest_args)
+            wrong_candidate_receipt = {**candidate_receipt, "certificateSHA1": "f" * 40}
+            with self.assertRaisesRegex(PackageError, "signature receipts do not match"):
+                candidate_manifest(*manifest_args[:-1], wrong_candidate_receipt)
+            empty_candidate_receipt = {**candidate_receipt, "codeItems": []}
+            with self.assertRaisesRegex(PackageError, "signature receipts do not match"):
+                candidate_manifest(*manifest_args[:-1], empty_candidate_receipt)
+            wrong_build_record = {
+                **build_record,
+                "build": {**build_record["build"], "signingCertificateSHA1": "f" * 40},
+            }
+            wrong_build_args = list(manifest_args)
+            wrong_build_args[9] = wrong_build_record
+            with self.assertRaisesRegex(PackageError, "signature receipts do not match"):
+                candidate_manifest(*wrong_build_args)
         yyjson = next(item for item in manifest["runtimeDependencies"] if item["package"] == "yyjson")
         self.assertEqual(yyjson["version"], "0.12.0")
         self.assertEqual(yyjson["revision"], "8b4a38dc994a110abaec8a400615567bd996105f")
@@ -603,6 +905,21 @@ class PackageLocalCandidateTests(unittest.TestCase):
         self.assertEqual(yyjson["licenseSHA256"], yyjson_hash)
         self.assertEqual(manifest["source"]["commitSHA"], self.source_commit)
         self.assertEqual(manifest["source"]["buildProvenance"]["fileName"], BUILD_PROVENANCE_FILE)
+        self.assertEqual(manifest["schemaVersion"], 4)
+        self.assertEqual(manifest["source"]["buildProduct"]["signatureReceipt"], build_receipt)
+        self.assertEqual(manifest["signing"]["certificateSHA1"], TEST_CERTIFICATE_SHA1)
+        self.assertEqual(manifest["signing"]["signatureType"], CERTIFICATE_SIGNING_LABEL)
+        self.assertFalse(manifest["signing"]["developerID"])
+        self.assertFalse(manifest["signing"]["notarized"])
+        self.assertEqual(manifest["signing"]["candidateReceipt"], candidate_receipt)
+        self.assertIn("no TCC reuse claim", " ".join(manifest["limitations"]))
+        install_guide = (ROOT / "docs/manual-candidate-install.md").read_text()
+        self.assertIn("caller-selected 40-hex certificate SHA-1", install_guide)
+        self.assertIn("IMRSE_SIGNING_CERTIFICATE_SHA1", install_guide)
+        self.assertIn("--signing-certificate-sha1", install_guide)
+        self.assertIn("not proof that its private key is available", install_guide)
+        self.assertIn("no TCC reuse promise", install_guide)
+        self.assertNotIn("ad-hoc signed", install_guide)
         self.assertEqual(manifest["source"]["buildProduct"]["configuration"], "release")
         self.assertEqual(manifest["source"]["buildProduct"]["workingDirectoryRelativePath"], "source")
         self.assertNotIn("candidateDeltaPatch", manifest["source"])

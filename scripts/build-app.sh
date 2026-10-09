@@ -7,6 +7,12 @@ if [[ "$(uname -s)" != "Darwin" ]]; then
   exit 1
 fi
 CONFIGURATION="${CONFIGURATION:-release}"
+SIGNING_CERTIFICATE_SHA1="${IMRSE_SIGNING_CERTIFICATE_SHA1:-}"
+if [[ ! "$SIGNING_CERTIFICATE_SHA1" =~ ^[[:xdigit:]]{40}$ ]]; then
+  printf 'Set IMRSE_SIGNING_CERTIFICATE_SHA1 to the caller-selected 40-hex certificate SHA-1; ad-hoc signing is not supported.\n' >&2
+  exit 1
+fi
+SIGNING_CERTIFICATE_SHA1="$(printf '%s' "$SIGNING_CERTIFICATE_SHA1" | tr '[:upper:]' '[:lower:]')"
 RELEASE_COMMIT="${IMRSE_RELEASE_SOURCE_COMMIT:-}"
 RELEASE_TREE="${IMRSE_RELEASE_SOURCE_TREE:-}"
 RELEASE_BUILD_ROOT="${IMRSE_RELEASE_BUILD_ROOT:-}"
@@ -60,16 +66,12 @@ if [[ -n "$RELEASE_COMMIT$RELEASE_TREE$RELEASE_BUILD_ROOT" ]]; then
   export HOME TMPDIR
   DIST_DIR="$RELEASE_BUILD_ROOT/products"
   IMRSE_REQUIRE_EMPTY_APP_OUTPUT=1
-  SIGNING_IDENTITY="-"
-  CODESIGN_ARGS=(--force --sign "$SIGNING_IDENTITY" --timestamp=none)
 else
   SCRATCH_PATH="${SCRATCH_PATH:-$ROOT/.build}"
   CACHE_PATH="${SWIFTPM_CACHE_PATH:-$ROOT/.build/cache}"
   CONFIG_PATH="${SWIFTPM_CONFIG_PATH:-$ROOT/.build/configuration}"
   SECURITY_PATH="${SWIFTPM_SECURITY_PATH:-$ROOT/.build/security}"
   DIST_DIR="${IMRSE_DIST_DIR:-$ROOT/dist}"
-  SIGNING_IDENTITY="${SIGNING_IDENTITY:--}"
-  CODESIGN_ARGS=(--force --sign "$SIGNING_IDENTITY")
 fi
 cd "$ROOT"
 BUILD_WORKING_DIRECTORY="$(pwd -P)"
@@ -137,8 +139,9 @@ fi
 swift "$ROOT/Resources/GenerateIcon.swift" "$STAGING/imrse.iconset"
 iconutil --convert icns "$STAGING/imrse.iconset" --output "$STAGED_APP/Contents/Resources/imrse.icns"
 plutil -lint "$STAGED_APP/Contents/Info.plist"
-codesign "${CODESIGN_ARGS[@]}" "$STAGED_APP"
-codesign --verify --deep --strict "$STAGED_APP"
+python3 "$ROOT/scripts/package_local_candidate.py" sign-app \
+  --app "$STAGED_APP" \
+  --signing-certificate-sha1 "$SIGNING_CERTIFICATE_SHA1"
 if [[ "${IMRSE_REQUIRE_EMPTY_APP_OUTPUT:-0}" == "1" ]]; then
   if [[ -e "$APP" || -L "$APP" ]]; then
     printf 'The required fresh app output appeared during the build: %s\n' "$APP" >&2
@@ -168,5 +171,6 @@ if [[ -n "$RELEASE_COMMIT" ]]; then
     --source-tree "$RELEASE_TREE" \
     --build-root "$RELEASE_BUILD_ROOT" \
     --working-directory "$BUILD_WORKING_DIRECTORY" \
+    --signing-certificate-sha1 "$SIGNING_CERTIFICATE_SHA1" \
     "${BUILD_COMMAND_ARGS[@]}"
 fi
