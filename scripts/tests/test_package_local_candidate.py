@@ -5,6 +5,7 @@ import json
 import os
 import plistlib
 import subprocess
+import sys
 import tempfile
 import unittest
 import zipfile
@@ -987,6 +988,7 @@ class PackageLocalCandidateTests(unittest.TestCase):
         workflow = (ROOT / ".github/workflows/verify.yml").read_text()
         package_job = workflow.partition("  package:\n")[2].partition("\n  design:\n")[0]
         self.assertIn('IMRSE_CI_PACKAGE_VALIDATION: "1"', package_job)
+        self.assertIn('PYTHONDONTWRITEBYTECODE: "1"', package_job)
         self.assertIn("IMRSE_DIST_DIR: ${{ runner.temp }}/imrse-ci-package-validation", package_job)
         self.assertNotIn("IMRSE_SIGNING_CERTIFICATE_SHA1", package_job)
         self.assertIn("bash -n scripts/build-app.sh", package_job)
@@ -995,6 +997,46 @@ class PackageLocalCandidateTests(unittest.TestCase):
         self.assertIn("./scripts/build-app.sh", package_job)
         self.assertNotIn("upload-artifact", package_job)
         self.assertNotIn("continue-on-error", package_job)
+
+    def test_ci_python_bytecode_suppression_keeps_fresh_source_clone_clean(self):
+        self.assertEqual(
+            subprocess.run(
+                ["git", "status", "--porcelain=v1", "--untracked-files=all"],
+                cwd=self.source_root,
+                check=True,
+                stdout=subprocess.PIPE,
+                text=True,
+            ).stdout,
+            "",
+        )
+        environment = os.environ.copy()
+        environment.pop("PYTHONPYCACHEPREFIX", None)
+        environment.pop("PYTHONPATH", None)
+        environment["PYTHONDONTWRITEBYTECODE"] = "1"
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                "import sys; sys.pycache_prefix = None; import scripts.package_local_candidate; print(sys.pycache_prefix, sys.dont_write_bytecode)",
+            ],
+            cwd=self.source_root,
+            env=environment,
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertEqual(result.stdout.strip(), "None True")
+        self.assertFalse((self.source_root / "scripts/__pycache__").exists())
+        status = subprocess.run(
+            ["git", "status", "--porcelain=v1", "--untracked-files=all"],
+            cwd=self.source_root,
+            check=True,
+            stdout=subprocess.PIPE,
+            text=True,
+        ).stdout
+        self.assertEqual(status, "")
 
     def test_package_cli_propagates_the_same_certificate_selector(self):
         argv = [
