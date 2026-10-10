@@ -48,6 +48,16 @@ enum ImrseSettingsPalette {
     }
 }
 
+enum SettingsScrollEdgeCue {
+    static let height: CGFloat = 24
+    static let fadeDistance: CGFloat = 12
+
+    static func opacity(for scrollOffset: CGFloat, usesOpaqueFallback: Bool = false) -> Double {
+        if usesOpaqueFallback { return scrollOffset < -1 ? 1 : 0 }
+        return Double(min(max(-scrollOffset / fadeDistance, 0), 1))
+    }
+}
+
 private struct SettingsScrollOffsetPreferenceKey: PreferenceKey {
     static let defaultValue = CGFloat.zero
 
@@ -150,6 +160,7 @@ struct SettingsPage<Content: View>: View {
 
 struct SettingsScrollView<Content: View>: View {
     @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
+    @Environment(\.colorSchemeContrast) private var colorSchemeContrast
     @Environment(\.colorScheme) private var scheme
     @Namespace private var scrollSpace
     @State private var scrollOffset: CGFloat = 0
@@ -175,9 +186,11 @@ struct SettingsScrollView<Content: View>: View {
             .scrollIndicators(.hidden)
             .coordinateSpace(name: scrollSpace)
 
-            if scrollOffset < -1 {
-                scrollEdgeCue
-            }
+            scrollEdgeCue
+                .opacity(SettingsScrollEdgeCue.opacity(
+                    for: scrollOffset,
+                    usesOpaqueFallback: reduceTransparency || colorSchemeContrast == .increased
+                ))
         }
         .onPreferenceChange(SettingsScrollOffsetPreferenceKey.self) { scrollOffset = $0 }
     }
@@ -185,26 +198,26 @@ struct SettingsScrollView<Content: View>: View {
     @ViewBuilder
     private var scrollEdgeCue: some View {
         Group {
-            if reduceTransparency {
+            if reduceTransparency || colorSchemeContrast == .increased {
                 ImrseSettingsPalette.window(scheme)
             } else {
                 Rectangle()
                     .fill(.ultraThinMaterial)
+                    .mask {
+                        LinearGradient(
+                            stops: [
+                                .init(color: .black, location: 0),
+                                .init(color: .black.opacity(0.7), location: 0.45),
+                                .init(color: .clear, location: 1)
+                            ],
+                            startPoint: .top,
+                            endPoint: .bottom
+                        )
+                    }
             }
         }
-        .mask {
-            LinearGradient(
-                stops: [
-                    .init(color: .black, location: 0),
-                    .init(color: .black.opacity(0.7), location: 0.45),
-                    .init(color: .clear, location: 1)
-                ],
-                startPoint: .top,
-                endPoint: .bottom
-            )
-        }
         .frame(maxWidth: .infinity)
-        .frame(height: 24)
+        .frame(height: SettingsScrollEdgeCue.height)
         .allowsHitTesting(false)
         .accessibilityHidden(true)
     }
