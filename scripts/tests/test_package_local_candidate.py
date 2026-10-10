@@ -263,6 +263,18 @@ class PackageLocalCandidateTests(unittest.TestCase):
             with self.assertRaisesRegex(PackageError, "content differs"):
                 validate_source_copy(self.source_root, copy_root, manifest, self.source_commit, self.source_tree)
 
+    def test_source_copy_rejects_terminal_dotdot_source_ancestor_before_writing(self):
+        with tempfile.TemporaryDirectory() as temp:
+            parent = Path(temp)
+            source = self.clone_source(parent)
+            alias_component = parent / "build-root-parent"
+            alias_component.mkdir()
+            build_root = alias_component / ".."
+            with self.assertRaisesRegex(PackageError, "build root must be separate from the source checkout"):
+                copy_source_inputs(source, self.source_commit, self.source_tree, build_root)
+            self.assertFalse((parent / "source").exists())
+            self.assertFalse((parent / SOURCE_INPUT_MANIFEST_FILE).exists())
+
     def test_source_copy_rejects_dirty_or_mismatched_source_before_creating_build_root(self):
         with tempfile.TemporaryDirectory() as temp:
             source = self.clone_source(Path(temp))

@@ -657,7 +657,10 @@ def canonical_build_root(path, source_root):
     parent = path.parent.resolve(strict=True)
     if not parent.is_dir():
         raise PackageError("build root parent must be an existing directory")
-    resolved = parent / path.name
+    candidate = parent / path.name
+    if candidate.is_symlink():
+        raise PackageError("build root must be an absolute, non-symlink path")
+    resolved = candidate.resolve(strict=False)
     if resolved == source_root or resolved.is_relative_to(source_root) or source_root.is_relative_to(resolved):
         raise PackageError("build root must be separate from the source checkout")
     return resolved
