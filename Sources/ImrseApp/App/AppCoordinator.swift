@@ -12,6 +12,8 @@ final class AppCoordinator: NSObject, NSMenuItemValidation {
     private var statusItem: NSStatusItem?
     private var configurationObserver: AnyCancellable?
     private var settingsAppearanceObserver: AnyCancellable?
+    private var applicationResignObserver: AnyCancellable?
+    private var settingsWindowVisibilityObservers = Set<AnyCancellable>()
     private(set) var showsResponseDetails = false
 
     override init() {
@@ -44,6 +46,10 @@ final class AppCoordinator: NSObject, NSMenuItemValidation {
             panelController?.present(afterCapturingTargetOn: screen)
         }
         guard !model.isPreviewMode else { return }
+        applicationResignObserver = NotificationCenter.default.publisher(for: NSApplication.didResignActiveNotification)
+            .sink { [weak self] _ in
+                Task { @MainActor [weak self] in self?.reconcileDeferredApplicationResign() }
+            }
         settingsAppearanceObserver = model.$configuration
             .map(\.appearance)
             .removeDuplicates()
@@ -82,6 +88,7 @@ final class AppCoordinator: NSObject, NSMenuItemValidation {
         if shouldCenterWindow { window.center() }
         NSApp.activate()
         window.makeKeyAndOrderFront(nil)
+        synchronizeSettingsWindowVisibility()
     }
 
     #if DEBUG
@@ -172,6 +179,7 @@ final class AppCoordinator: NSObject, NSMenuItemValidation {
             .frame(width: 900, height: 570)
             .preferredColorScheme(previewColorScheme)
         let window = settingsWindowController.makeWindow(rootView: view)
+        observeSettingsWindowVisibility(window)
         #if DEBUG
         if previewColorScheme == .light {
             window.appearance = NSAppearance(named: .aqua)
@@ -184,6 +192,41 @@ final class AppCoordinator: NSObject, NSMenuItemValidation {
         settingsWindowController.apply(appearance: model.configuration.appearance)
         #endif
         return window
+    }
+
+    func observeSettingsWindowVisibility(_ window: NSWindow) {
+        if let settingsWindow = window as? SettingsWindow {
+            settingsWindow.onOrderingChange = { [weak self, weak window] in
+                guard let self, let window else { return }
+                self.synchronizeSettingsWindowVisibility(for: window)
+            }
+        }
+        for name in [
+            NSWindow.didBecomeKeyNotification,
+            NSWindow.didResignKeyNotification,
+            NSWindow.didChangeOcclusionStateNotification,
+            NSWindow.didMiniaturizeNotification,
+            NSWindow.didDeminiaturizeNotification,
+            NSWindow.willCloseNotification
+        ] {
+            NotificationCenter.default.publisher(for: name, object: window)
+                .sink { [weak self] _ in
+                    Task { @MainActor [weak self] in
+                        self?.synchronizeSettingsWindowVisibility(for: window)
+                    }
+                }
+                .store(in: &settingsWindowVisibilityObservers)
+        }
+    }
+
+    func reconcileDeferredApplicationResign(isApplicationActive: Bool = NSApp.isActive) {
+        guard !isApplicationActive else { return }
+        model.applicationDidResignActive()
+    }
+
+    private func synchronizeSettingsWindowVisibility(for observedWindow: NSWindow? = nil) {
+        let window = observedWindow ?? settingsWindowController.window
+        model.settingsWindowVisibilityChanged(isVisible: window?.isVisible == true && window?.isMiniaturized == false)
     }
 
     private func applyMenuBarVisibility(showInMenuBar: Bool) {
@@ -289,6 +332,16 @@ enum MenuBarAssets {
 }
 
 @MainActor
+class SettingsWindow: NSWindow {
+    var onOrderingChange: (() -> Void)?
+
+    override func order(_ place: NSWindow.OrderingMode, relativeTo otherWindowNumber: Int) {
+        super.order(place, relativeTo: otherWindowNumber)
+        onOrderingChange?()
+    }
+}
+
+@MainActor
 final class SettingsWindowController {
     static let windowSize = NSSize(width: 900, height: 570)
     private(set) var window: NSWindow?
@@ -302,7 +355,7 @@ final class SettingsWindowController {
         let contentView = NSHostingView(rootView: rootView)
         contentView.sizingOptions = []
         contentView.safeAreaRegions = []
-        let window = NSWindow(
+        let window = SettingsWindow(
             contentRect: NSRect(origin: .zero, size: Self.windowSize),
             styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
             backing: .buffered,
