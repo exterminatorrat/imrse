@@ -120,6 +120,7 @@ final class AppModel: ObservableObject {
     @Published private(set) var isRecordingShortcut = false
     @Published private(set) var configurationIssue: String?
     @Published private(set) var shortcutIssue: String?
+    @Published private(set) var permissionStatusSnapshot = PermissionStatusSnapshot.notQueried
     @Published private(set) var diagnosticsCopiedMessage: String?
     @Published private(set) var isTerminating = false
     @Published private(set) var chatGPTStatus: OpenAIAccountStatus?
@@ -183,6 +184,12 @@ final class AppModel: ObservableObject {
     private var shortcutMonitorRefreshPending = false
     private var shortcutRecordingSessionID: UUID?
     private(set) var shortcutMonitorActivationEpoch: UInt64 = 0
+    private let permissionStatusReader: PermissionStatusReader?
+    private let permissionStatusRefreshClock: PermissionStatusRefreshClock
+    private var permissionStatusRefreshTask: Task<Void, Never>?
+    private var permissionStatusRefreshSessionID: UUID?
+    private var isSettingsWindowVisible = false
+    private var isApplicationActive = true
     private let allowsGlobalShortcutMonitoring: Bool
     private let lifecycleLogger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "imrse", category: "lifecycle")
     private var lifecycleStartedAt: Date?
@@ -215,12 +222,41 @@ final class AppModel: ObservableObject {
     #endif
 
     var accessibilityStatus: String {
-        isPreviewMode ? "Not queried in preview" : MacSelectionAccess.accessibilityPermissionGranted ? "Allowed" : "Required"
+        isPreviewMode ? "Not queried in preview" : permissionStatusSnapshot.accessibility.title
+    }
+
+    var inputMonitoringStatus: String {
+        isPreviewMode ? "Not queried in preview" : permissionStatusSnapshot.inputMonitoring.title
     }
 
     var eventMonitoringStatus: String {
-        if isPreviewMode { return "Not queried in preview" }
-        return isRecordingShortcut ? "Paused while recording" : shortcutMonitor.isMonitoring ? "Active" : "Inactive"
+        isPreviewMode ? "Not queried in preview" : permissionStatusSnapshot.keyboardMonitoring.title
+    }
+
+    var keyboardMonitoringDetail: String {
+        if isPreviewMode { return "Keyboard monitoring isn't queried in preview mode." }
+        if isTerminating || terminationRequested { return "Monitoring stops while imrse is quitting." }
+        if isRecordingShortcut { return "Paused while recording a keyboard shortcut." }
+        if permissionStatusSnapshot.inputMonitoring == .notAuthorized {
+            return "Input Monitoring isn't authorized. Enable it in System Settings, then retry."
+        }
+        if permissionStatusSnapshot.keyboardMonitoring == .unavailable {
+            return shortcutIssue ?? "Keyboard monitoring isn't available in this app context."
+        }
+        if !hasKeyboardActivation {
+            return "No keyboard activation is enabled. Turn on Double Control or assign a shortcut in General."
+        }
+        return switch permissionStatusSnapshot.keyboardMonitoring {
+        case .active: "Listening for configured shortcuts while imrse is in the background."
+        case .pausedWhileRecording: "Paused while recording a keyboard shortcut."
+        case .inactive: "Keyboard monitoring is inactive. Retry after checking Input Monitoring."
+        case .unavailable: shortcutIssue ?? "Keyboard monitoring isn't available in this app context."
+        case .notQueried: "Keyboard monitoring isn't queried in preview mode."
+        }
+    }
+
+    var isPermissionStatusRefreshing: Bool {
+        permissionStatusRefreshTask != nil
     }
 
     var shouldShowKeyboardMonitoringRetry: Bool {
@@ -265,7 +301,9 @@ final class AppModel: ObservableObject {
         officialAccountClient: OfficialAccountClient? = nil,
         officialAccountOperations: (any AppModelOfficialAccountClient)? = nil,
         officialAccountSignInCoordinator: (any AppModelOfficialAccountSignInCoordinating)? = nil,
-        providerModelCatalog: (any AppModelProviderModelCatalogClient)? = nil
+        providerModelCatalog: (any AppModelProviderModelCatalogClient)? = nil,
+        permissionStatusReader: PermissionStatusReader? = nil,
+        permissionStatusRefreshClock: PermissionStatusRefreshClock? = nil
     ) {
         self.init(
             loadSettingsFromDisk: false,
@@ -281,7 +319,9 @@ final class AppModel: ObservableObject {
             officialAccountClientOverride: officialAccountClient,
             officialAccountOperationsOverride: officialAccountOperations,
             officialAccountSignInCoordinatorOverride: officialAccountSignInCoordinator,
-            providerModelCatalogOverride: providerModelCatalog
+            providerModelCatalogOverride: providerModelCatalog,
+            permissionStatusReaderOverride: permissionStatusReader,
+            permissionStatusRefreshClock: permissionStatusRefreshClock
         )
     }
     #else
@@ -304,7 +344,9 @@ final class AppModel: ObservableObject {
         officialAccountClientOverride: OfficialAccountClient? = nil,
         officialAccountOperationsOverride: (any AppModelOfficialAccountClient)? = nil,
         officialAccountSignInCoordinatorOverride: (any AppModelOfficialAccountSignInCoordinating)? = nil,
-        providerModelCatalogOverride: (any AppModelProviderModelCatalogClient)? = nil
+        providerModelCatalogOverride: (any AppModelProviderModelCatalogClient)? = nil,
+        permissionStatusReaderOverride: PermissionStatusReader? = nil,
+        permissionStatusRefreshClock: PermissionStatusRefreshClock? = nil
     ) {
         let store = configurationStoreOverride ?? ConfigurationStore(root: Self.applicationSupportURL)
         var configuration = AppConfiguration()
@@ -425,6 +467,8 @@ final class AppModel: ObservableObject {
         self.managedLocalModelStore = managedLocalModelStore
         self.allowsGlobalShortcutMonitoring = !isPreviewMode
             && ((loadSettingsFromDisk && engineOverride == nil) || shortcutMonitorOverride != nil)
+        self.permissionStatusReader = permissionStatusReaderOverride ?? (loadSettingsFromDisk && !isPreviewMode ? .system : nil)
+        self.permissionStatusRefreshClock = permissionStatusRefreshClock ?? .live
         #if DEBUG
         pillBridge.isPreviewMode = isPreviewMode
         #endif
@@ -438,6 +482,7 @@ final class AppModel: ObservableObject {
         if managedLocalModelStore != nil {
             Task { [weak self] in await self?.refreshManagedLocalModels() }
         }
+        refreshPermissionStatus()
         if allowsGlobalShortcutMonitoring { startShortcutMonitor() }
     }
 
@@ -465,7 +510,23 @@ final class AppModel: ObservableObject {
     }
 
     func applicationDidBecomeActive() {
+        guard !isTerminating, !terminationRequested else { return }
+        isApplicationActive = true
+        refreshPermissionStatus()
+        updatePermissionStatusRefreshTask()
         requestShortcutMonitorRefreshIfInactive()
+    }
+
+    func applicationDidResignActive() {
+        isApplicationActive = false
+        updatePermissionStatusRefreshTask()
+    }
+
+    func settingsWindowVisibilityChanged(isVisible: Bool) {
+        guard isSettingsWindowVisible != isVisible else { return }
+        isSettingsWindowVisible = isVisible
+        if isVisible { refreshPermissionStatus() }
+        updatePermissionStatusRefreshTask()
     }
 
     func endShortcutRecording(_ sessionID: UUID) {
@@ -474,6 +535,7 @@ final class AppModel: ObservableObject {
         isRecordingShortcut = false
         guard allowsGlobalShortcutMonitoring, !terminationRequested else {
             shortcutMonitorRefreshPending = false
+            refreshPermissionStatus()
             return
         }
         shortcutMonitorRefreshPending = true
@@ -562,6 +624,7 @@ final class AppModel: ObservableObject {
     ) -> NSApplication.TerminateReply {
         terminationRequested = true
         isTerminating = true
+        updatePermissionStatusRefreshTask()
         accountStatusRefreshTask?.cancel()
         accountStatusRefreshTask = nil
         cancelOfficialAccountStatusRefresh()
@@ -1730,6 +1793,7 @@ final class AppModel: ObservableObject {
         stopShortcutMonitor()
         guard configurationIssue == nil else {
             shortcutIssue = configurationIssue
+            refreshPermissionStatus()
             return
         }
         let activationEpoch = shortcutMonitorActivationEpoch
@@ -1745,6 +1809,7 @@ final class AppModel: ObservableObject {
         } catch {
             shortcutIssue = "Keyboard monitoring couldn't start. Check Input Monitoring in System Settings, then retry."
         }
+        refreshPermissionStatus()
     }
 
     private func requestShortcutMonitorRefreshIfInactive() {
@@ -1773,6 +1838,84 @@ final class AppModel: ObservableObject {
     private func stopShortcutMonitor() {
         shortcutMonitorActivationEpoch &+= 1
         shortcutMonitor.stop()
+        refreshPermissionStatus()
+    }
+
+    func refreshPermissionStatus() {
+        let shuttingDown = isTerminating || terminationRequested
+        let accessibility: PermissionAuthorizationStatus
+        let inputMonitoring: PermissionAuthorizationStatus
+        if isPreviewMode {
+            accessibility = .notQueried
+            inputMonitoring = .notQueried
+        } else if shuttingDown {
+            accessibility = permissionStatusSnapshot.accessibility
+            inputMonitoring = permissionStatusSnapshot.inputMonitoring
+        } else if let permissionStatusReader {
+            accessibility = permissionStatusReader.accessibility() ? .allowed : .notAuthorized
+            inputMonitoring = permissionStatusReader.inputMonitoring() ? .allowed : .notAuthorized
+        } else {
+            accessibility = .notQueried
+            inputMonitoring = .notQueried
+        }
+
+        let keyboardMonitoring: KeyboardMonitoringActivity
+        if isPreviewMode {
+            keyboardMonitoring = .notQueried
+        } else if shuttingDown {
+            keyboardMonitoring = .unavailable
+        } else if isRecordingShortcut {
+            keyboardMonitoring = .pausedWhileRecording
+        } else if shortcutMonitor.isMonitoring {
+            keyboardMonitoring = .active
+        } else if shortcutIssue != nil {
+            keyboardMonitoring = .unavailable
+        } else {
+            keyboardMonitoring = .inactive
+        }
+        let snapshot = PermissionStatusSnapshot(
+            accessibility: accessibility,
+            inputMonitoring: inputMonitoring,
+            keyboardMonitoring: keyboardMonitoring
+        )
+        if permissionStatusSnapshot != snapshot { permissionStatusSnapshot = snapshot }
+    }
+
+    private var hasKeyboardActivation: Bool {
+        configuration.invocation.doubleControlEnabled
+            || configuration.invocation.shortcut != nil
+            || presets.contains { $0.shortcut != nil }
+    }
+
+    private func updatePermissionStatusRefreshTask() {
+        guard isSettingsWindowVisible, isApplicationActive, !isPreviewMode, !isTerminating, !terminationRequested else {
+            permissionStatusRefreshTask?.cancel()
+            permissionStatusRefreshTask = nil
+            permissionStatusRefreshSessionID = nil
+            return
+        }
+        guard permissionStatusRefreshTask == nil else { return }
+        let sessionID = UUID()
+        permissionStatusRefreshSessionID = sessionID
+        let clock = permissionStatusRefreshClock
+        permissionStatusRefreshTask = Task { @MainActor [weak self] in
+            while !Task.isCancelled {
+                do {
+                    try await clock.sleep(clock.interval)
+                } catch {
+                    return
+                }
+                guard !Task.isCancelled,
+                      let self,
+                      self.permissionStatusRefreshSessionID == sessionID,
+                      self.isSettingsWindowVisible,
+                      self.isApplicationActive,
+                      !self.isTerminating,
+                      !self.terminationRequested
+                else { return }
+                self.refreshPermissionStatus()
+            }
+        }
     }
 
     private func finishManagedLocalModelOperation(sessionID: UUID) {

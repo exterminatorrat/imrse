@@ -49,7 +49,19 @@ struct ShortcutsSettingsPane: View {
                         ShortcutPermissionRow(
                             symbol: "keyboard",
                             title: "Input Monitoring",
-                            detail: "Listens for the global shortcut while imrse is in the background.",
+                            detail: "Allows imrse to listen for global keyboard shortcuts in other apps.",
+                            status: model.inputMonitoringStatus,
+                            settingsTitle: "Input Monitoring Settings",
+                            settingsURL: Self.inputMonitoringSettingsURL,
+                            isPreviewMode: model.isPreviewMode
+                        )
+
+                        ImrseDivider()
+
+                        ShortcutPermissionRow(
+                            symbol: "keyboard",
+                            title: "Keyboard monitoring",
+                            detail: model.keyboardMonitoringDetail,
                             status: model.eventMonitoringStatus,
                             settingsTitle: "Input Monitoring Settings",
                             settingsURL: Self.inputMonitoringSettingsURL,
@@ -63,7 +75,7 @@ struct ShortcutsSettingsPane: View {
                         ShortcutPermissionRow(
                             symbol: "text.cursor",
                             title: "Accessibility",
-                            detail: "Reads and replaces the text you select.",
+                            detail: "Allows imrse to access selected text in supported apps.",
                             status: model.accessibilityStatus,
                             settingsTitle: "Accessibility Settings",
                             settingsURL: Self.accessibilitySettingsURL,
@@ -185,11 +197,11 @@ private struct ShortcutPermissionRow: View {
         switch status {
         case "Allowed", "Active":
             SettingsStatusBadge(title: status, symbol: "checkmark.circle.fill", tone: .positive)
-        case "Required", "Inactive":
+        case "Required", "Not authorized", "Inactive", "Unavailable":
             SettingsStatusBadge(title: status, symbol: "exclamationmark.circle.fill", tone: .warning)
         case "Paused while recording":
             SettingsStatusBadge(title: status, symbol: "pause.circle", tone: .neutral)
-        case "Not queried in preview":
+        case "Not queried in preview", "Not queried":
             SettingsStatusBadge(title: status, symbol: "questionmark.circle", tone: .neutral)
         default:
             SettingsStatusBadge(title: status, symbol: "circle", tone: .neutral)
