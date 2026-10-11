@@ -56,6 +56,7 @@ MACHO_MAGICS = {
 }
 ZIP_TIMESTAMP = (1980, 1, 1, 0, 0, 0)
 CERTIFICATE_SIGNING_LABEL = "certificate-signed locally; unnotarized"
+BUILD_PROVENANCE_SCOPE = "local builder-supplied signing command, SHA-256 of the canonical identity-keychain path string, and verified public signature metadata; not an independent compiler or Keychain-state attestation"
 
 
 class PackageError(Exception):
@@ -414,6 +415,26 @@ def normalize_certificate_sha1(value):
     return value.lower()
 
 
+def normalize_signing_keychain_path(value):
+    if not isinstance(value, (str, os.PathLike)) or not os.fspath(value).strip():
+        raise PackageError("an explicit signing keychain path is required")
+    path = Path(value)
+    if not path.is_absolute():
+        raise PackageError("signing keychain path must be absolute")
+    try:
+        resolved = path.resolve(strict=True)
+        mode = resolved.stat().st_mode
+    except (OSError, RuntimeError) as error:
+        raise PackageError("signing keychain path must resolve to an existing regular file") from error
+    if not stat.S_ISREG(mode):
+        raise PackageError("signing keychain path must resolve to an existing regular file")
+    return resolved
+
+
+def identity_keychain_path_sha256(path):
+    return hashlib.sha256(str(path).encode("utf-8")).hexdigest()
+
+
 def code_signature_metadata(path, certificate_sha1, *, deep=False, expected_identifier=None):
     certificate_sha1 = normalize_certificate_sha1(certificate_sha1)
     requirement = f'certificate leaf H"{certificate_sha1}"'
@@ -443,12 +464,13 @@ def code_signature_metadata(path, certificate_sha1, *, deep=False, expected_iden
     }
 
 
-def verify_bundle_signature_receipt(bundle, certificate_sha1, binaries=None):
+def verify_bundle_signature_receipt(bundle, certificate_sha1, signing_keychain_path, binaries=None):
     bundle_path = Path(bundle)
     if bundle_path.is_symlink() or not bundle_path.is_dir():
         raise PackageError("signed app bundle must be a real directory")
     bundle = bundle_path.resolve(strict=True)
     certificate_sha1 = normalize_certificate_sha1(certificate_sha1)
+    signing_keychain_path = normalize_signing_keychain_path(signing_keychain_path)
     discovered_code_paths = set(macho_files(bundle))
     code_paths = list(discovered_code_paths if binaries is None else binaries)
     if binaries is not None and set(code_paths) != discovered_code_paths:
@@ -477,18 +499,20 @@ def verify_bundle_signature_receipt(bundle, certificate_sha1, binaries=None):
     ]
     return {
         "certificateSHA1": certificate_sha1,
+        "identityKeychainPathSHA256": identity_keychain_path_sha256(signing_keychain_path),
         "signatureType": "certificate-signed",
         "bundle": bundle_receipt,
         "codeItems": code_receipts,
     }
 
 
-def sign_and_verify(bundle, binaries, certificate_sha1):
+def sign_and_verify(bundle, binaries, certificate_sha1, signing_keychain_path):
     bundle_path = Path(bundle)
     if bundle_path.is_symlink() or not bundle_path.is_dir():
         raise PackageError("signed app bundle must be a real directory")
     bundle = bundle_path.resolve(strict=True)
     certificate_sha1 = normalize_certificate_sha1(certificate_sha1)
+    signing_keychain_path = normalize_signing_keychain_path(signing_keychain_path)
     binary_paths = [Path(binary) for binary in binaries]
     if any(binary.is_symlink() or not binary.is_file() for binary in binary_paths):
         raise PackageError("signing must cover every real Mach-O inside the staged app bundle")
@@ -501,15 +525,15 @@ def sign_and_verify(bundle, binaries, certificate_sha1):
     ):
         raise PackageError("signing must cover every real Mach-O inside the staged app bundle")
     for binary in binaries:
-        run(["codesign", "--force", "--sign", certificate_sha1, "--timestamp=none", str(binary)])
-    run(["codesign", "--force", "--sign", certificate_sha1, "--timestamp=none", str(bundle)])
-    return verify_bundle_signature_receipt(bundle, certificate_sha1, binaries)
+        run(["codesign", "--force", "--keychain", str(signing_keychain_path), "--sign", certificate_sha1, "--timestamp=none", str(binary)])
+    run(["codesign", "--force", "--keychain", str(signing_keychain_path), "--sign", certificate_sha1, "--timestamp=none", str(bundle)])
+    return verify_bundle_signature_receipt(bundle, certificate_sha1, signing_keychain_path, binaries)
 
 
-def sign_app_bundle(bundle, certificate_sha1):
+def sign_app_bundle(bundle, certificate_sha1, signing_keychain_path):
     reject_ci_validation_app(bundle)
     validate_symlinks(bundle)
-    return sign_and_verify(bundle, macho_files(bundle), certificate_sha1)
+    return sign_and_verify(bundle, macho_files(bundle), certificate_sha1, signing_keychain_path)
 
 
 def app_license_hashes(bundle):
@@ -810,8 +834,10 @@ def normalized_release_build_command():
     ]
 
 
-def record_build_provenance(root, source_commit, source_tree, build_root, working_directory, build_command, signing_certificate_sha1):
+def record_build_provenance(root, source_commit, source_tree, build_root, working_directory, build_command, signing_certificate_sha1, signing_keychain_path):
     signing_certificate_sha1 = normalize_certificate_sha1(signing_certificate_sha1)
+    signing_keychain_path = normalize_signing_keychain_path(signing_keychain_path)
+    signing_keychain_path_sha256 = identity_keychain_path_sha256(signing_keychain_path)
     source_root = validate_source_checkout(root, source_commit, source_tree)
     build_root = canonical_build_root(build_root, source_root)
     if build_root.is_symlink() or not build_root.is_dir():
@@ -841,9 +867,9 @@ def record_build_provenance(root, source_commit, source_tree, build_root, workin
     if product_info != source_info:
         raise PackageError("built app Info.plist does not match clean source")
     validate_symlinks(product)
-    signature_receipt = verify_bundle_signature_receipt(product, signing_certificate_sha1)
+    signature_receipt = verify_bundle_signature_receipt(product, signing_certificate_sha1, signing_keychain_path)
     record = {
-        "schemaVersion": 4,
+        "schemaVersion": 5,
         "repository": "exterminatorrat/imrse",
         "sourceCommitSHA": source_commit,
         "sourceTreeSHA": source_tree,
@@ -859,7 +885,8 @@ def record_build_provenance(root, source_commit, source_tree, build_root, workin
             "command": normalized_release_build_command(),
             "commandPathValuesRelativeToBuildRoot": True,
             "signingCertificateSHA1": signing_certificate_sha1,
-            "provenanceScope": "local builder-supplied invocation metadata and product hashes; not an independent compiler attestation",
+            "identityKeychainPathSHA256": signing_keychain_path_sha256,
+            "provenanceScope": BUILD_PROVENANCE_SCOPE,
         },
         "product": {
             "relativePath": "products/imrse.app",
@@ -877,8 +904,10 @@ def record_build_provenance(root, source_commit, source_tree, build_root, workin
     return provenance_path
 
 
-def validate_build_provenance(provenance_path, root, product, expected_build_root, source_commit, source_tree, signing_certificate_sha1):
+def validate_build_provenance(provenance_path, root, product, expected_build_root, source_commit, source_tree, signing_certificate_sha1, signing_keychain_path):
     signing_certificate_sha1 = normalize_certificate_sha1(signing_certificate_sha1)
+    signing_keychain_path = normalize_signing_keychain_path(signing_keychain_path)
+    signing_keychain_path_sha256 = identity_keychain_path_sha256(signing_keychain_path)
     source_root = validate_source_checkout(root, source_commit, source_tree)
     build_root = canonical_build_root(expected_build_root, source_root)
     if provenance_path.is_symlink() or not provenance_path.is_file():
@@ -887,7 +916,7 @@ def validate_build_provenance(provenance_path, root, product, expected_build_roo
         record = json.loads(provenance_path.read_text())
     except (OSError, json.JSONDecodeError) as error:
         raise PackageError("cannot read clean-source build provenance") from error
-    if record.get("schemaVersion") != 4 or record.get("repository") != "exterminatorrat/imrse":
+    if record.get("schemaVersion") != 5 or record.get("repository") != "exterminatorrat/imrse":
         raise PackageError("unsupported clean-source build provenance schema")
     manifest_path = build_root / SOURCE_INPUT_MANIFEST_FILE
     manifest = read_source_input_manifest(manifest_path)
@@ -911,8 +940,9 @@ def validate_build_provenance(provenance_path, root, product, expected_build_roo
         or build.get("command") != normalized_release_build_command()
         or build.get("commandPathValuesRelativeToBuildRoot") is not True
         or build.get("signingCertificateSHA1") != signing_certificate_sha1
+        or build.get("identityKeychainPathSHA256") != signing_keychain_path_sha256
         or build.get("provenanceScope")
-        != "local builder-supplied invocation metadata and product hashes; not an independent compiler attestation"
+        != BUILD_PROVENANCE_SCOPE
     ):
         raise PackageError("build provenance does not match the isolated Release builder record")
     product_record = record.get("product", {})
@@ -932,7 +962,7 @@ def validate_build_provenance(provenance_path, root, product, expected_build_roo
         raise PackageError("built product path or hashes do not match the recorded output")
     if read_plist(product_path / "Contents/Info.plist") != read_source_info(source_root):
         raise PackageError("built product metadata no longer matches clean source")
-    actual_signature_receipt = verify_bundle_signature_receipt(product_path, signing_certificate_sha1)
+    actual_signature_receipt = verify_bundle_signature_receipt(product_path, signing_certificate_sha1, signing_keychain_path)
     if product_record.get("signatureReceipt") != actual_signature_receipt:
         raise PackageError("built product signature receipt does not match the verified signer and public signature metadata")
     return record
@@ -989,6 +1019,7 @@ def candidate_manifest(root, source, source_tree_hash, bundle, archive_hash, arc
         })
     build = build_record["build"]
     signing_certificate_sha1 = normalize_certificate_sha1(build.get("signingCertificateSHA1"))
+    signing_keychain_path_sha256 = build.get("identityKeychainPathSHA256")
     product_record = build_record.get("product")
     if not isinstance(product_record, dict):
         raise PackageError("build product signature receipt is missing")
@@ -998,6 +1029,7 @@ def candidate_manifest(root, source, source_tree_hash, bundle, archive_hash, arc
         if (
             not isinstance(receipt, dict)
             or receipt.get("certificateSHA1") != signing_certificate_sha1
+            or receipt.get("identityKeychainPathSHA256") != signing_keychain_path_sha256
             or receipt.get("signatureType") != "certificate-signed"
             or not isinstance(receipt.get("bundle"), dict)
             or receipt["bundle"].get("identifier") != EXPECTED_BUNDLE_ID
@@ -1012,7 +1044,7 @@ def candidate_manifest(root, source, source_tree_hash, bundle, archive_hash, arc
         ):
             raise PackageError("build and candidate signature receipts do not match the selected certificate")
     return {
-        "schemaVersion": 4,
+        "schemaVersion": 5,
         "candidate": {
             "version": CANDIDATE_VERSION,
             "bundleVersion": candidate_info["CFBundleShortVersionString"],
@@ -1056,6 +1088,7 @@ def candidate_manifest(root, source, source_tree_hash, bundle, archive_hash, arc
         },
         "signing": {
             "certificateSHA1": build["signingCertificateSHA1"],
+            "identityKeychainPathSHA256": signing_keychain_path_sha256,
             "signatureType": CERTIFICATE_SIGNING_LABEL,
             "timestamp": "none",
             "developerID": False,
@@ -1136,8 +1169,9 @@ def validate_independent_bundle_copy(source, copied):
             raise PackageError(f"staged app reuses a built-product filesystem object: {relative}")
 
 
-def create_candidate(input_app, source_commit, source_tree, build_root, output, signing_certificate_sha1):
+def create_candidate(input_app, source_commit, source_tree, build_root, output, signing_certificate_sha1, signing_keychain_path):
     signing_certificate_sha1 = normalize_certificate_sha1(signing_certificate_sha1)
+    signing_keychain_path = normalize_signing_keychain_path(signing_keychain_path)
     root = Path(__file__).resolve().parent.parent
     if platform.system() != "Darwin" or platform.machine() != "arm64":
         raise PackageError("candidate packaging requires a macOS arm64 device")
@@ -1167,7 +1201,7 @@ def create_candidate(input_app, source_commit, source_tree, build_root, output, 
     source, _ = validate_built_app_bundle(input_app, source_info)
     reject_ci_validation_app(source)
     source_tree_hash = bundle_tree_sha256(source)
-    build_record = validate_build_provenance(provenance_path, root, source, build_root, source_commit, source_tree, signing_certificate_sha1)
+    build_record = validate_build_provenance(provenance_path, root, source, build_root, source_commit, source_tree, signing_certificate_sha1, signing_keychain_path)
     build_record_hash = sha256_file(provenance_path)
     input_manifest_hash = sha256_file(manifest_path)
     check_quarantine_metadata(source)
@@ -1189,7 +1223,7 @@ def create_candidate(input_app, source_commit, source_tree, build_root, output, 
             binaries = thin_bundle_to_arm64(staged_bundle)
             runtime_modules = validate_runtime_modules(staged_bundle / "Contents/MacOS/imrse")
             runtime_symbols = validate_runtime_symbols(staged_bundle / "Contents/MacOS/imrse")
-            candidate_signature_receipt = sign_and_verify(staged_bundle, binaries, signing_certificate_sha1)
+            candidate_signature_receipt = sign_and_verify(staged_bundle, binaries, signing_certificate_sha1, signing_keychain_path)
             run(["plutil", "-lint", str(staged_bundle / "Contents/Info.plist")])
             first_zip = stage / "first.zip"
             second_zip = stage / "second.zip"
@@ -1202,7 +1236,7 @@ def create_candidate(input_app, source_commit, source_tree, build_root, output, 
                 raise PackageError("built product changed while candidate packaging was running")
             validate_source_checkout(root, source_commit, source_tree)
             validate_source_copy(root, copy_root, read_source_input_manifest(manifest_path), source_commit, source_tree)
-            validate_build_provenance(provenance_path, root, source, build_root, source_commit, source_tree, signing_certificate_sha1)
+            validate_build_provenance(provenance_path, root, source, build_root, source_commit, source_tree, signing_certificate_sha1, signing_keychain_path)
             if sha256_file(provenance_path) != build_record_hash or sha256_file(manifest_path) != input_manifest_hash:
                 raise PackageError("source input or build provenance changed during packaging")
             manifest_data = candidate_manifest(
@@ -1241,7 +1275,7 @@ def create_candidate(input_app, source_commit, source_tree, build_root, output, 
         raise PackageError("candidate output appeared during packaging; refusing to overwrite it") from error
     validate_source_checkout(root, source_commit, source_tree)
     validate_source_copy(root, copy_root, read_source_input_manifest(manifest_path), source_commit, source_tree)
-    validate_build_provenance(provenance_path, root, source, build_root, source_commit, source_tree, signing_certificate_sha1)
+    validate_build_provenance(provenance_path, root, source, build_root, source_commit, source_tree, signing_certificate_sha1, signing_keychain_path)
     if bundle_tree_sha256(source) != source_tree_hash or sha256_file(provenance_path) != build_record_hash or sha256_file(manifest_path) != input_manifest_hash:
         raise PackageError("built product or provenance inputs changed during packaging")
     final_archive = output / OUTPUT_NAME
@@ -1256,6 +1290,8 @@ def create_candidate(input_app, source_commit, source_tree, build_root, output, 
 def main(argv=None):
     parser = argparse.ArgumentParser(description="Validate clean source inputs and package a local certificate-signed arm64 candidate")
     subparsers = parser.add_subparsers(dest="action", required=True)
+    keychain_parser = subparsers.add_parser("validate-signing-keychain", help="validate and print an explicit signing identity keychain path")
+    keychain_parser.add_argument("--path", required=True, type=Path)
     prepare_parser = subparsers.add_parser("prepare-source", help="copy a clean committed tree into an isolated build root")
     prepare_parser.add_argument("--source-root", type=Path, default=Path(__file__).resolve().parent.parent)
     prepare_parser.add_argument("--source-commit", required=True)
@@ -1269,6 +1305,7 @@ def main(argv=None):
     record_parser.add_argument("--working-directory", required=True, type=Path)
     record_parser.add_argument("--build-command-arg", action="append", required=True)
     record_parser.add_argument("--signing-certificate-sha1", required=True)
+    record_parser.add_argument("--signing-keychain-path", required=True, type=Path)
     ci_parser = subparsers.add_parser("validate-ci-app", help="validate an unsigned, non-distribution CI package build")
     ci_parser.add_argument("--app", required=True, type=Path)
     ci_parser.add_argument("--source-root", type=Path, default=Path(__file__).resolve().parent.parent)
@@ -1276,6 +1313,7 @@ def main(argv=None):
     sign_parser = subparsers.add_parser("sign-app", help="explicitly sign each bundled Mach-O and the app bundle")
     sign_parser.add_argument("--app", required=True, type=Path)
     sign_parser.add_argument("--signing-certificate-sha1", required=True)
+    sign_parser.add_argument("--signing-keychain-path", required=True, type=Path)
     package_parser = subparsers.add_parser("package", help="validate and package an existing built app")
     package_parser.add_argument("--app", required=True, type=Path)
     package_parser.add_argument("--source-commit", required=True)
@@ -1283,9 +1321,12 @@ def main(argv=None):
     package_parser.add_argument("--build-root", required=True, type=Path)
     package_parser.add_argument("--output", required=True, type=Path)
     package_parser.add_argument("--signing-certificate-sha1", required=True)
+    package_parser.add_argument("--signing-keychain-path", required=True, type=Path)
     args = parser.parse_args(argv)
     try:
-        if args.action == "prepare-source":
+        if args.action == "validate-signing-keychain":
+            print(normalize_signing_keychain_path(args.path))
+        elif args.action == "prepare-source":
             source_root = validate_source_checkout(args.source_root, args.source_commit, args.source_tree)
             source_info = read_source_info(source_root)
             validate_app_version_metadata(source_info, source_info)
@@ -1293,15 +1334,15 @@ def main(argv=None):
             print(f"Source input copy: {copy_root}")
             print(f"Source input manifest: {manifest_path}")
         elif args.action == "record-build":
-            print(record_build_provenance(args.source_root, args.source_commit, args.source_tree, args.build_root, args.working_directory, args.build_command_arg, args.signing_certificate_sha1))
+            print(record_build_provenance(args.source_root, args.source_commit, args.source_tree, args.build_root, args.working_directory, args.build_command_arg, args.signing_certificate_sha1, args.signing_keychain_path))
         elif args.action == "validate-ci-app":
             receipt_path = validate_ci_package_app(args.app.expanduser(), args.source_root, args.configuration)
             print(f"CI validation-only receipt: {receipt_path}")
         elif args.action == "sign-app":
-            sign_app_bundle(args.app.expanduser(), args.signing_certificate_sha1)
+            sign_app_bundle(args.app.expanduser(), args.signing_certificate_sha1, args.signing_keychain_path)
             print(f"Signed and verified certificate-selected app: {args.app}")
         else:
-            create_candidate(args.app, args.source_commit, args.source_tree, args.build_root, args.output, args.signing_certificate_sha1)
+            create_candidate(args.app, args.source_commit, args.source_tree, args.build_root, args.output, args.signing_certificate_sha1, args.signing_keychain_path)
     except (PackageError, OSError, subprocess.SubprocessError, zipfile.BadZipFile) as error:
         print(f"candidate packaging failed: {error}", file=sys.stderr)
         return 1
