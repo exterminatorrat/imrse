@@ -17,8 +17,9 @@ RELEASE_COMMIT="${IMRSE_RELEASE_SOURCE_COMMIT:-}"
 RELEASE_TREE="${IMRSE_RELEASE_SOURCE_TREE:-}"
 RELEASE_BUILD_ROOT="${IMRSE_RELEASE_BUILD_ROOT:-}"
 SIGNING_CERTIFICATE_SHA1="${IMRSE_SIGNING_CERTIFICATE_SHA1:-}"
+SIGNING_KEYCHAIN_PATH="${IMRSE_SIGNING_KEYCHAIN_PATH:-}"
 if [[ "$CI_PACKAGE_VALIDATION" == "1" ]]; then
-  if [[ -n "$SIGNING_CERTIFICATE_SHA1" || -n "$RELEASE_COMMIT$RELEASE_TREE$RELEASE_BUILD_ROOT" ]]; then
+  if [[ -n "$SIGNING_CERTIFICATE_SHA1" || -n "$SIGNING_KEYCHAIN_PATH" || -n "$RELEASE_COMMIT$RELEASE_TREE$RELEASE_BUILD_ROOT" ]]; then
     printf 'CI package validation cannot use a signing selector or Release provenance inputs.\n' >&2
     exit 1
   fi
@@ -54,6 +55,11 @@ else
     exit 1
   fi
   SIGNING_CERTIFICATE_SHA1="$(printf '%s' "$SIGNING_CERTIFICATE_SHA1" | tr '[:upper:]' '[:lower:]')"
+  if [[ -z "$SIGNING_KEYCHAIN_PATH" ]]; then
+    printf 'Set IMRSE_SIGNING_KEYCHAIN_PATH to an explicitly selected keychain path.\n' >&2
+    exit 1
+  fi
+  SIGNING_KEYCHAIN_PATH="$(python3 "$SOURCE_ROOT/scripts/package_local_candidate.py" validate-signing-keychain --path "$SIGNING_KEYCHAIN_PATH")"
 fi
 if [[ -n "$RELEASE_COMMIT$RELEASE_TREE$RELEASE_BUILD_ROOT" ]]; then
   if [[ -z "$RELEASE_COMMIT" || -z "$RELEASE_TREE" || -z "$RELEASE_BUILD_ROOT" ]]; then
@@ -189,7 +195,8 @@ if [[ "$CI_PACKAGE_VALIDATION" == "1" ]]; then
 else
   python3 "$ROOT/scripts/package_local_candidate.py" sign-app \
     --app "$STAGED_APP" \
-    --signing-certificate-sha1 "$SIGNING_CERTIFICATE_SHA1"
+    --signing-certificate-sha1 "$SIGNING_CERTIFICATE_SHA1" \
+    --signing-keychain-path "$SIGNING_KEYCHAIN_PATH"
 fi
 if [[ "${IMRSE_REQUIRE_EMPTY_APP_OUTPUT:-0}" == "1" ]]; then
   if [[ -e "$APP" || -L "$APP" ]]; then
@@ -225,5 +232,6 @@ if [[ -n "$RELEASE_COMMIT" ]]; then
     --build-root "$RELEASE_BUILD_ROOT" \
     --working-directory "$BUILD_WORKING_DIRECTORY" \
     --signing-certificate-sha1 "$SIGNING_CERTIFICATE_SHA1" \
+    --signing-keychain-path "$SIGNING_KEYCHAIN_PATH" \
     "${BUILD_COMMAND_ARGS[@]}"
 fi
