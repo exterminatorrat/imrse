@@ -18,8 +18,10 @@ RELEASE_TREE="${IMRSE_RELEASE_SOURCE_TREE:-}"
 RELEASE_BUILD_ROOT="${IMRSE_RELEASE_BUILD_ROOT:-}"
 SIGNING_CERTIFICATE_SHA1="${IMRSE_SIGNING_CERTIFICATE_SHA1:-}"
 SIGNING_KEYCHAIN_PATH="${IMRSE_SIGNING_KEYCHAIN_PATH:-}"
+SIGNING_CODESIGN_EXECUTABLE="${IMRSE_SIGNING_CODESIGN_EXECUTABLE:-}"
+SIGNING_CODESIGN_SHA256="${IMRSE_SIGNING_CODESIGN_SHA256:-}"
 if [[ "$CI_PACKAGE_VALIDATION" == "1" ]]; then
-  if [[ -n "$SIGNING_CERTIFICATE_SHA1" || -n "$SIGNING_KEYCHAIN_PATH" || -n "$RELEASE_COMMIT$RELEASE_TREE$RELEASE_BUILD_ROOT" ]]; then
+  if [[ -n "$SIGNING_CERTIFICATE_SHA1" || -n "$SIGNING_KEYCHAIN_PATH" || -n "$SIGNING_CODESIGN_EXECUTABLE$SIGNING_CODESIGN_SHA256" || -n "$RELEASE_COMMIT$RELEASE_TREE$RELEASE_BUILD_ROOT" ]]; then
     printf 'CI package validation cannot use a signing selector or Release provenance inputs.\n' >&2
     exit 1
   fi
@@ -60,6 +62,11 @@ else
     exit 1
   fi
   SIGNING_KEYCHAIN_PATH="$(python3 "$SOURCE_ROOT/scripts/package_local_candidate.py" validate-signing-keychain --path "$SIGNING_KEYCHAIN_PATH")"
+  if [[ -z "$SIGNING_CODESIGN_EXECUTABLE" || -z "$SIGNING_CODESIGN_SHA256" ]]; then
+    printf 'Set IMRSE_SIGNING_CODESIGN_EXECUTABLE and IMRSE_SIGNING_CODESIGN_SHA256 to the explicitly pinned codesign executable.\n' >&2
+    exit 1
+  fi
+  SIGNING_CODESIGN_EXECUTABLE="$(python3 "$SOURCE_ROOT/scripts/package_local_candidate.py" validate-codesign-executable --path "$SIGNING_CODESIGN_EXECUTABLE" --sha256 "$SIGNING_CODESIGN_SHA256")"
 fi
 if [[ -n "$RELEASE_COMMIT$RELEASE_TREE$RELEASE_BUILD_ROOT" ]]; then
   if [[ -z "$RELEASE_COMMIT" || -z "$RELEASE_TREE" || -z "$RELEASE_BUILD_ROOT" ]]; then
@@ -105,10 +112,9 @@ if [[ -n "$RELEASE_COMMIT$RELEASE_TREE$RELEASE_BUILD_ROOT" ]]; then
   CACHE_PATH="$RELEASE_BUILD_ROOT/cache"
   CONFIG_PATH="$RELEASE_BUILD_ROOT/configuration"
   SECURITY_PATH="$RELEASE_BUILD_ROOT/security"
-  HOME="$RELEASE_BUILD_ROOT/home"
-  TMPDIR="$RELEASE_BUILD_ROOT/tmp"
-  mkdir -m 700 "$HOME" "$TMPDIR"
-  export HOME TMPDIR
+  BUILD_HOME="$RELEASE_BUILD_ROOT/home"
+  BUILD_TMPDIR="$RELEASE_BUILD_ROOT/tmp"
+  mkdir -m 700 "$BUILD_HOME" "$BUILD_TMPDIR"
   DIST_DIR="$RELEASE_BUILD_ROOT/products"
   IMRSE_REQUIRE_EMPTY_APP_OUTPUT=1
 else
@@ -118,6 +124,15 @@ else
   SECURITY_PATH="${SWIFTPM_SECURITY_PATH:-$ROOT/.build/security}"
   DIST_DIR="${IMRSE_DIST_DIR:-$ROOT/dist}"
 fi
+
+run_isolated_swift_build() {
+  if [[ -n "$RELEASE_COMMIT" ]]; then
+    env "HOME=$BUILD_HOME" "TMPDIR=$BUILD_TMPDIR" "$@"
+  else
+    "$@"
+  fi
+}
+
 cd "$ROOT"
 BUILD_WORKING_DIRECTORY="$(pwd -P)"
 if [[ "${IMRSE_REQUIRE_EMPTY_APP_OUTPUT:-0}" == "1" && ( -e "$DIST_DIR" || -L "$DIST_DIR" ) ]]; then
@@ -143,10 +158,11 @@ if [[ -n "$CI_BUILD_ARCHITECTURE" ]]; then
   SWIFT_FLAGS+=(--arch "$CI_BUILD_ARCHITECTURE")
 fi
 BUILD_COMMAND=(swift build "${SWIFT_FLAGS[@]}" --product imrse)
-"${BUILD_COMMAND[@]}"
-BIN="$(swift build "${SWIFT_FLAGS[@]}" --show-bin-path)"
+run_isolated_swift_build "${BUILD_COMMAND[@]}"
+BIN="$(run_isolated_swift_build swift build "${SWIFT_FLAGS[@]}" --show-bin-path)"
 STAGING="$(mktemp -d "$DIST_DIR/.imrse-package.XXXXXX")"
 trap 'rm -rf "$STAGING"' EXIT
+SIGNING_EXECUTION_RECEIPT="$STAGING/signing-execution-receipt.json"
 STAGED_APP="$STAGING/imrse.app"
 mkdir -p "$STAGED_APP/Contents/MacOS" "$STAGED_APP/Contents/Resources"
 cp "$BIN/imrse" "$STAGED_APP/Contents/MacOS/imrse"
@@ -184,7 +200,7 @@ if ! find "$STAGED_APP/Contents/Resources" -type f -name 'Qwen3-APACHE-LICENSE.t
   printf 'The packaged local-model license resource is missing.\n' >&2
   exit 1
 fi
-swift "$ROOT/Resources/GenerateIcon.swift" "$STAGING/imrse.iconset"
+run_isolated_swift_build swift "$ROOT/Resources/GenerateIcon.swift" "$STAGING/imrse.iconset"
 iconutil --convert icns "$STAGING/imrse.iconset" --output "$STAGED_APP/Contents/Resources/imrse.icns"
 plutil -lint "$STAGED_APP/Contents/Info.plist"
 if [[ "$CI_PACKAGE_VALIDATION" == "1" ]]; then
@@ -196,7 +212,10 @@ else
   python3 "$ROOT/scripts/package_local_candidate.py" sign-app \
     --app "$STAGED_APP" \
     --signing-certificate-sha1 "$SIGNING_CERTIFICATE_SHA1" \
-    --signing-keychain-path "$SIGNING_KEYCHAIN_PATH"
+    --signing-keychain-path "$SIGNING_KEYCHAIN_PATH" \
+    --codesign-executable "$SIGNING_CODESIGN_EXECUTABLE" \
+    --codesign-sha256 "$SIGNING_CODESIGN_SHA256" \
+    --signing-execution-receipt "$SIGNING_EXECUTION_RECEIPT"
 fi
 if [[ "${IMRSE_REQUIRE_EMPTY_APP_OUTPUT:-0}" == "1" ]]; then
   if [[ -e "$APP" || -L "$APP" ]]; then
@@ -233,5 +252,8 @@ if [[ -n "$RELEASE_COMMIT" ]]; then
     --working-directory "$BUILD_WORKING_DIRECTORY" \
     --signing-certificate-sha1 "$SIGNING_CERTIFICATE_SHA1" \
     --signing-keychain-path "$SIGNING_KEYCHAIN_PATH" \
+    --codesign-executable "$SIGNING_CODESIGN_EXECUTABLE" \
+    --codesign-sha256 "$SIGNING_CODESIGN_SHA256" \
+    --signing-execution-receipt "$SIGNING_EXECUTION_RECEIPT" \
     "${BUILD_COMMAND_ARGS[@]}"
 fi
