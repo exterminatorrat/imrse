@@ -266,6 +266,7 @@ public enum ImrseError: String, Error, Codable, CaseIterable, Sendable {
     case rateLimited, timeout, network, server, malformedResponse, interruptedStream
     case emptyOutput, outputTooLarge, invalidConfiguration, missingModel, invalidPreset
     case permissionRequired, shortcutConflict, cancelled
+    case clipboardPending
 
     public var message: String {
         switch self {
@@ -277,6 +278,7 @@ public enum ImrseError: String, Error, Codable, CaseIterable, Sendable {
         case .staleSelection: "The selection changed. Nothing was replaced"
         case .replacementFailed: "Couldn't replace the selection"
         case .clipboardFailed: "Couldn't paste safely"
+        case .clipboardPending: "Paste unconfirmed. Clipboard recovery is pending; further clipboard edits are blocked. Quitting imrse can lose the saved clipboard and leave generated text on it."
         case .undoUnavailable: "The text changed. Undo isn't safe"
         case .providerUnavailable: "Choose a model in Settings"
         case .localModelUnavailable: "The local model is unavailable"

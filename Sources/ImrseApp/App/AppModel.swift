@@ -567,6 +567,10 @@ final class AppModel: ObservableObject {
             if self.terminationRequested {
                 self.finishTerminationIfSettled()
             } else {
+                if case .failed(.clipboardPending) = self.engine.state {
+                    self.pillModel.showCaptureFailure(message: ImrseError.clipboardPending.message)
+                    self.onPresentPill?(Self.screenUnderPointer())
+                }
                 self.applyPendingRuntimeSettingsIfSafe()
             }
         }

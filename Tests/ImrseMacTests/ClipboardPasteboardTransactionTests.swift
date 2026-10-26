@@ -4,6 +4,42 @@ import XCTest
 
 @MainActor
 final class ClipboardPasteboardTransactionTests: XCTestCase {
+    private final class RejectingItem: NSPasteboardItem {
+        override func setData(_ data: Data, forType type: NSPasteboard.PasteboardType) -> Bool { false }
+    }
+
+    func testStagingConstructionFailureDoesNotClearOriginalClipboard() throws {
+        let pasteboard = makePasteboard()
+        defer { pasteboard.releaseGlobally() }
+        XCTAssertTrue(pasteboard.setString("original", forType: .string))
+        let count = pasteboard.changeCount
+        var transaction = try ClipboardPasteboardTransaction.capture(from: pasteboard, makeItem: { RejectingItem() })
+        XCTAssertThrowsError(try transaction.stage("generated", on: pasteboard))
+        XCTAssertFalse(transaction.hasMutatedPasteboard)
+        XCTAssertEqual(pasteboard.changeCount, count)
+        XCTAssertEqual(pasteboard.string(forType: .string), "original")
+    }
+
+    func testRestoreConstructionFailurePreservesOwnedBoardAndRecoverableBackup() throws {
+        let pasteboard = makePasteboard()
+        defer { pasteboard.releaseGlobally() }
+        XCTAssertTrue(pasteboard.setString("original", forType: .string))
+        var rejectConstruction = false
+        var transaction = try ClipboardPasteboardTransaction.capture(from: pasteboard, makeItem: {
+            rejectConstruction ? RejectingItem() : NSPasteboardItem()
+        })
+        try transaction.stage("generated", on: pasteboard)
+        let stagedCount = pasteboard.changeCount
+        rejectConstruction = true
+        XCTAssertThrowsError(try transaction.restoreIfOwned(on: pasteboard))
+        XCTAssertTrue(transaction.stillOwns(pasteboard))
+        XCTAssertEqual(pasteboard.changeCount, stagedCount)
+        XCTAssertEqual(pasteboard.string(forType: .string), "generated")
+        rejectConstruction = false
+        XCTAssertTrue(try transaction.restoreIfOwned(on: pasteboard))
+        XCTAssertEqual(pasteboard.string(forType: .string), "original")
+    }
+
     func testRestoresOriginalClipboardWhileUniqueMarkerIsOwned() throws {
         let pasteboard = makePasteboard()
         defer { pasteboard.releaseGlobally() }
