@@ -1,8 +1,8 @@
 #if os(macOS)
 import CoreGraphics
 
-enum NSScreenCoordinateConversion {
-    static func cocoaRect(from quartzRect: CGRect, displayBounds: CGRect, screenFrame: CGRect) -> CGRect? {
+package enum NSScreenCoordinateConversion {
+    package static func cocoaRect(from quartzRect: CGRect, displayBounds: CGRect, screenFrame: CGRect) -> CGRect? {
         guard quartzRect.origin.x.isFinite,
               quartzRect.origin.y.isFinite,
               quartzRect.width.isFinite,

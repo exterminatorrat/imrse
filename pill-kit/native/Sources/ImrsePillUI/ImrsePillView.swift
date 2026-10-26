@@ -15,6 +15,10 @@ public struct ImrsePillView: View {
         self.hostHandlesEscape = hostHandlesEscape
     }
     private var isDark: Bool { colorScheme == .dark }
+    private var isProposal: Bool {
+        if case .proposal = model.phase { return true }
+        return false
+    }
     private var foreground: Color { isDark ? Color(white: 0.96) : Color(white: 0.09) }
     private var secondary: Color { isDark ? Color(white: 0.64) : Color(white: 0.45) }
 
@@ -23,11 +27,23 @@ public struct ImrsePillView: View {
             if model.phase.isVisible {
                 HStack(spacing: 12) { contents }
                     .padding(.horizontal, PillTokens.horizontalPadding)
-                    .frame(width: min(width, PillTokens.width(for: model.phase)), height: PillTokens.height)
+                    .frame(width: min(width, PillTokens.width(for: model.phase)), height: PillTokens.height(for: model.phase))
                     .font(.system(size: PillTokens.fontSize, weight: .regular))
                     .foregroundStyle(foreground)
-                    .background(isDark ? Color(white: 0.094) : .white, in: Capsule())
-                    .overlay(Capsule().strokeBorder(isDark ? Color.white.opacity(0.08) : Color.black.opacity(0.045), lineWidth: 1))
+                    .background {
+                        if isProposal {
+                            RoundedRectangle(cornerRadius: PillTokens.radius).fill(isDark ? Color(white: 0.094) : .white)
+                        } else {
+                            Capsule().fill(isDark ? Color(white: 0.094) : .white)
+                        }
+                    }
+                    .overlay {
+                        if isProposal {
+                            RoundedRectangle(cornerRadius: PillTokens.radius).strokeBorder(isDark ? Color.white.opacity(0.08) : Color.black.opacity(0.045), lineWidth: 1)
+                        } else {
+                            Capsule().strokeBorder(isDark ? Color.white.opacity(0.08) : Color.black.opacity(0.045), lineWidth: 1)
+                        }
+                    }
                     .shadow(color: .black.opacity(isDark ? 0.22 : 0.12), radius: 11, x: 0, y: 6)
                     .onExitCommand {
                         if !hostHandlesEscape { model.dismiss() }
@@ -64,6 +80,8 @@ public struct ImrsePillView: View {
             Button(action: model.submit) { Text("↵").font(.system(size: 19)).offset(y: 1) }
                 .buttonStyle(.plain).help("Blank uses default.md")
                 .accessibilityLabel("Apply transformation")
+        case .proposal(let requestID):
+            proposalPreview(for: requestID)
         case .processing:
             HStack(spacing: PillTokens.loaderGap) {
                 SpiralLoaderView().frame(width: PillTokens.loaderSize, height: PillTokens.loaderSize)
@@ -81,9 +99,50 @@ public struct ImrsePillView: View {
             if model.canUndo { action("Undo", accessibility: "Undo last transformation", model.undo) }
             else { action("Close", accessibility: "Dismiss confirmation", model.dismiss) }
         case .failure(_, let message):
-            Text(message).lineLimit(1).truncationMode(.tail).help(message)
+            Text(model.failureKind == .cancelled ? "Request cancelled" : message)
+                .lineLimit(1).truncationMode(.tail).help(message)
             Spacer(minLength: 0)
-            action("esc", accessibility: "Dismiss error", model.dismiss)
+            action("esc", accessibility: model.failureKind == .cancelled ? "Dismiss cancellation" : "Dismiss error", model.dismiss)
+        }
+    }
+
+    @ViewBuilder
+    private func proposalPreview(for requestID: UUID) -> some View {
+        if let proposal = model.proposal, proposal.requestID == requestID {
+            VStack(spacing: 0) {
+                ScrollView(.vertical) {
+                    Text(model.previewText)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .textSelection(.enabled)
+                        .padding(12)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                Divider()
+                HStack(spacing: 8) {
+                    Spacer(minLength: 0)
+                    Button("Discard") { model.discardProposal() }
+                        .buttonStyle(.plain)
+                        .font(.system(size: PillTokens.actionFontSize))
+                        .foregroundStyle(secondary)
+                        .frame(minWidth: 28, minHeight: 28)
+                        .help("Discard this proposal without replacing the selected text.")
+                        .accessibilityHint("Discards the proposal without changing the selection.")
+                    Button("Replace") { model.replaceProposal() }
+                        .buttonStyle(.plain)
+                        .font(.system(size: PillTokens.fontSize, weight: .semibold))
+                        .foregroundStyle(isDark ? Color(white: 0.094) : .white)
+                        .padding(.horizontal, 9)
+                        .frame(minHeight: 28)
+                        .background(foreground, in: Capsule())
+                        .help("Replace the selected text with this proposal.")
+                        .accessibilityHint("Applies the proposed replacement to the original selection.")
+                }
+                .frame(height: PillTokens.height)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        } else {
+            Text("Preparing preview…")
+                .accessibilityLabel("Preparing preview")
         }
     }
 

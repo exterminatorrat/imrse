@@ -4,6 +4,7 @@ public enum TransformationState: Equatable, Sendable {
     case idle
     case ready
     case generating
+    case proposal(TransformationProposal)
     case replacing
     case undoing
     case succeeded(unchanged: Bool)
@@ -21,7 +22,7 @@ public final class TransformationEngine {
     public private(set) var responseMetadata: ResponseMetadata?
     public var onChange: (@MainActor (TransformationState) -> Void)?
     public var canUndo: Bool {
-        undoReceipt != nil && state != .generating && state != .replacing && state != .undoing
+        undoReceipt != nil && !isProposalPending && state != .generating && state != .replacing && state != .undoing
     }
 
     private let selectionAccess: any SelectionAccess
@@ -31,6 +32,11 @@ public final class TransformationEngine {
     private var generationTask: Task<Void, Never>?
     private var undoReceipt: ReplacementReceipt?
     private var pendingResponseMetadata: ResponseMetadata?
+
+    private var isProposalPending: Bool {
+        if case .proposal = state { return true }
+        return false
+    }
 
     public init(selectionAccess: any SelectionAccess, textProvider: any TextProvider) {
         self.selectionAccess = selectionAccess
@@ -42,6 +48,7 @@ public final class TransformationEngine {
             cancel()
             return
         }
+        if isProposalPending { dismiss() }
         guard state == .idle else { return }
         responseMetadata = nil
         pendingResponseMetadata = nil
@@ -79,6 +86,38 @@ public final class TransformationEngine {
         provider: ProviderConfiguration,
         localOnly: Bool = false,
         fallbackProvider: ProviderConfiguration? = nil
+    ) {
+        startGeneration(
+            instruction: instruction,
+            provider: provider,
+            localOnly: localOnly,
+            fallbackProvider: fallbackProvider,
+            proposalRequestID: nil
+        )
+    }
+
+    public func submitProposal(
+        requestID: UUID,
+        instruction: String,
+        provider: ProviderConfiguration,
+        localOnly: Bool = false,
+        fallbackProvider: ProviderConfiguration? = nil
+    ) {
+        startGeneration(
+            instruction: instruction,
+            provider: provider,
+            localOnly: localOnly,
+            fallbackProvider: fallbackProvider,
+            proposalRequestID: requestID
+        )
+    }
+
+    private func startGeneration(
+        instruction: String,
+        provider: ProviderConfiguration,
+        localOnly: Bool,
+        fallbackProvider: ProviderConfiguration?,
+        proposalRequestID: UUID?
     ) {
         guard state == .ready, let target else { return }
         responseMetadata = nil
@@ -126,9 +165,47 @@ public final class TransformationEngine {
         diagnostics.replacement = "idle"
         generationTask = Task { [weak self] in
             guard let self else { return }
-            await self.generate(request, target: target, operationID: operationID)
+            await self.generate(request, target: target, operationID: operationID, proposalRequestID: proposalRequestID)
         }
         transition(to: .generating)
+    }
+
+    public func commitProposal(_ id: UUID) {
+        guard case .proposal(let proposal) = state, proposal.id == id else { return }
+        guard let target, target.id == proposal.targetID else {
+            fail(.targetLost)
+            return
+        }
+
+        let operationID = UUID()
+        activeOperationID = operationID
+        generationTask = nil
+        diagnostics.error = nil
+        diagnostics.replacement = "running"
+        transition(to: .replacing)
+        generationTask = Task { [weak self] in
+            guard let self, self.activeOperationID == operationID, self.state == .replacing else { return }
+            do {
+                try self.selectionAccess.validate(target)
+                guard self.activeOperationID == operationID, self.state == .replacing else { return }
+                self.diagnostics.targetValid = true
+            } catch {
+                guard self.activeOperationID == operationID, self.state == .replacing else { return }
+                self.diagnostics.targetValid = false
+                self.finish(operationID, failure: Self.validationFailure(error))
+                return
+            }
+            if proposal.text == target.text {
+                self.finish(operationID, unchanged: true)
+                return
+            }
+            await self.replace(proposal.text, target: target, operationID: operationID)
+        }
+    }
+
+    public func discardProposal(_ id: UUID) {
+        guard case .proposal(let proposal) = state, proposal.id == id else { return }
+        cancel()
     }
 
     public func rejectSubmission(_ error: ImrseError) {
@@ -137,7 +214,7 @@ public final class TransformationEngine {
     }
 
     public func cancel() {
-        guard state == .ready || state == .generating else { return }
+        guard state == .ready || state == .generating || isProposalPending else { return }
         invalidateGeneration(cancelTask: true)
         responseMetadata = nil
         pendingResponseMetadata = nil
@@ -159,7 +236,7 @@ public final class TransformationEngine {
     }
 
     public func undo() async {
-        guard state != .generating, state != .replacing, state != .undoing else { return }
+        guard !isProposalPending, state != .generating, state != .replacing, state != .undoing else { return }
         guard let receipt = undoReceipt else {
             fail(.undoUnavailable)
             return
@@ -191,7 +268,8 @@ public final class TransformationEngine {
     private func generate(
         _ request: TransformationRequest,
         target: SelectionSnapshot,
-        operationID: UUID
+        operationID: UUID,
+        proposalRequestID: UUID?
     ) async {
         do {
             guard isGenerating(operationID) else { return }
@@ -216,6 +294,21 @@ public final class TransformationEngine {
             try Self.validateOutput(output, utf8Length: outputLength)
             responseMetadata = pendingResponseMetadata
             pendingResponseMetadata = nil
+            if let proposalRequestID {
+                let proposal = TransformationProposal(
+                    id: UUID(),
+                    requestID: proposalRequestID,
+                    targetID: target.id,
+                    text: output
+                )
+                activeOperationID = nil
+                generationTask = nil
+                diagnostics.error = nil
+                diagnostics.generation = "complete"
+                diagnostics.replacement = "idle"
+                transition(to: .proposal(proposal))
+                return
+            }
             if output == target.text {
                 finish(operationID, unchanged: true)
                 return
@@ -230,38 +323,42 @@ public final class TransformationEngine {
                 return
             }
             guard isGenerating(operationID) else { return }
-
-            diagnostics.replacement = "running"
-            transition(to: .replacing)
-            do {
-                let receipt = try await selectionAccess.replace(target, with: output)
-                guard activeOperationID == operationID, state == .replacing else { return }
-                guard receipt.target.id == target.id, receipt.replacement == output else {
-                    diagnostics.replacement = "failed"
-                    finish(operationID, failure: .replacementFailed, replacementFailed: true)
-                    return
-                }
-                if let previousReceipt = undoReceipt {
-                    selectionAccess.discard(previousReceipt.target)
-                }
-                undoReceipt = receipt
-                self.target = nil
-                activeOperationID = nil
-                generationTask = nil
-                diagnostics.error = nil
-                diagnostics.strategy = receipt.strategy
-                diagnostics.generation = "complete"
-                diagnostics.replacement = "replaced"
-                transition(to: .succeeded(unchanged: false))
-            } catch {
-                guard activeOperationID == operationID, state == .replacing else { return }
-                let failure = Self.replacementFailure(error)
-                if failure == .targetLost || failure == .staleSelection { diagnostics.targetValid = false }
-                finish(operationID, failure: failure, replacementFailed: true)
-            }
+            await replace(output, target: target, operationID: operationID)
         } catch {
             guard activeOperationID == operationID else { return }
             finish(operationID, failure: Self.providerFailure(error))
+        }
+    }
+
+    private func replace(_ output: String, target: SelectionSnapshot, operationID: UUID) async {
+        guard activeOperationID == operationID else { return }
+        diagnostics.replacement = "running"
+        transition(to: .replacing)
+        do {
+            let receipt = try await selectionAccess.replace(target, with: output)
+            guard activeOperationID == operationID, state == .replacing else { return }
+            guard receipt.target.id == target.id, receipt.replacement == output else {
+                diagnostics.replacement = "failed"
+                finish(operationID, failure: .replacementFailed, replacementFailed: true)
+                return
+            }
+            if let previousReceipt = undoReceipt {
+                selectionAccess.discard(previousReceipt.target)
+            }
+            undoReceipt = receipt
+            self.target = nil
+            activeOperationID = nil
+            generationTask = nil
+            diagnostics.error = nil
+            diagnostics.strategy = receipt.strategy
+            diagnostics.generation = "complete"
+            diagnostics.replacement = "replaced"
+            transition(to: .succeeded(unchanged: false))
+        } catch {
+            guard activeOperationID == operationID, state == .replacing else { return }
+            let failure = Self.replacementFailure(error)
+            if failure == .targetLost || failure == .staleSelection { diagnostics.targetValid = false }
+            finish(operationID, failure: failure, replacementFailed: true)
         }
     }
 

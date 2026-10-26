@@ -1,6 +1,35 @@
 import XCTest
 @testable import ImrsePillCore
 final class PillLifecycleTests: XCTestCase {
+ func testProposalRequiresExplicitReplaceBeforeSuccess() {
+  var lifecycle = PillLifecycle()
+  let id = UUID()
+  lifecycle.send(.invoke)
+  lifecycle.send(.submit(id))
+  lifecycle.send(.proposed(id))
+  XCTAssertEqual(lifecycle.phase, .proposal(id))
+  lifecycle.send(.applied(id))
+  XCTAssertEqual(lifecycle.phase, .proposal(id))
+  lifecycle.send(.replace(id))
+  XCTAssertEqual(lifecycle.phase, .applying(id))
+  lifecycle.send(.applied(id))
+  XCTAssertEqual(lifecycle.phase, .success(id))
+ }
+ func testStaleProposalAndReplaceEventsCannotChangeCurrentRequest() {
+  var lifecycle = PillLifecycle()
+  let id = UUID()
+  lifecycle.send(.invoke)
+  lifecycle.send(.submit(id))
+  lifecycle.send(.proposed(UUID()))
+  XCTAssertEqual(lifecycle.phase, .processing(id))
+  lifecycle.send(.proposed(id))
+  lifecycle.send(.replace(UUID()))
+  XCTAssertEqual(lifecycle.phase, .proposal(id))
+  lifecycle.send(.dismiss)
+  lifecycle.send(.proposed(id))
+  lifecycle.send(.replace(id))
+  XCTAssertEqual(lifecycle.phase, .hidden)
+ }
  func testHiddenOnConstruction() { XCTAssertEqual(PillLifecycle().phase,.hidden) }
  func testInvokeOpens() { var s=PillLifecycle();s.send(.invoke);XCTAssertEqual(s.phase,.input) }
  func testHiddenCannotSubmit() { var s=PillLifecycle();s.send(.submit(UUID()));XCTAssertEqual(s.phase,.hidden) }

@@ -20,6 +20,256 @@ final class TransformationEngineTests: XCTestCase {
         XCTAssertEqual(access.replacedText, ["rewritten"])
     }
 
+    func testProposalGenerationWaitsForExplicitCommitAndDisablesUndo() async {
+        let access = StubSelectionAccess(target: snapshot(text: "original"))
+        let engine = TransformationEngine(
+            selectionAccess: access,
+            textProvider: ScriptedTextProvider(fragments: ["rewritten"])
+        )
+        let requestID = UUID()
+
+        engine.invoke()
+        engine.submitProposal(requestID: requestID, instruction: "Rewrite", provider: providerConfiguration)
+
+        guard let proposal = await waitForProposal(engine) else { return }
+        XCTAssertEqual(proposal.requestID, requestID)
+        XCTAssertEqual(proposal.targetID, access.target.id)
+        XCTAssertEqual(proposal.text, "rewritten")
+        XCTAssertTrue(access.replacedText.isEmpty)
+        XCTAssertFalse(engine.canUndo)
+
+        engine.commitProposal(proposal.id)
+        await waitForState(engine, .succeeded(unchanged: false))
+
+        XCTAssertEqual(access.replacedText, ["rewritten"])
+        XCTAssertTrue(engine.canUndo)
+    }
+
+    func testUnchangedProposalCommitFinishesWithoutExternalMutation() async {
+        let access = StubSelectionAccess(target: snapshot(text: "same"))
+        let engine = TransformationEngine(
+            selectionAccess: access,
+            textProvider: ScriptedTextProvider(fragments: ["same"])
+        )
+        engine.invoke()
+        engine.submitProposal(requestID: UUID(), instruction: "", provider: providerConfiguration)
+        guard let proposal = await waitForProposal(engine) else { return }
+
+        engine.commitProposal(proposal.id)
+        await waitForState(engine, .succeeded(unchanged: true))
+
+        XCTAssertEqual(engine.state, .succeeded(unchanged: true))
+        XCTAssertTrue(access.replacedText.isEmpty)
+    }
+
+    func testUnchangedProposalCommitRevalidatesBeforeFinishing() async {
+        let access = StubSelectionAccess(target: snapshot(text: "same"))
+        let engine = TransformationEngine(
+            selectionAccess: access,
+            textProvider: ScriptedTextProvider(fragments: ["same"])
+        )
+        engine.invoke()
+        engine.submitProposal(requestID: UUID(), instruction: "", provider: providerConfiguration)
+        guard let proposal = await waitForProposal(engine) else { return }
+        access.validationError = .staleSelection
+
+        engine.commitProposal(proposal.id)
+        await waitForState(engine, .failed(.staleSelection))
+
+        XCTAssertTrue(access.replacedText.isEmpty)
+        XCTAssertEqual(engine.diagnostics.targetValid, false)
+    }
+
+    func testDiscardAndCancellationOfProposalNeverReplace() async {
+        let discardedAccess = StubSelectionAccess(target: snapshot(text: "discarded source"))
+        let discardedEngine = TransformationEngine(
+            selectionAccess: discardedAccess,
+            textProvider: ScriptedTextProvider(fragments: ["discarded output"])
+        )
+        discardedEngine.invoke()
+        discardedEngine.submitProposal(requestID: UUID(), instruction: "", provider: providerConfiguration)
+        guard let discardedProposal = await waitForProposal(discardedEngine) else { return }
+        discardedEngine.discardProposal(discardedProposal.id)
+        discardedEngine.commitProposal(discardedProposal.id)
+
+        XCTAssertEqual(discardedEngine.state, .failed(.cancelled))
+        XCTAssertTrue(discardedAccess.replacedText.isEmpty)
+
+        let cancelledAccess = StubSelectionAccess(target: snapshot(text: "cancelled source"))
+        let cancelledEngine = TransformationEngine(
+            selectionAccess: cancelledAccess,
+            textProvider: ScriptedTextProvider(fragments: ["cancelled output"])
+        )
+        cancelledEngine.invoke()
+        cancelledEngine.submitProposal(requestID: UUID(), instruction: "", provider: providerConfiguration)
+        guard let cancelledProposal = await waitForProposal(cancelledEngine) else { return }
+        cancelledEngine.cancel()
+        cancelledEngine.commitProposal(cancelledProposal.id)
+
+        XCTAssertEqual(cancelledEngine.state, .failed(.cancelled))
+        XCTAssertTrue(cancelledAccess.replacedText.isEmpty)
+    }
+
+    func testDismissedProposalCannotBeCommitted() async {
+        let access = StubSelectionAccess(target: snapshot(text: "original"))
+        let engine = TransformationEngine(
+            selectionAccess: access,
+            textProvider: ScriptedTextProvider(fragments: ["rewritten"])
+        )
+        engine.invoke()
+        engine.submitProposal(requestID: UUID(), instruction: "", provider: providerConfiguration)
+        guard let proposal = await waitForProposal(engine) else { return }
+
+        engine.dismiss()
+        engine.commitProposal(proposal.id)
+
+        XCTAssertEqual(engine.state, .idle)
+        XCTAssertTrue(access.replacedText.isEmpty)
+    }
+
+    func testLateProposalGenerationCompletionAfterCancelIsIgnored() async {
+        let access = StubSelectionAccess(target: snapshot(text: "original"))
+        let provider = DeferredTextProvider()
+        let engine = TransformationEngine(selectionAccess: access, textProvider: provider)
+        engine.invoke()
+        engine.submitProposal(requestID: UUID(), instruction: "", provider: providerConfiguration)
+        await provider.waitUntilRequested()
+
+        engine.cancel()
+        await provider.resolve(fragments: ["late result"])
+        await Task.yield()
+
+        XCTAssertEqual(engine.state, .failed(.cancelled))
+        XCTAssertTrue(access.replacedText.isEmpty)
+    }
+
+    func testNewInvocationRejectsStaleAndDuplicateProposalIDs() async {
+        let access = StubSelectionAccess(target: snapshot(text: "first source"))
+        let engine = TransformationEngine(
+            selectionAccess: access,
+            textProvider: ScriptedTextProvider(fragments: ["rewritten"])
+        )
+        engine.invoke()
+        engine.submitProposal(requestID: UUID(), instruction: "", provider: providerConfiguration)
+        guard let firstProposal = await waitForProposal(engine) else { return }
+
+        access.target = snapshot(text: "second source")
+        engine.invoke()
+        engine.submitProposal(requestID: UUID(), instruction: "", provider: providerConfiguration)
+        guard let secondProposal = await waitForProposal(engine) else { return }
+        XCTAssertNotEqual(firstProposal.id, secondProposal.id)
+        XCTAssertEqual(access.captureCount, 2)
+
+        engine.commitProposal(firstProposal.id)
+        XCTAssertEqual(engine.state, .proposal(secondProposal))
+        XCTAssertTrue(access.replacedText.isEmpty)
+
+        engine.commitProposal(secondProposal.id)
+        engine.commitProposal(secondProposal.id)
+        await waitForState(engine, .succeeded(unchanged: false))
+
+        XCTAssertEqual(access.replacedText, ["rewritten"])
+    }
+
+    func testProposalCommitRevalidatesTargetBeforeReplacing() async {
+        let access = StubSelectionAccess(target: snapshot(text: "original"))
+        let engine = TransformationEngine(
+            selectionAccess: access,
+            textProvider: ScriptedTextProvider(fragments: ["rewritten"])
+        )
+        engine.invoke()
+        engine.submitProposal(requestID: UUID(), instruction: "", provider: providerConfiguration)
+        guard let proposal = await waitForProposal(engine) else { return }
+        access.validationError = .staleSelection
+
+        engine.commitProposal(proposal.id)
+
+        XCTAssertEqual(engine.state, .failed(.staleSelection))
+        XCTAssertEqual(engine.diagnostics.targetValid, false)
+        XCTAssertTrue(access.replacedText.isEmpty)
+    }
+
+    func testPendingClipboardReplacementFailureConsumesPreviousReceipt() async {
+        let firstTarget = snapshot(text: "first source")
+        let access = StubSelectionAccess(target: firstTarget)
+        let engine = TransformationEngine(
+            selectionAccess: access,
+            textProvider: ScriptedTextProvider(fragments: ["rewritten"])
+        )
+        engine.invoke()
+        engine.submit(instruction: "", provider: providerConfiguration)
+        await waitForState(engine, .succeeded(unchanged: false))
+        XCTAssertTrue(engine.canUndo)
+
+        engine.dismiss()
+        let secondTarget = snapshot(text: "second source")
+        access.target = secondTarget
+        access.replacementError = .clipboardPending
+        engine.invoke()
+        engine.submitProposal(requestID: UUID(), instruction: "", provider: providerConfiguration)
+        guard let proposal = await waitForProposal(engine) else { return }
+
+        XCTAssertEqual(access.replacedText.count, 1)
+        engine.commitProposal(proposal.id)
+        await waitForState(engine, .failed(.clipboardPending))
+
+        XCTAssertFalse(engine.canUndo)
+        XCTAssertTrue(access.discarded.contains(firstTarget.id))
+        XCTAssertTrue(access.discarded.contains(secondTarget.id))
+        XCTAssertEqual(access.undoCount, 0)
+    }
+
+    func testReceiptMismatchDoesNotCreateUndoReceipt() async {
+        let access = StubSelectionAccess(target: snapshot(text: "original"))
+        access.replacementReceipt = ReplacementReceipt(
+            target: snapshot(text: "wrong target"),
+            replacement: "rewritten",
+            strategy: .selectedText
+        )
+        let engine = TransformationEngine(
+            selectionAccess: access,
+            textProvider: ScriptedTextProvider(fragments: ["rewritten"])
+        )
+        engine.invoke()
+        engine.submitProposal(requestID: UUID(), instruction: "", provider: providerConfiguration)
+        guard let proposal = await waitForProposal(engine) else { return }
+
+        engine.commitProposal(proposal.id)
+        await waitForState(engine, .failed(.replacementFailed))
+
+        XCTAssertFalse(engine.canUndo)
+        await engine.undo()
+        XCTAssertEqual(engine.state, .failed(.undoUnavailable))
+        XCTAssertEqual(access.undoCount, 0)
+    }
+
+    func testUndoIsUnavailableOnlyWhileProposalIsPending() async {
+        let access = StubSelectionAccess(target: snapshot(text: "first source"))
+        let engine = TransformationEngine(
+            selectionAccess: access,
+            textProvider: ScriptedTextProvider(fragments: ["rewritten"])
+        )
+        engine.invoke()
+        engine.submit(instruction: "", provider: providerConfiguration)
+        await waitForState(engine, .succeeded(unchanged: false))
+
+        engine.dismiss()
+        access.target = snapshot(text: "second source")
+        engine.invoke()
+        engine.submitProposal(requestID: UUID(), instruction: "", provider: providerConfiguration)
+        guard let proposal = await waitForProposal(engine) else { return }
+
+        XCTAssertFalse(engine.canUndo)
+        await engine.undo()
+        XCTAssertEqual(engine.state, .proposal(proposal))
+        XCTAssertEqual(access.undoCount, 0)
+
+        engine.discardProposal(proposal.id)
+        XCTAssertTrue(engine.canUndo)
+        await engine.undo()
+        XCTAssertEqual(access.undoCount, 1)
+    }
+
     func testClipboardPendingReplacementFailureConsumesPreviousReceiptAcrossDismissAndInvoke() async {
         let firstTarget = snapshot(text: "first source")
         let access = StubSelectionAccess(target: firstTarget)
@@ -770,6 +1020,19 @@ final class TransformationEngineTests: XCTestCase {
         }
         XCTFail("Expected state \(state), got \(engine.state)", file: file, line: line)
     }
+
+    private func waitForProposal(
+        _ engine: TransformationEngine,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) async -> TransformationProposal? {
+        for _ in 0..<10_000 {
+            if case .proposal(let proposal) = engine.state { return proposal }
+            await Task.yield()
+        }
+        XCTFail("Expected proposal, got \(engine.state)", file: file, line: line)
+        return nil
+    }
 }
 
 private enum ScriptFailure: Sendable {
@@ -901,6 +1164,7 @@ private final class StubSelectionAccess: SelectionAccess {
     var replacementError: ImrseError?
     var undoError: ImrseError?
     var holdReplacement = false
+    var replacementReceipt: ReplacementReceipt?
     private var replacementContinuation: CheckedContinuation<ReplacementReceipt, any Error>?
     private(set) var captureCount = 0
     private(set) var replacedText: [String] = []
@@ -926,7 +1190,7 @@ private final class StubSelectionAccess: SelectionAccess {
     func replace(_ target: SelectionSnapshot, with text: String) async throws -> ReplacementReceipt {
         replacedText.append(text)
         if let replacementError { throw replacementError }
-        let receipt = ReplacementReceipt(target: target, replacement: text, strategy: .selectedText)
+        let receipt = replacementReceipt ?? ReplacementReceipt(target: target, replacement: text, strategy: .selectedText)
         guard holdReplacement else { return receipt }
         return try await withCheckedThrowingContinuation { replacementContinuation = $0 }
     }

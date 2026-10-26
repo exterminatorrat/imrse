@@ -23,7 +23,7 @@ final class PillPanelController {
             }
     }
 
-    func present(afterCapturingTargetOn screen: NSScreen?) {
+    func present(afterCapturingTargetOn screen: NSScreen?, selectionBounds: CGRect? = nil) {
         guard model.pillModel.phase.isVisible else { return }
         let pointerScreen = NSScreen.screens.first { NSMouseInRect(NSEvent.mouseLocation, $0.frame, false) }
         guard let screen = screen ?? pointerScreen ?? NSScreen.main else { return }
@@ -31,7 +31,7 @@ final class PillPanelController {
         let visible = screen.visibleFrame
         capturedVisibleFrame = visible
         let panel = makePanelIfNeeded()
-        panel.setFrame(Self.frame(width: PillTokens.width(for: model.pillModel.phase), visibleFrame: visible), display: false)
+        panel.setFrame(Self.frame(width: PillTokens.width(for: model.pillModel.phase), height: PillTokens.height(for: model.pillModel.phase), visibleFrame: visible), display: false)
         panel.makeKeyAndOrderFront(nil)
         panel.makeFirstResponder(panel.contentView)
         installKeyMonitor()
@@ -41,10 +41,10 @@ final class PillPanelController {
         hide()
     }
 
-    static func frame(width: CGFloat, visibleFrame: CGRect) -> CGRect {
+    static func frame(width: CGFloat, height: CGFloat = PillTokens.height, visibleFrame: CGRect) -> CGRect {
         let padding = PillTokens.shadowPadding
         let cappedWidth = min(width, max(180, visibleFrame.width - 2 * PillTokens.edgeInset))
-        let size = NSSize(width: cappedWidth + 2 * padding, height: PillTokens.height + 2 * padding)
+        let size = NSSize(width: cappedWidth + 2 * padding, height: height + 2 * padding)
         return NSRect(
             x: visibleFrame.midX - size.width / 2,
             y: visibleFrame.minY + PillTokens.bottomInset - padding,
@@ -55,7 +55,7 @@ final class PillPanelController {
 
     private func resizePanel(for width: CGFloat) {
         guard let panel, let capturedVisibleFrame else { return }
-        panel.setFrame(Self.frame(width: width, visibleFrame: capturedVisibleFrame), display: false)
+        panel.setFrame(Self.frame(width: width, height: PillTokens.height(for: model.pillModel.phase), visibleFrame: capturedVisibleFrame), display: false)
     }
 
     private func makePanelIfNeeded() -> ImrsePanel {
