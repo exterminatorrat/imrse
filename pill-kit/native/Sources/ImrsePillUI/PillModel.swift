@@ -125,6 +125,16 @@ public final class PillModel: ObservableObject {
     /// Generation is complete; the original target must still be revalidated by the host.
     public func generated(_ id: UUID) { lifecycle.send(.generated(id)) }
 
+    public func stopGeneration() {
+        guard case .processing(let id) = phase else { return }
+        stopGeneration(id)
+    }
+
+    public func stopGeneration(_ requestID: UUID) {
+        guard phase == .processing(requestID) else { return }
+        onCancel(requestID)
+    }
+
     public func showProposal(_ proposal: PillProposal) {
         guard phase == .processing(proposal.requestID) else { return }
         self.proposal = proposal

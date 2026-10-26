@@ -7,6 +7,43 @@ import XCTest
 
 @MainActor
 final class PillLifecyclePublisherTests: XCTestCase {
+    func testStopIsTypedSingleUseAndCannotStopAProposalOrApplyingRequest() throws {
+        var requests: [UUID] = []
+        var stopped: [UUID] = []
+        let model = PillModel(onSubmit: { requests.append($0.id) })
+        model.onCancel = { [weak model] id in
+            stopped.append(id)
+            model?.failed(id, message: "cancelled fixture", kind: .cancelled)
+        }
+        model.present()
+        model.submit()
+        let oldRequest = try XCTUnwrap(requests.last)
+        model.stopGeneration()
+        XCTAssertEqual(stopped, [oldRequest])
+        XCTAssertEqual(model.phase, .failure(oldRequest, "cancelled fixture"))
+        XCTAssertEqual(model.failureKind, .cancelled)
+        model.stopGeneration()
+        model.stopGeneration(oldRequest)
+        XCTAssertEqual(stopped, [oldRequest])
+        model.dismiss()
+        model.present()
+        model.submit()
+        let current = try XCTUnwrap(requests.last)
+        model.stopGeneration(oldRequest)
+        XCTAssertEqual(model.phase, .processing(current))
+        XCTAssertNil(model.failureKind)
+        let proposal = PillProposal(id: UUID(), requestID: current, targetID: UUID(), text: "proposal")
+        model.showProposal(proposal)
+        model.stopGeneration()
+        XCTAssertEqual(model.phase, .proposal(current))
+        model.onReplace = { _ in }
+        model.replaceProposal()
+        model.stopGeneration()
+        model.stopGeneration(current)
+        XCTAssertEqual(model.phase, .applying(current))
+        XCTAssertEqual(stopped, [oldRequest])
+    }
+
     func testProposalPreviewAndReplaceIdentityAreSingleUse() throws {
         var requestID: UUID?
         var replaced: [UUID] = []

@@ -12,6 +12,40 @@ import XCTest
 
 @MainActor
 final class AppPillBridgeTests: XCTestCase {
+    func testStopKeepsTypedCancellationVisibleAndRejectsLateOrStaleRequests() async throws {
+        let selection = RecordingSelectionAccess()
+        let provider = RecordingTextProvider(output: "proposal")
+        provider.holdNextResponse()
+        let (bridge, pill) = makeBridge(selection: selection, provider: provider)
+        bridge.invoke()
+        pill.submit()
+        await waitUntil { provider.requests.count == 1 }
+        guard case .processing(let oldRequest) = pill.phase else {
+            return XCTFail("Expected generation to remain processing")
+        }
+        pill.stopGeneration()
+        XCTAssertEqual(bridge.engine.state, .failed(.cancelled))
+        XCTAssertEqual(pill.phase, .failure(oldRequest, ImrseError.cancelled.message))
+        XCTAssertEqual(pill.failureKind, .cancelled)
+        XCTAssertTrue(pill.phase.isVisible)
+        XCTAssertEqual(selection.replaceCount, 0)
+        pill.stopGeneration()
+        pill.stopGeneration(oldRequest)
+        provider.finishResponse(at: 0, with: "late stopped output")
+        await Task.yield()
+        XCTAssertNil(pill.proposal)
+        XCTAssertEqual(pill.failureKind, .cancelled)
+        bridge.invoke()
+        pill.submit()
+        pill.stopGeneration(oldRequest)
+        await waitUntil { pill.proposal != nil }
+        XCTAssertNil(pill.failureKind)
+        XCTAssertEqual(pill.previewText, "proposal")
+        XCTAssertEqual(selection.captureCount, 2)
+        XCTAssertEqual(selection.replaceCount, 0)
+        XCTAssertFalse(pill.canUndo)
+    }
+
     func testProposalPreviewRequiresAnExplicitSingleUseReplace() async throws {
         let selection = RecordingSelectionAccess()
         let provider = RecordingTextProvider(output: "proposed text")

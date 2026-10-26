@@ -82,14 +82,15 @@ public struct ImrsePillView: View {
                 .accessibilityLabel("Apply transformation")
         case .proposal(let requestID):
             proposalPreview(for: requestID)
-        case .processing:
+        case .processing(let requestID):
             HStack(spacing: PillTokens.loaderGap) {
                 SpiralLoaderView().frame(width: PillTokens.loaderSize, height: PillTokens.loaderSize)
                     .accessibilityHidden(true)
                 ProcessingLabel(startedAt: model.startedAt)
             }
             Spacer(minLength: 0)
-            action("esc", accessibility: "Cancel transformation", model.dismiss)
+            action("Stop", accessibility: "Stop generation") { model.stopGeneration(requestID) }
+                .help("Stop generating a proposal.")
         case .applying:
             Text("Updating selection…").lineLimit(1)
             Spacer(minLength: 0)
