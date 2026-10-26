@@ -26,6 +26,8 @@ public final class PillPanelController {
     public let model: PillModel
     private let panel: PillPanel
     private var subscription: AnyCancellable?
+    private var capturedVisibleFrame: NSRect?
+    private var capturedAnchorFrame: NSRect?
 
     public init(model: PillModel) {
         self.model = model
@@ -45,8 +47,15 @@ public final class PillPanelController {
             return true
         }
         panel.dismissPill = { [weak model] in model?.dismiss() }
-        subscription = model.$lifecycle.sink { [weak panel] state in
-            if !state.phase.isVisible { panel?.orderOut(nil) }
+        subscription = model.lifecycleChanges.sink { [weak self] state in
+            guard let self else { return }
+            if !state.phase.isVisible {
+                self.panel.orderOut(nil)
+                self.capturedVisibleFrame = nil
+                self.capturedAnchorFrame = nil
+            } else {
+                self.resizePanel()
+            }
         }
         // Intentionally no orderFront call here. Construction must be completely invisible.
     }
@@ -62,17 +71,32 @@ public final class PillPanelController {
         let targetScreen = screen ?? NSScreen.screens.first(where: { NSMouseInRect(NSEvent.mouseLocation, $0.frame, false) }) ?? NSScreen.main
         guard let targetScreen else { return }
         let visible = targetScreen.visibleFrame
-        let width = min(PillTokens.width, max(180, visible.width - 2 * PillTokens.edgeInset))
+        let width = min(PillTokens.width, max(1, visible.width - 2 * (PillTokens.edgeInset + PillTokens.shadowPadding)))
         let padding = PillTokens.shadowPadding
         let content = ImrsePillView(model: model, width: width)
             .padding(padding)
         panel.contentView = NSHostingView(rootView: content)
         panel.setFrame(NSRect(x: visible.midX - (width + padding * 2) / 2,
-                              y: visible.minY + PillTokens.bottomInset - padding,
+                              y: visible.minY + PillTokens.bottomInset,
                               width: width + padding * 2, height: PillTokens.height + padding * 2), display: false)
+        capturedVisibleFrame = visible
+        capturedAnchorFrame = panel.frame
         model.present()
         panel.orderFrontRegardless()
         panel.makeKey()
+    }
+
+    private func resizePanel() {
+        guard let visible = capturedVisibleFrame, let anchor = capturedAnchorFrame else { return }
+        let padding = PillTokens.shadowPadding
+        let width = min(PillTokens.width(for: model.phase), max(1, visible.width - 2 * (PillTokens.edgeInset + padding))) + 2 * padding
+        let height = PillTokens.height(for: model.phase) + 2 * padding
+        let usable = visible.insetBy(dx: PillTokens.edgeInset, dy: PillTokens.edgeInset)
+        panel.setFrame(NSRect(
+            x: min(max(anchor.maxX - width, usable.minX), max(usable.minX, usable.maxX - width)),
+            y: min(max(anchor.minY, usable.minY), max(usable.minY, usable.maxY - height)),
+            width: width, height: height
+        ), display: false)
     }
 
     public func dismiss() { model.dismiss(); panel.orderOut(nil) }
