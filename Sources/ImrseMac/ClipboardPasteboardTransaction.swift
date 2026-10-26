@@ -57,7 +57,12 @@ struct ClipboardPasteboardTransaction {
             return Backup(items: items, changeCount: changeCount)
         }
 
-        func restore(to pasteboard: NSPasteboard, makeItem: @MainActor () -> NSPasteboardItem, verifyOwnership: () -> Bool) throws {
+        func restore(
+            to pasteboard: NSPasteboard,
+            makeItem: @MainActor () -> NSPasteboardItem,
+            verifyOwnership: () -> Bool,
+            writeRestoredItems: @MainActor (NSPasteboard, [NSPasteboardItem]) -> Bool
+        ) throws {
             let restoredItems: [NSPasteboardItem] = try items.map { representations in
                 let item = makeItem()
                 for (type, data) in representations {
@@ -82,7 +87,7 @@ struct ClipboardPasteboardTransaction {
                 }
                 return
             }
-            guard pasteboard.writeObjects(restoredItems) else { throw ImrseError.clipboardFailed }
+            guard writeRestoredItems(pasteboard, restoredItems) else { throw ImrseError.clipboardFailed }
             let restoredCount = pasteboard.changeCount
             guard let actualItems = pasteboard.pasteboardItems, actualItems.count == items.count else {
                 throw ImrseError.clipboardFailed
@@ -168,10 +173,18 @@ struct ClipboardPasteboardTransaction {
         return pasteboard.changeCount == ownedChangeCount
     }
 
-    mutating func restoreIfOwned(on pasteboard: NSPasteboard) throws -> Bool {
+    mutating func restoreIfOwned(
+        on pasteboard: NSPasteboard,
+        writeRestoredItems: @MainActor (NSPasteboard, [NSPasteboardItem]) -> Bool = { $0.writeObjects($1) }
+    ) throws -> Bool {
         guard stillOwns(pasteboard) else { return false }
         let retained = backup
-        try retained.restore(to: pasteboard, makeItem: makeItem, verifyOwnership: { stillOwns(pasteboard) })
+        try retained.restore(
+            to: pasteboard,
+            makeItem: makeItem,
+            verifyOwnership: { stillOwns(pasteboard) },
+            writeRestoredItems: writeRestoredItems
+        )
         ownedChangeCount = nil
         stagedText = nil
         return true
