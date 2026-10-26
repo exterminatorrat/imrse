@@ -36,6 +36,7 @@ public final class PillModel: ObservableObject {
     public var onSubmit: (PillSubmission) -> Void
     public var onCancel: (UUID) -> Void
     public var onUndo: (() -> Void)?
+    public var onClipboardFocusHandoff: (@MainActor () -> Void)?
     public var lifecycleChanges: AnyPublisher<PillLifecycle, Never> {
         lifecycleChangesSubject.eraseToAnyPublisher()
     }
@@ -67,6 +68,11 @@ public final class PillModel: ObservableObject {
 
     public func setInputFocused(_ focused: Bool) {
         inputIsFocused = focused
+    }
+
+    public func prepareForClipboardFocusHandoff() {
+        guard case .applying = phase else { return }
+        onClipboardFocusHandoff?()
     }
 
     public func showCaptureFailure(message: String) {

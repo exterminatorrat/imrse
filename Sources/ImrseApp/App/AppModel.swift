@@ -146,6 +146,7 @@ final class AppModel: ObservableObject {
     @Published private(set) var isChangingManagedLocalModel = false
 
     var onPresentPill: (@MainActor (NSScreen?) -> Void)?
+    var onHidePillForFocusHandoff: (@MainActor () -> Void)?
     #if DEBUG
     private(set) var previewState: AppPreviewState?
     #endif
@@ -378,7 +379,7 @@ final class AppModel: ObservableObject {
         }
         let selectionAccess = MacSelectionAccess(
             clipboardFallbackEnabled: configuration.clipboardFallbackEnabled,
-            prepareForClipboardPaste: { [weak pillModel] in pillModel?.dismiss() }
+            prepareForClipboardPaste: { [weak pillModel] in pillModel?.prepareForClipboardFocusHandoff() }
         )
         let runtimeAccountClient: OpenAIAccountClient?
         let accountClient: (any AppModelOpenAIAccountClient)?
@@ -473,6 +474,7 @@ final class AppModel: ObservableObject {
         pillBridge.isPreviewMode = isPreviewMode
         #endif
         pillBridge.onPresent = { [weak self] screen in self?.onPresentPill?(screen) }
+        pillBridge.onHideForFocusHandoff = { [weak self] in self?.onHidePillForFocusHandoff?() }
         pillBridge.onUndo = { [weak self] in self?.undo() }
         pillBridge.onStateChange = { [weak self] state in self?.handleEngineState(state) }
 

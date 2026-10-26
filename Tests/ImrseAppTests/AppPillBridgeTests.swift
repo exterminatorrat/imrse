@@ -150,6 +150,69 @@ final class AppPillBridgeTests: XCTestCase {
         XCTAssertTrue(bridge.pill.canUndo)
     }
 
+    func testClipboardFocusHandoffKeepsApplyingPhaseAndRestoresSuccessWithUndo() async {
+        let selection = RecordingSelectionAccess(holdReplacement: true)
+        let provider = RecordingTextProvider(output: "updated")
+        let (bridge, pill) = makeBridge(selection: selection, provider: provider)
+        var presentationCount = 0
+        var focusHandoffHideCount = 0
+        bridge.onPresent = { _ in presentationCount += 1 }
+        bridge.onHideForFocusHandoff = { focusHandoffHideCount += 1 }
+        defer { selection.finishReplacement() }
+
+        bridge.invoke()
+        pill.submit()
+        await waitUntil { bridge.engine.state == .replacing }
+
+        guard case .applying(let requestID) = pill.phase else {
+            return XCTFail("Expected the pill to remain applying before focus handoff")
+        }
+        pill.prepareForClipboardFocusHandoff()
+
+        XCTAssertEqual(pill.phase, .applying(requestID))
+        XCTAssertEqual(focusHandoffHideCount, 1)
+        XCTAssertEqual(presentationCount, 1)
+
+        selection.finishReplacement()
+        await waitUntil { bridge.engine.state == .succeeded(unchanged: false) }
+
+        XCTAssertEqual(pill.phase, .success(requestID))
+        XCTAssertTrue(pill.canUndo)
+        XCTAssertEqual(presentationCount, 2)
+    }
+
+    func testClipboardFocusHandoffRestoresReplacementFailurePresentation() async {
+        let selection = RecordingSelectionAccess(
+            replacementError: .replacementFailed,
+            holdReplacement: true
+        )
+        let provider = RecordingTextProvider(output: "updated")
+        let (bridge, pill) = makeBridge(selection: selection, provider: provider)
+        var presentationCount = 0
+        var focusHandoffHideCount = 0
+        bridge.onPresent = { _ in presentationCount += 1 }
+        bridge.onHideForFocusHandoff = { focusHandoffHideCount += 1 }
+        defer { selection.finishReplacement() }
+
+        bridge.invoke()
+        pill.submit()
+        await waitUntil { bridge.engine.state == .replacing }
+
+        guard case .applying(let requestID) = pill.phase else {
+            return XCTFail("Expected the pill to remain applying before focus handoff")
+        }
+        pill.prepareForClipboardFocusHandoff()
+
+        XCTAssertEqual(pill.phase, .applying(requestID))
+        XCTAssertEqual(focusHandoffHideCount, 1)
+
+        selection.finishReplacement()
+        await waitUntil { bridge.engine.state == .failed(.replacementFailed) }
+
+        XCTAssertEqual(pill.phase, .failure(requestID, ImrseError.replacementFailed.message))
+        XCTAssertEqual(presentationCount, 2)
+    }
+
 #if DEBUG
     func testReplacementFailurePublishesFailureAndResizesHostedPanel() async throws {
         let screen = try XCTUnwrap(NSScreen.main)
