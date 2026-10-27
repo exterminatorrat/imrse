@@ -544,22 +544,44 @@ final class AppPillBridgeTests: XCTestCase {
         XCTAssertEqual(hostedPanel.frame.minY, inputFrame.minY)
         XCTAssertTrue(usableFrame.contains(hostedPanel.frame))
 
-        @MainActor func detailsButton(in element: any NSAccessibilityProtocol) -> (any NSAccessibilityProtocol)? {
-            if element.accessibilityRole() == .button,
-               element.accessibilityLabel() == "Details" || element.accessibilityTitle() == "Details" {
-                return element
-            }
-            for child in element.accessibilityChildren() ?? [] {
-                if let child = child as? any NSAccessibilityProtocol, let button = detailsButton(in: child) {
-                    return button
-                }
-            }
-            return nil
+        let failureBitmap = try XCTUnwrap(contentView.bitmapImageRepForCachingDisplay(in: contentView.bounds))
+        contentView.cacheDisplay(in: contentView.bounds, to: failureBitmap)
+        let failureImage = try XCTUnwrap(failureBitmap.cgImage)
+        let detailsRequest = VNRecognizeTextRequest()
+        detailsRequest.recognitionLevel = .accurate
+        detailsRequest.recognitionLanguages = ["en-US"]
+        detailsRequest.usesLanguageCorrection = false
+        try VNImageRequestHandler(cgImage: failureImage).perform([detailsRequest])
+        var detailsPoint: NSPoint?
+        for observation in detailsRequest.results ?? [] {
+            guard let text = observation.topCandidates(1).first,
+                  let range = text.string.range(of: "Details", options: .caseInsensitive),
+                  let bounds = try text.boundingBox(for: range)?.boundingBox
+            else { continue }
+            let point = NSPoint(
+                x: contentView.bounds.minX + bounds.midX * contentView.bounds.width,
+                y: contentView.bounds.minY + (contentView.isFlipped ? 1 - bounds.midY : bounds.midY) * contentView.bounds.height
+            )
+            detailsPoint = contentView.convert(point, to: nil)
+            break
         }
-
-        let details = try XCTUnwrap(detailsButton(in: contentView), "Expected an accessible Details button")
+        let point = try XCTUnwrap(detailsPoint, "Expected rendered Details bounds in the owned synthetic window")
+        let mouseDown = try XCTUnwrap(NSEvent.mouseEvent(
+            with: .leftMouseDown, location: point, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
+            windowNumber: hostedPanel.windowNumber, context: nil, eventNumber: 1, clickCount: 1, pressure: 1
+        ))
+        let mouseUp = try XCTUnwrap(NSEvent.mouseEvent(
+            with: .leftMouseUp, location: point, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
+            windowNumber: hostedPanel.windowNumber, context: nil, eventNumber: 2, clickCount: 1, pressure: 0
+        ))
         let windowsBeforeDetails = Set(NSApplication.shared.windows.map(\.windowNumber))
-        XCTAssertTrue(details.accessibilityPerformPress())
+        NSApplication.shared.postEvent(mouseUp, atStart: true)
+        hostedPanel.sendEvent(mouseDown)
+        if let pendingMouseUp = NSApplication.shared.nextEvent(matching: .leftMouseUp, until: Date.distantPast, inMode: .default, dequeue: false),
+           pendingMouseUp.windowNumber == hostedPanel.windowNumber, pendingMouseUp.eventNumber == 2 {
+            _ = NSApplication.shared.nextEvent(matching: .leftMouseUp, until: Date.distantPast, inMode: .default, dequeue: true)
+            hostedPanel.sendEvent(pendingMouseUp)
+        }
         await waitUntil {
             NSApplication.shared.windows.contains {
                 !windowsBeforeDetails.contains($0.windowNumber) && $0.isVisible
