@@ -183,22 +183,22 @@ public final class TransformationEngine {
         diagnostics.error = nil
         diagnostics.replacement = "running"
         transition(to: .replacing)
+        do {
+            try selectionAccess.validate(target)
+            guard activeOperationID == operationID, state == .replacing else { return }
+            diagnostics.targetValid = true
+        } catch {
+            guard activeOperationID == operationID, state == .replacing else { return }
+            diagnostics.targetValid = false
+            finish(operationID, failure: Self.validationFailure(error))
+            return
+        }
+        if proposal.text == target.text {
+            finish(operationID, unchanged: true)
+            return
+        }
         generationTask = Task { [weak self] in
             guard let self, self.activeOperationID == operationID, self.state == .replacing else { return }
-            do {
-                try self.selectionAccess.validate(target)
-                guard self.activeOperationID == operationID, self.state == .replacing else { return }
-                self.diagnostics.targetValid = true
-            } catch {
-                guard self.activeOperationID == operationID, self.state == .replacing else { return }
-                self.diagnostics.targetValid = false
-                self.finish(operationID, failure: Self.validationFailure(error))
-                return
-            }
-            if proposal.text == target.text {
-                self.finish(operationID, unchanged: true)
-                return
-            }
             await self.replace(proposal.text, target: target, operationID: operationID)
         }
     }
