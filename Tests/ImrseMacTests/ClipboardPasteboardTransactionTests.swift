@@ -25,18 +25,22 @@ final class ClipboardPasteboardTransactionTests: XCTestCase {
         let pasteboard = makePasteboard()
         defer { pasteboard.releaseGlobally() }
         XCTAssertTrue(pasteboard.setString("original", forType: .string))
-        var rejectConstruction = false
+        @MainActor
+        final class ConstructionState {
+            var rejectConstruction = false
+        }
+        let construction = ConstructionState()
         var transaction = try ClipboardPasteboardTransaction.capture(from: pasteboard, makeItem: {
-            rejectConstruction ? RejectingItem() : NSPasteboardItem()
+            construction.rejectConstruction ? RejectingItem() : NSPasteboardItem()
         })
         try transaction.stage("generated", on: pasteboard)
         let stagedCount = pasteboard.changeCount
-        rejectConstruction = true
+        construction.rejectConstruction = true
         XCTAssertThrowsError(try transaction.restoreIfOwned(on: pasteboard))
         XCTAssertTrue(transaction.stillOwns(pasteboard))
         XCTAssertEqual(pasteboard.changeCount, stagedCount)
         XCTAssertEqual(pasteboard.string(forType: .string), "generated")
-        rejectConstruction = false
+        construction.rejectConstruction = false
         XCTAssertTrue(try transaction.restoreIfOwned(on: pasteboard))
         XCTAssertEqual(pasteboard.string(forType: .string), "original")
     }
