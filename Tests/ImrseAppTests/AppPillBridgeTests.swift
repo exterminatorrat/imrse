@@ -544,13 +544,13 @@ final class AppPillBridgeTests: XCTestCase {
         XCTAssertEqual(hostedPanel.frame.minY, inputFrame.minY)
         XCTAssertTrue(usableFrame.contains(hostedPanel.frame))
 
-        @MainActor func detailsButton(in element: any NSAccessibility) -> (any NSAccessibility)? {
+        @MainActor func detailsButton(in element: any NSAccessibilityProtocol) -> (any NSAccessibilityProtocol)? {
             if element.accessibilityRole() == .button,
                element.accessibilityLabel() == "Details" || element.accessibilityTitle() == "Details" {
                 return element
             }
             for child in element.accessibilityChildren() ?? [] {
-                if let child = child as? any NSAccessibility, let button = detailsButton(in: child) {
+                if let child = child as? any NSAccessibilityProtocol, let button = detailsButton(in: child) {
                     return button
                 }
             }
