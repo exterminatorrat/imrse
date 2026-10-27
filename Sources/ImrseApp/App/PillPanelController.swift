@@ -11,6 +11,9 @@ final class PillPanelController {
     private var keyMonitor: Any?
     private var subscription: AnyCancellable?
     private var capturedVisibleFrame: NSRect?
+    private var capturedAnchorFrame: NSRect?
+    private var restoringAfterFocusHandoff = false
+    private var hostingView: NSHostingView<PillPanelContent>?
 
     init(model: AppModel) {
         self.model = model
@@ -19,7 +22,7 @@ final class PillPanelController {
                 guard let self else { return }
                 let phase = lifecycle.phase
                 guard phase.isVisible else { self.hide(); return }
-                self.resizePanel(for: PillTokens.width(for: phase))
+                self.resizePanel(width: PillTokens.width(for: phase), height: PillTokens.height(for: phase))
             }
     }
 
@@ -29,33 +32,55 @@ final class PillPanelController {
         guard let screen = screen ?? pointerScreen ?? NSScreen.main else { return }
 
         let visible = screen.visibleFrame
+        let anchorFrame = restoringAfterFocusHandoff && capturedVisibleFrame == visible ? capturedAnchorFrame : nil
+        restoringAfterFocusHandoff = false
         capturedVisibleFrame = visible
         let panel = makePanelIfNeeded()
-        panel.setFrame(Self.frame(width: PillTokens.width(for: model.pillModel.phase), height: PillTokens.height(for: model.pillModel.phase), visibleFrame: visible), display: false)
+        hostingView?.rootView = PillPanelContent(model: model.pillModel, width: Self.contentWidth(PillTokens.width, visibleFrame: visible))
+        let frame = Self.frame(width: PillTokens.width(for: model.pillModel.phase), height: PillTokens.height(for: model.pillModel.phase), visibleFrame: visible, selectionBounds: selectionBounds, anchorFrame: anchorFrame)
+        if anchorFrame == nil { capturedAnchorFrame = frame }
+        panel.setFrame(frame, display: false)
         panel.makeKeyAndOrderFront(nil)
         panel.makeFirstResponder(panel.contentView)
         installKeyMonitor()
     }
 
     func hideForFocusHandoff() {
-        hide()
+        hide(preservingAnchor: true)
     }
 
-    static func frame(width: CGFloat, height: CGFloat = PillTokens.height, visibleFrame: CGRect) -> CGRect {
+    static func contentWidth(_ width: CGFloat, visibleFrame: CGRect) -> CGFloat {
+        min(width, max(1, visibleFrame.width - 2 * (PillTokens.edgeInset + PillTokens.shadowPadding)))
+    }
+
+    static func frame(width: CGFloat, height: CGFloat = PillTokens.height, visibleFrame: CGRect, selectionBounds: CGRect? = nil, anchorFrame: CGRect? = nil) -> CGRect {
         let padding = PillTokens.shadowPadding
-        let cappedWidth = min(width, max(180, visibleFrame.width - 2 * PillTokens.edgeInset))
-        let size = NSSize(width: cappedWidth + 2 * padding, height: height + 2 * padding)
+        let size = NSSize(width: Self.contentWidth(width, visibleFrame: visibleFrame) + 2 * padding, height: height + 2 * padding)
+        let usable = visibleFrame.insetBy(dx: PillTokens.edgeInset, dy: PillTokens.edgeInset)
+        var origin = CGPoint(x: visibleFrame.midX - size.width / 2, y: visibleFrame.minY + PillTokens.bottomInset)
+        if let anchorFrame {
+            origin = CGPoint(x: anchorFrame.maxX - size.width, y: anchorFrame.minY)
+        } else if let selectionBounds,
+                  selectionBounds.minX.isFinite, selectionBounds.minY.isFinite,
+                  selectionBounds.width.isFinite, selectionBounds.height.isFinite,
+                  selectionBounds.width > 0, selectionBounds.height > 0,
+                  visibleFrame.intersects(selectionBounds) {
+            origin = CGPoint(x: selectionBounds.midX - size.width / 2, y: selectionBounds.minY - 8 - height - padding)
+            if origin.y < usable.minY {
+                origin.y = selectionBounds.maxY + 8 - padding
+            }
+        }
         return NSRect(
-            x: visibleFrame.midX - size.width / 2,
-            y: visibleFrame.minY + PillTokens.bottomInset - padding,
+            x: min(max(origin.x, usable.minX), max(usable.minX, usable.maxX - size.width)),
+            y: min(max(origin.y, usable.minY), max(usable.minY, usable.maxY - size.height)),
             width: size.width,
             height: size.height
         )
     }
 
-    private func resizePanel(for width: CGFloat) {
+    private func resizePanel(width: CGFloat, height: CGFloat) {
         guard let panel, let capturedVisibleFrame else { return }
-        panel.setFrame(Self.frame(width: width, height: PillTokens.height(for: model.pillModel.phase), visibleFrame: capturedVisibleFrame), display: false)
+        panel.setFrame(Self.frame(width: width, height: height, visibleFrame: capturedVisibleFrame, anchorFrame: capturedAnchorFrame), display: false)
     }
 
     private func makePanelIfNeeded() -> ImrsePanel {
@@ -78,13 +103,11 @@ final class PillPanelController {
         panel.isOpaque = false
         panel.hasShadow = false
         panel.animationBehavior = .none
-        let hostingView = NSHostingView(
-            rootView: ImrsePillView(model: model.pillModel, hostHandlesEscape: true)
-                .padding(PillTokens.shadowPadding)
-        )
+        let hostingView = NSHostingView(rootView: PillPanelContent(model: model.pillModel, width: PillTokens.width))
         hostingView.sizingOptions = []
         panel.contentView = hostingView
         panel.initialFirstResponder = panel.contentView
+        self.hostingView = hostingView
         self.panel = panel
         return panel
     }
@@ -124,13 +147,27 @@ final class PillPanelController {
         (window?.firstResponder as? NSTextView)?.hasMarkedText() == true
     }
 
-    private func hide() {
+    private func hide(preservingAnchor: Bool = false) {
         panel?.orderOut(nil)
-        capturedVisibleFrame = nil
+        restoringAfterFocusHandoff = preservingAnchor
+        if !preservingAnchor {
+            capturedVisibleFrame = nil
+            capturedAnchorFrame = nil
+        }
         if let keyMonitor {
             NSEvent.removeMonitor(keyMonitor)
             self.keyMonitor = nil
         }
+    }
+}
+
+private struct PillPanelContent: View {
+    let model: PillModel
+    let width: CGFloat
+
+    var body: some View {
+        ImrsePillView(model: model, width: width, hostHandlesEscape: true)
+            .padding(PillTokens.shadowPadding)
     }
 }
 

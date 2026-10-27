@@ -168,12 +168,26 @@ final class AppPillBridgeTests: XCTestCase {
         XCTAssertEqual(PillTokens.width(for: .hidden), 0)
         XCTAssertEqual(phaseWidths, [360, 240, 220, 180, 300])
         let visibleFrame = NSRect(x: 0, y: 0, width: 1440, height: 900)
-        for width in phaseWidths {
+        let usableFrame = NSRect(x: 20, y: 20, width: 1400, height: 860)
+        let inputAnchor = NSRect(x: 512, y: 24, width: 416, height: 108)
+        let expectedFrames = [
+            NSRect(x: 512, y: 24, width: 416, height: 108),
+            NSRect(x: 572, y: 24, width: 296, height: 108),
+            NSRect(x: 582, y: 24, width: 276, height: 108),
+            NSRect(x: 602, y: 24, width: 236, height: 108),
+            NSRect(x: 542, y: 24, width: 356, height: 108)
+        ]
+        for (width, expectedFrame) in zip(phaseWidths, expectedFrames) {
             let panelFrame = PillPanelController.frame(width: width, visibleFrame: visibleFrame)
-            XCTAssertEqual(panelFrame.width, width + 2 * PillTokens.shadowPadding)
-            XCTAssertEqual(panelFrame.height, PillTokens.height + 2 * PillTokens.shadowPadding)
-            XCTAssertEqual(panelFrame.midX, visibleFrame.midX)
-            XCTAssertEqual(panelFrame.minY, visibleFrame.minY + PillTokens.bottomInset - PillTokens.shadowPadding)
+            XCTAssertEqual(panelFrame, expectedFrame)
+            XCTAssertTrue(visibleFrame.contains(panelFrame))
+            XCTAssertTrue(usableFrame.contains(panelFrame))
+
+            let anchoredFrame = PillPanelController.frame(width: width, visibleFrame: visibleFrame, anchorFrame: inputAnchor)
+            XCTAssertEqual(anchoredFrame.size, expectedFrame.size)
+            XCTAssertEqual(anchoredFrame.maxX, 928)
+            XCTAssertEqual(anchoredFrame.minY, 24)
+            XCTAssertTrue(usableFrame.contains(anchoredFrame))
         }
     }
 
@@ -397,9 +411,46 @@ final class AppPillBridgeTests: XCTestCase {
         let contentView = try XCTUnwrap(hostedPanel.contentView)
         let hostingView = try XCTUnwrap(contentView as? any HostingViewSizingOptionsProviding)
         XCTAssertTrue(hostingView.sizingOptions.isEmpty)
+
+        @MainActor func recordRender(_ name: String, in view: NSView) throws {
+            guard let directory = ProcessInfo.processInfo.environment["IMRSE_TEST_RENDER_DIRECTORY"] else { return }
+            let destination = URL(fileURLWithPath: directory, isDirectory: true)
+            try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: true)
+            view.layoutSubtreeIfNeeded()
+            view.displayIfNeeded()
+            let bitmap = try XCTUnwrap(view.bitmapImageRepForCachingDisplay(in: view.bounds))
+            view.cacheDisplay(in: view.bounds, to: bitmap)
+            let data = try XCTUnwrap(bitmap.representation(using: .png, properties: [:]))
+            try data.write(to: destination.appendingPathComponent("\(name).png"), options: .atomic)
+        }
+
+        await waitUntil {
+            guard let text = try? renderedText(in: contentView) else { return false }
+            return containsRenderedLabel("Describe edits", in: text)
+                && containsRenderedLabel("Improve", in: text)
+                && containsRenderedLabel("More", in: text)
+        }
+        try recordRender("input", in: contentView)
+        let inputFrame = hostedPanel.frame
+        let usableFrame = screen.visibleFrame.insetBy(dx: 20, dy: 20)
+        XCTAssertEqual(inputFrame.size, NSSize(width: 416, height: 108))
+        XCTAssertEqual(inputFrame.midX, screen.visibleFrame.midX)
+        XCTAssertEqual(inputFrame.minY, screen.visibleFrame.minY + 24)
+        XCTAssertTrue(usableFrame.contains(inputFrame))
         model.pillModel.submit()
         await waitUntil { model.pillModel.proposal != nil }
         XCTAssertEqual(selection.replaceCount, 0)
+        await waitUntil {
+            guard let text = try? renderedText(in: contentView) else { return false }
+            return containsRenderedLabel("updated", in: text)
+                && containsRenderedLabel("Replace", in: text)
+                && containsRenderedLabel("Discard", in: text)
+        }
+        XCTAssertEqual(hostedPanel.frame.size, NSSize(width: 416, height: 272))
+        XCTAssertEqual(hostedPanel.frame.maxX, inputFrame.maxX)
+        XCTAssertEqual(hostedPanel.frame.minY, inputFrame.minY)
+        XCTAssertTrue(usableFrame.contains(hostedPanel.frame))
+        try recordRender("proposal", in: contentView)
         model.pillModel.replaceProposal()
         await waitUntil { engine.state == .replacing && selection.replaceCount == 1 }
 
@@ -417,31 +468,28 @@ final class AppPillBridgeTests: XCTestCase {
             containsRenderedLabel("Updating selection…", in: applyingRenderedText),
             "Expected rendered applying label; OCR observed \(applyingRenderedText)"
         )
+        try recordRender("applying", in: contentView)
         let applyingFrame = hostedPanel.frame
         let applyingContentFrame = contentView.frame
         let applyingIntrinsicSize = contentView.intrinsicContentSize
         let applyingFittingSize = contentView.fittingSize
-        XCTAssertEqual(
-            applyingFrame,
-            PillPanelController.frame(
-                width: PillTokens.width(for: model.pillModel.phase),
-                visibleFrame: screen.visibleFrame
-            )
-        )
+        XCTAssertEqual(applyingFrame.size, NSSize(width: 276, height: 108))
+        XCTAssertEqual(applyingFrame.maxX, inputFrame.maxX)
+        XCTAssertEqual(applyingFrame.minY, inputFrame.minY)
+        XCTAssertTrue(usableFrame.contains(applyingFrame))
         selection.finishReplacement()
 
         await waitUntil { engine.state == .failed(.replacementFailed) }
         await waitUntil {
             guard let text = try? renderedText(in: contentView) else { return false }
-            return containsRenderedLabel(ImrseError.replacementFailed.message, in: text)
+            return containsRenderedLabel("Replacement failed", in: text)
+                && containsRenderedLabel("Details", in: text)
+                && containsRenderedLabel("Dismiss", in: text)
         }
 
         let failureRenderedText = try renderedText(in: contentView)
-        let failurePhaseWidth = PillTokens.width(for: model.pillModel.phase)
-        let failureFrame = PillPanelController.frame(
-            width: failurePhaseWidth,
-            visibleFrame: screen.visibleFrame
-        )
+        try recordRender("replacement-failure", in: contentView)
+        let failureFrame = NSRect(x: inputFrame.maxX - 356, y: inputFrame.minY, width: 356, height: 108)
         let attachment = XCTAttachment(string: """
         engineState=\(engine.state)
         modelPhase=\(model.pillModel.phase)
@@ -477,23 +525,85 @@ final class AppPillBridgeTests: XCTestCase {
         }
         XCTAssertEqual(failureID, requestID)
         XCTAssertEqual(message, ImrseError.replacementFailed.message)
+        XCTAssertEqual(model.pillModel.failureKind, .replacement)
         XCTAssertTrue(publishedPhases.contains(.applying(requestID)))
         XCTAssertTrue(publishedPhases.contains(.failure(failureID, message)))
-        XCTAssertTrue(
-            containsRenderedLabel(message, in: failureRenderedText),
-            "Expected rendered error \(message); OCR observed \(failureRenderedText)"
-        )
+        for label in ["Replacement failed", "Details", "Dismiss"] {
+            XCTAssertTrue(
+                containsRenderedLabel(label, in: failureRenderedText),
+                "Expected rendered label \(label); OCR observed \(failureRenderedText)"
+            )
+        }
 
-        let expectedFrame = PillPanelController.frame(
-            width: PillTokens.width(for: model.pillModel.phase),
-            visibleFrame: screen.visibleFrame
-        )
-        XCTAssertEqual(expectedFrame.width, 356)
         XCTAssertEqual(
             hostedPanel.frame,
-            expectedFrame,
+            failureFrame,
             "sizingOptions=\(hostingView.sizingOptions.rawValue), contentFrame=\(contentView.frame), intrinsic=\(contentView.intrinsicContentSize), fitting=\(contentView.fittingSize)"
         )
+        XCTAssertEqual(hostedPanel.frame.maxX, inputFrame.maxX)
+        XCTAssertEqual(hostedPanel.frame.minY, inputFrame.minY)
+        XCTAssertTrue(usableFrame.contains(hostedPanel.frame))
+
+        let failureBitmap = try XCTUnwrap(contentView.bitmapImageRepForCachingDisplay(in: contentView.bounds))
+        contentView.cacheDisplay(in: contentView.bounds, to: failureBitmap)
+        let failureImage = try XCTUnwrap(failureBitmap.cgImage)
+        let detailsRequest = VNRecognizeTextRequest()
+        detailsRequest.recognitionLevel = .accurate
+        detailsRequest.recognitionLanguages = ["en-US"]
+        detailsRequest.usesLanguageCorrection = false
+        try VNImageRequestHandler(cgImage: failureImage).perform([detailsRequest])
+        var detailsPoint: NSPoint?
+        for observation in detailsRequest.results ?? [] {
+            guard let text = observation.topCandidates(1).first,
+                  let range = text.string.range(of: "Details", options: .caseInsensitive),
+                  let bounds = try text.boundingBox(for: range)?.boundingBox
+            else { continue }
+            let point = NSPoint(
+                x: contentView.bounds.minX + bounds.midX * contentView.bounds.width,
+                y: contentView.bounds.minY + (contentView.isFlipped ? 1 - bounds.midY : bounds.midY) * contentView.bounds.height
+            )
+            detailsPoint = contentView.convert(point, to: nil)
+            break
+        }
+        let point = try XCTUnwrap(detailsPoint, "Expected rendered Details bounds in the owned synthetic window")
+        let mouseDown = try XCTUnwrap(NSEvent.mouseEvent(
+            with: .leftMouseDown, location: point, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
+            windowNumber: hostedPanel.windowNumber, context: nil, eventNumber: 1, clickCount: 1, pressure: 1
+        ))
+        let mouseUp = try XCTUnwrap(NSEvent.mouseEvent(
+            with: .leftMouseUp, location: point, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
+            windowNumber: hostedPanel.windowNumber, context: nil, eventNumber: 2, clickCount: 1, pressure: 0
+        ))
+        let windowsBeforeDetails = Set(NSApplication.shared.windows.map(\.windowNumber))
+        NSApplication.shared.postEvent(mouseUp, atStart: true)
+        hostedPanel.sendEvent(mouseDown)
+        if let pendingMouseUp = NSApplication.shared.nextEvent(matching: .leftMouseUp, until: Date.distantPast, inMode: .default, dequeue: false),
+           pendingMouseUp.windowNumber == hostedPanel.windowNumber, pendingMouseUp.eventNumber == 2 {
+            _ = NSApplication.shared.nextEvent(matching: .leftMouseUp, until: Date.distantPast, inMode: .default, dequeue: true)
+            hostedPanel.sendEvent(pendingMouseUp)
+        }
+        await waitUntil {
+            NSApplication.shared.windows.contains {
+                !windowsBeforeDetails.contains($0.windowNumber) && $0.isVisible
+            }
+        }
+        let detailsWindow = try XCTUnwrap(NSApplication.shared.windows.first {
+            !windowsBeforeDetails.contains($0.windowNumber) && $0.isVisible
+        })
+        defer { detailsWindow.close() }
+        let detailsView = try XCTUnwrap(detailsWindow.contentView)
+        await waitUntil {
+            guard let text = try? renderedText(in: detailsView) else { return false }
+            return containsRenderedLabel(message, in: text)
+        }
+        let detailsRenderedText = try renderedText(in: detailsView)
+        XCTAssertTrue(
+            containsRenderedLabel(message, in: detailsRenderedText),
+            "Expected the full error in Details; OCR observed \(detailsRenderedText)"
+        )
+        try recordRender("failure-details", in: detailsView)
+        XCTAssertEqual(engine.state, .failed(.replacementFailed))
+        XCTAssertEqual(selection.replaceCount, 1)
     }
 #endif
 
