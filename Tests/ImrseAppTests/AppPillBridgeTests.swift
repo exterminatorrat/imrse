@@ -12,6 +12,142 @@ import XCTest
 
 @MainActor
 final class AppPillBridgeTests: XCTestCase {
+    func testStopKeepsTypedCancellationVisibleAndRejectsLateOrStaleRequests() async throws {
+        let selection = RecordingSelectionAccess()
+        let provider = RecordingTextProvider(output: "proposal")
+        provider.holdNextResponse()
+        let (bridge, pill) = makeBridge(selection: selection, provider: provider)
+        bridge.invoke()
+        pill.submit()
+        await waitUntil { provider.requests.count == 1 }
+        guard case .processing(let oldRequest) = pill.phase else {
+            return XCTFail("Expected generation to remain processing")
+        }
+        pill.stopGeneration()
+        XCTAssertEqual(bridge.engine.state, .failed(.cancelled))
+        XCTAssertEqual(pill.phase, .failure(oldRequest, ImrseError.cancelled.message))
+        XCTAssertEqual(pill.failureKind, .cancelled)
+        XCTAssertTrue(pill.phase.isVisible)
+        XCTAssertEqual(selection.replaceCount, 0)
+        pill.stopGeneration()
+        pill.stopGeneration(oldRequest)
+        provider.finishResponse(at: 0, with: "late stopped output")
+        await Task.yield()
+        XCTAssertNil(pill.proposal)
+        XCTAssertEqual(pill.failureKind, .cancelled)
+        bridge.invoke()
+        pill.submit()
+        pill.stopGeneration(oldRequest)
+        await waitUntil { pill.proposal != nil }
+        XCTAssertNil(pill.failureKind)
+        XCTAssertEqual(pill.previewText, "proposal")
+        XCTAssertEqual(selection.captureCount, 2)
+        XCTAssertEqual(selection.replaceCount, 0)
+        XCTAssertFalse(pill.canUndo)
+    }
+
+    func testProposalPreviewRequiresAnExplicitSingleUseReplace() async throws {
+        let selection = RecordingSelectionAccess()
+        let provider = RecordingTextProvider(output: "proposed text")
+        let (bridge, pill) = makeBridge(selection: selection, provider: provider)
+        bridge.invoke()
+        pill.submit()
+        await waitUntil { pill.proposal != nil }
+        let proposal = try XCTUnwrap(pill.proposal)
+        XCTAssertEqual(pill.phase, .proposal(proposal.requestID))
+        XCTAssertEqual(pill.previewText, "proposed text")
+        XCTAssertEqual(proposal.targetID, selection.snapshot.id)
+        XCTAssertEqual(selection.replaceCount, 0)
+        XCTAssertFalse(pill.canUndo)
+        pill.onReplace?(UUID())
+        XCTAssertEqual(pill.proposal, proposal)
+        XCTAssertEqual(selection.replaceCount, 0)
+        pill.replaceProposal()
+        pill.replaceProposal()
+        await waitUntil { bridge.engine.state == .succeeded(unchanged: false) }
+        XCTAssertEqual(selection.replaceCount, 1)
+        XCTAssertNil(pill.proposal)
+        XCTAssertTrue(pill.canUndo)
+    }
+
+    func testCapturedSelectionBoundsArePresentationHintsWithoutWriteAuthority() {
+        let selection = RecordingSelectionAccess()
+        let provider = RecordingTextProvider(output: "proposal")
+        let bounds = CGRect(x: 120, y: 240, width: 80, height: 20)
+        let pill = PillModel(onSubmit: { _ in })
+        let engine = TransformationEngine(selectionAccess: selection, textProvider: provider)
+        let bridge = AppPillBridge(
+            engine: engine,
+            pill: pill,
+            configuration: AppConfiguration(),
+            defaultInstruction: "default",
+            presets: [],
+            screenAfterCapture: { nil },
+            fallbackScreen: { nil },
+            selectionBoundsAfterCapture: { bounds }
+        )
+        var presentedBounds: CGRect?
+        bridge.onPresent = { _, rect in presentedBounds = rect }
+        bridge.invoke()
+        XCTAssertEqual(presentedBounds, bounds)
+        XCTAssertEqual(engine.state, .ready)
+        XCTAssertEqual(selection.captureCount, 1)
+        XCTAssertEqual(selection.replaceCount, 0)
+        XCTAssertTrue(provider.requests.isEmpty)
+    }
+
+    func testDiscardPresentsTypedCancellationAndRejectsLateReplace() async throws {
+        let selection = RecordingSelectionAccess()
+        let (bridge, pill) = makeBridge(selection: selection, provider: RecordingTextProvider(output: "proposal"))
+        bridge.invoke()
+        pill.submit()
+        await waitUntil { pill.proposal != nil }
+        let proposal = try XCTUnwrap(pill.proposal)
+        pill.discardProposal()
+        XCTAssertEqual(bridge.engine.state, .failed(.cancelled))
+        XCTAssertEqual(pill.failureKind, .cancelled)
+        XCTAssertEqual(pill.phase, .failure(proposal.requestID, ImrseError.cancelled.message))
+        XCTAssertNil(pill.proposal)
+        XCTAssertEqual(pill.previewText, "")
+        pill.onReplace?(proposal.id)
+        await Task.yield()
+        XCTAssertEqual(selection.replaceCount, 0)
+        XCTAssertFalse(pill.canUndo)
+        bridge.invoke()
+        XCTAssertNil(pill.failureKind)
+        XCTAssertEqual(pill.phase, .input)
+    }
+
+    func testProposalCommitRevalidationFailureIsTypedAndNeverWrites() async {
+        let selection = RecordingSelectionAccess()
+        let (bridge, pill) = makeBridge(selection: selection, provider: RecordingTextProvider(output: "proposal"))
+        bridge.invoke()
+        pill.submit()
+        await waitUntil { pill.proposal != nil }
+        selection.validationError = .staleSelection
+        pill.replaceProposal()
+        await waitUntil { bridge.engine.state == .failed(.staleSelection) }
+        XCTAssertEqual(selection.replaceCount, 0)
+        XCTAssertEqual(pill.failureKind, .targetLost)
+        XCTAssertFalse(pill.canUndo)
+        XCTAssertNil(pill.proposal)
+    }
+
+    func testUnconfirmedProposalReplacementNeverOffersUndoOrRetry() async {
+        let selection = RecordingSelectionAccess(replacementError: .clipboardPending)
+        let (bridge, pill) = makeBridge(selection: selection, provider: RecordingTextProvider(output: "proposal"))
+        bridge.invoke()
+        pill.submit()
+        await waitUntil { pill.proposal != nil }
+        pill.replaceProposal()
+        await waitUntil { bridge.engine.state == .failed(.clipboardPending) }
+        XCTAssertEqual(pill.failureKind, .clipboardPending)
+        XCTAssertNil(pill.proposal)
+        XCTAssertFalse(pill.canUndo)
+        pill.replaceProposal()
+        XCTAssertEqual(selection.replaceCount, 1)
+    }
+
     func testPillGeometryTokensMatchSharedContract() {
         XCTAssertEqual(PillTokens.width, 360)
         XCTAssertEqual(PillTokens.height, 52)
@@ -95,7 +231,7 @@ final class AppPillBridgeTests: XCTestCase {
         let provider = RecordingTextProvider(output: "updated")
         let (bridge, _) = makeBridge(selection: selection, provider: provider)
         var events: [String] = []
-        bridge.onPresent = { _ in
+        bridge.onPresent = { _, _ in
             events.append("present")
             XCTAssertEqual(selection.captureCount, 1)
         }
@@ -114,7 +250,7 @@ final class AppPillBridgeTests: XCTestCase {
         let provider = RecordingTextProvider(output: "updated")
         let (bridge, _) = makeBridge(selection: selection, provider: provider)
         var presented = 0
-        bridge.onPresent = { _ in presented += 1 }
+        bridge.onPresent = { _, _ in presented += 1 }
 
         bridge.invoke()
 
@@ -134,7 +270,10 @@ final class AppPillBridgeTests: XCTestCase {
 
         bridge.invoke()
         bridge.pill.submit()
-        await waitUntil { bridge.engine.state == .replacing }
+        await waitUntil { bridge.pill.proposal != nil }
+        XCTAssertEqual(selection.replaceCount, 0)
+        bridge.pill.replaceProposal()
+        await waitUntil { bridge.engine.state == .replacing && selection.replaceCount == 1 }
 
         guard case .applying = bridge.pill.phase else {
             return XCTFail("The pill should show applying until replacement finishes")
@@ -156,13 +295,16 @@ final class AppPillBridgeTests: XCTestCase {
         let (bridge, pill) = makeBridge(selection: selection, provider: provider)
         var presentationCount = 0
         var focusHandoffHideCount = 0
-        bridge.onPresent = { _ in presentationCount += 1 }
+        bridge.onPresent = { _, _ in presentationCount += 1 }
         bridge.onHideForFocusHandoff = { focusHandoffHideCount += 1 }
         defer { selection.finishReplacement() }
 
         bridge.invoke()
         pill.submit()
-        await waitUntil { bridge.engine.state == .replacing }
+        await waitUntil { bridge.pill.proposal != nil }
+        XCTAssertEqual(selection.replaceCount, 0)
+        bridge.pill.replaceProposal()
+        await waitUntil { bridge.engine.state == .replacing && selection.replaceCount == 1 }
 
         guard case .applying(let requestID) = pill.phase else {
             return XCTFail("Expected the pill to remain applying before focus handoff")
@@ -190,13 +332,16 @@ final class AppPillBridgeTests: XCTestCase {
         let (bridge, pill) = makeBridge(selection: selection, provider: provider)
         var presentationCount = 0
         var focusHandoffHideCount = 0
-        bridge.onPresent = { _ in presentationCount += 1 }
+        bridge.onPresent = { _, _ in presentationCount += 1 }
         bridge.onHideForFocusHandoff = { focusHandoffHideCount += 1 }
         defer { selection.finishReplacement() }
 
         bridge.invoke()
         pill.submit()
-        await waitUntil { bridge.engine.state == .replacing }
+        await waitUntil { bridge.pill.proposal != nil }
+        XCTAssertEqual(selection.replaceCount, 0)
+        bridge.pill.replaceProposal()
+        await waitUntil { bridge.engine.state == .replacing && selection.replaceCount == 1 }
 
         guard case .applying(let requestID) = pill.phase else {
             return XCTFail("Expected the pill to remain applying before focus handoff")
@@ -230,7 +375,7 @@ final class AppPillBridgeTests: XCTestCase {
         let controller = PillPanelController(model: model)
         let existingWindowNumbers = Set(NSApplication.shared.windows.map(\.windowNumber))
         var hostedPanel: NSPanel?
-        model.onPresentPill = { _ in
+        model.onPresentPill = { _, _ in
             controller.present(afterCapturingTargetOn: screen)
             hostedPanel = NSApp.windows.first {
                 !existingWindowNumbers.contains($0.windowNumber)
@@ -253,7 +398,10 @@ final class AppPillBridgeTests: XCTestCase {
         let hostingView = try XCTUnwrap(contentView as? any HostingViewSizingOptionsProviding)
         XCTAssertTrue(hostingView.sizingOptions.isEmpty)
         model.pillModel.submit()
-        await waitUntil { engine.state == .replacing }
+        await waitUntil { model.pillModel.proposal != nil }
+        XCTAssertEqual(selection.replaceCount, 0)
+        model.pillModel.replaceProposal()
+        await waitUntil { engine.state == .replacing && selection.replaceCount == 1 }
 
         guard case .applying(let requestID) = model.pillModel.phase else {
             return XCTFail("Expected the pill to remain applying while replacement is pending")
@@ -356,7 +504,10 @@ final class AppPillBridgeTests: XCTestCase {
 
         bridge.invoke()
         bridge.pill.submit()
-        await waitUntil { bridge.engine.state == .replacing }
+        await waitUntil { bridge.pill.proposal != nil }
+        XCTAssertEqual(selection.replaceCount, 0)
+        bridge.pill.replaceProposal()
+        await waitUntil { bridge.engine.state == .replacing && selection.replaceCount == 1 }
         bridge.pill.dismiss()
         bridge.invoke()
 
@@ -384,7 +535,7 @@ final class AppPillBridgeTests: XCTestCase {
             instruction: "Replace selected text",
             provider: providerConfiguration("default", model: "default-model")
         )
-        await waitUntil { engine.state == .replacing }
+        await waitUntil { engine.state == .replacing && selection.replaceCount == 1 }
 
         var replies: [NSApplication.TerminateReply] = []
         XCTAssertEqual(model.requestTermination { replies.append($0) }, .terminateLater)
@@ -452,7 +603,7 @@ final class AppPillBridgeTests: XCTestCase {
         let engine = TransformationEngine(selectionAccess: selection, textProvider: provider)
         let model = AppModel(testEngine: engine)
         var presentationCount = 0
-        model.onPresentPill = { _ in presentationCount += 1 }
+        model.onPresentPill = { _, _ in presentationCount += 1 }
 
         engine.invoke()
         engine.submit(
@@ -502,6 +653,9 @@ final class AppPillBridgeTests: XCTestCase {
 
         bridge.invoke()
         bridge.pill.submit()
+        await waitUntil { bridge.pill.proposal != nil }
+        XCTAssertEqual(selection.replaceCount, 0)
+        bridge.pill.replaceProposal()
         await waitUntil { bridge.engine.state == .succeeded(unchanged: false) }
         let newPhase = bridge.pill.phase
         provider.finishResponse(at: 0, with: "stale output")
@@ -545,6 +699,9 @@ final class AppPillBridgeTests: XCTestCase {
 
         bridge.invoke()
         bridge.pill.submit()
+        await waitUntil { bridge.pill.proposal != nil }
+        XCTAssertEqual(selection.replaceCount, 0)
+        bridge.pill.replaceProposal()
         await waitUntil { bridge.engine.state == .succeeded(unchanged: true) }
 
         XCTAssertEqual(provider.requests.first?.instruction, "Read default.md")
@@ -592,6 +749,9 @@ final class AppPillBridgeTests: XCTestCase {
         XCTAssertEqual(selection.captureCount, 1)
 
         bridge.pill.submit()
+        await waitUntil { bridge.pill.proposal != nil }
+        XCTAssertEqual(selection.replaceCount, 0)
+        bridge.pill.replaceProposal()
         await waitUntil { bridge.engine.state == .succeeded(unchanged: true) }
 
         let request = provider.requests.first
@@ -791,6 +951,7 @@ private final class RecordingSelectionAccess: SelectionAccess {
     let undoError: ImrseError?
     var holdReplacement: Bool
     var holdUndo: Bool
+    var validationError: ImrseError?
     var captureCount = 0
     var replaceCount = 0
     var undoCount = 0
@@ -819,7 +980,9 @@ private final class RecordingSelectionAccess: SelectionAccess {
         return snapshot
     }
 
-    func validate(_ target: SelectionSnapshot) throws {}
+    func validate(_ target: SelectionSnapshot) throws {
+        if let validationError { throw validationError }
+    }
 
     func replace(_ target: SelectionSnapshot, with text: String) async throws -> ReplacementReceipt {
         replaceCount += 1

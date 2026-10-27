@@ -15,17 +15,19 @@ final class AppPillBridge {
     private var presets: [Preset]
     private let screenAfterCapture: () -> NSScreen?
     private let fallbackScreen: () -> NSScreen?
+    private let selectionBoundsAfterCapture: () -> CGRect?
     private var captureInProgress = false
     private var captureFallbackScreen: NSScreen?
     private var activeSubmissionID: UUID?
     private var focusHandoffPending = false
     private var lastPresentationScreen: NSScreen?
+    private var lastSelectionBounds: CGRect?
     private var pillLifecycleSubscription: AnyCancellable?
 
     #if DEBUG
     var isPreviewMode = false
     #endif
-    var onPresent: (@MainActor (NSScreen?) -> Void)?
+    var onPresent: (@MainActor (NSScreen?, CGRect?) -> Void)?
     var onHideForFocusHandoff: (@MainActor () -> Void)?
     var onStateChange: (@MainActor (TransformationState) -> Void)?
     var onUndo: (@MainActor () -> Void)?
@@ -37,7 +39,8 @@ final class AppPillBridge {
         defaultInstruction: String,
         presets: [Preset],
         screenAfterCapture: @escaping () -> NSScreen?,
-        fallbackScreen: @escaping () -> NSScreen?
+        fallbackScreen: @escaping () -> NSScreen?,
+        selectionBoundsAfterCapture: @escaping () -> CGRect? = { nil }
     ) {
         self.engine = engine
         self.pill = pill
@@ -46,17 +49,21 @@ final class AppPillBridge {
         self.presets = presets
         self.screenAfterCapture = screenAfterCapture
         self.fallbackScreen = fallbackScreen
+        self.selectionBoundsAfterCapture = selectionBoundsAfterCapture
         updatePresentationSettings()
 
         pill.onSubmit = { [weak self] submission in self?.submit(submission) }
         pill.onCancel = { [weak self] id in self?.cancel(id) }
         pill.onUndo = { [weak self] in self?.onUndo?() }
         pill.onClipboardFocusHandoff = { [weak self] in self?.beginClipboardFocusHandoff() }
+        pill.onReplace = { [weak self] id in self?.replaceProposal(id) }
+        pill.onDiscard = { [weak self] id in self?.discardProposal(id) }
         engine.onChange = { [weak self] state in self?.handle(state) }
         pillLifecycleSubscription = pill.$lifecycle.sink { [weak self] lifecycle in
             guard let self, lifecycle.phase == .hidden else { return }
             self.focusHandoffPending = false
             self.lastPresentationScreen = nil
+            self.lastSelectionBounds = nil
             guard self.engine.state == .ready else { return }
             self.engine.dismiss()
         }
@@ -79,12 +86,13 @@ final class AppPillBridge {
         guard engine.state != .replacing, engine.state != .undoing else { return }
         if let presetID, !presets.contains(where: { $0.id == presetID }) {
             pill.showCaptureFailure(message: ImrseError.invalidPreset.message)
-            onPresent?(fallbackScreen())
+            onPresent?(fallbackScreen(), nil)
             return
         }
 
         captureFallbackScreen = fallbackScreen()
         captureInProgress = true
+        if case .proposal = engine.state { pill.dismiss() }
         if engine.state != .idle { engine.dismiss() }
         engine.invoke()
         captureInProgress = false
@@ -98,7 +106,8 @@ final class AppPillBridge {
         pill.present()
         let screen = screenAfterCapture() ?? captureFallbackScreen
         lastPresentationScreen = screen
-        onPresent?(screen)
+        lastSelectionBounds = selectionBoundsAfterCapture()
+        onPresent?(screen, lastSelectionBounds)
         captureFallbackScreen = nil
 
         if let presetID, let index = pill.presets.firstIndex(where: { $0.id == presetID }) {
@@ -122,6 +131,8 @@ final class AppPillBridge {
         switch engine.state {
         case .ready:
             engine.dismiss()
+        case .proposal:
+            pill.discardProposal()
         default:
             break
         }
@@ -148,7 +159,8 @@ final class AppPillBridge {
                 localOnly: preset?.localOnly ?? false
             )
             let instruction = submission.instruction ?? defaultInstruction
-            engine.submit(
+            engine.submitProposal(
+                requestID: submission.id,
                 instruction: instruction,
                 provider: route.primary,
                 localOnly: route.localOnly,
@@ -166,6 +178,14 @@ final class AppPillBridge {
 
     private func handle(_ state: TransformationState) {
         switch state {
+        case .proposal(let proposal):
+            guard activeSubmissionID == proposal.requestID else { break }
+            pill.showProposal(PillProposal(
+                id: proposal.id,
+                requestID: proposal.requestID,
+                targetID: proposal.targetID,
+                text: proposal.text
+            ))
         case .replacing:
             if let activeSubmissionID { pill.generated(activeSubmissionID) }
         case .succeeded(let unchanged):
@@ -180,12 +200,13 @@ final class AppPillBridge {
         case .failed(let error):
             if let id = activeSubmissionID {
                 activeSubmissionID = nil
-                pill.failed(id, message: error.message)
+                guard pill.phase != .hidden else { break }
+                pill.failed(id, message: error.message, kind: Self.failureKind(error))
                 restoreAfterClipboardFocusHandoff()
             } else if captureInProgress {
                 captureInProgress = false
-                pill.showCaptureFailure(message: error.message)
-                onPresent?(captureFallbackScreen)
+                pill.showCaptureFailure(message: error.message, kind: Self.failureKind(error))
+                onPresent?(captureFallbackScreen, nil)
                 captureFallbackScreen = nil
             }
         default:
@@ -203,7 +224,31 @@ final class AppPillBridge {
     private func restoreAfterClipboardFocusHandoff() {
         guard focusHandoffPending else { return }
         focusHandoffPending = false
-        onPresent?(lastPresentationScreen)
+        onPresent?(lastPresentationScreen, lastSelectionBounds)
+    }
+
+    private func replaceProposal(_ id: UUID) {
+        guard acceptsActions, case .proposal(let proposal) = engine.state,
+              proposal.id == id, activeSubmissionID == proposal.requestID
+        else { return }
+        engine.commitProposal(id)
+    }
+
+    private func discardProposal(_ id: UUID) {
+        guard case .proposal(let proposal) = engine.state,
+              proposal.id == id, activeSubmissionID == proposal.requestID
+        else { return }
+        engine.discardProposal(id)
+    }
+
+    private static func failureKind(_ error: ImrseError) -> PillFailureKind {
+        switch error {
+        case .cancelled: .cancelled
+        case .clipboardPending: .clipboardPending
+        case .targetLost, .staleSelection, .noSelection, .secureInput, .permissionRequired: .targetLost
+        case .replacementFailed, .clipboardFailed, .undoUnavailable: .replacement
+        default: .generation
+        }
     }
 
     private func updatePresentationSettings() {
