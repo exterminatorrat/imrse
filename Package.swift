@@ -17,6 +17,7 @@ products.append(.library(name: "ImrseLocal", targets: ["ImrseLocal"]))
 targets.append(.testTarget(name: "ImrseLocalTests", dependencies: ["ImrseLocal"]))
 #if arch(arm64)
     dependencies += [
+        .package(path: "Vendor/EventSource"),
         .package(url: "https://github.com/ml-explore/mlx-swift-lm.git", exact: "3.31.4"),
         .package(url: "https://github.com/huggingface/swift-huggingface.git", exact: "0.9.0"),
         .package(url: "https://github.com/huggingface/swift-transformers.git", exact: "1.3.0")
