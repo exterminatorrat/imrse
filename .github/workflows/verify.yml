@@ -6,7 +6,7 @@ permissions:
   contents: read
 jobs:
   portable:
-    runs-on: ubuntu-latest
+    runs-on: namespace-profile-exterminatorrat
     container: swift:6.2
     steps:
       - uses: actions/checkout@v4
@@ -50,7 +50,7 @@ jobs:
         env:
           IMRSE_DIST_DIR: ${{ runner.temp }}/imrse-ci-package-validation
   design:
-    runs-on: ubuntu-latest
+    runs-on: namespace-profile-exterminatorrat
     defaults:
       run:
         working-directory: pill-kit/web
