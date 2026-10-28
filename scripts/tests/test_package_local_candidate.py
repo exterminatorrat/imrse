@@ -248,6 +248,9 @@ class PackageLocalCandidateTests(unittest.TestCase):
             "exit 97\n"
         )
         swift.chmod(0o755)
+        xcodebuild = stub_directory / "xcodebuild"
+        xcodebuild.write_bytes(swift.read_bytes())
+        xcodebuild.chmod(0o755)
         capture = Path(base) / "swift-argv"
         output = Path(base) / "ci-output"
         environment = os.environ.copy()
@@ -1754,27 +1757,23 @@ class PackageLocalCandidateTests(unittest.TestCase):
                 self.assertEqual(result.returncode, 97, result.stdout)
                 self.assertIsNotNone(argv)
                 self.assertEqual(argv[0], b"build")
-                self.assertEqual(argv[argv.index(b"--configuration") + 1], b"release")
-                architecture_options = [index for index, argument in enumerate(argv) if argument == b"--arch"]
+                self.assertEqual(argv[argv.index(b"-configuration") + 1], b"Release")
+                architecture_options = [index for index, argument in enumerate(argv) if argument == b"-destination"]
                 self.assertEqual(len(architecture_options), 1)
-                self.assertEqual(argv[architecture_options[0] + 1].decode(), expected_architecture)
+                self.assertEqual(argv[architecture_options[0] + 1].decode(), f"platform=macOS,arch={expected_architecture}")
                 self.assertNotIn(b"--triple", argv)
-                self.assertIn(b"--only-use-versions-from-resolved-file", argv)
-                self.assertIn(b"--jobs", argv)
-                self.assertEqual(argv[argv.index(b"--jobs") + 1], b"1")
-                self.assertIn(b"-Xswiftc", argv)
-                self.assertIn(b"-warnings-as-errors", argv)
-                self.assertIn(b"-whole-module-optimization", argv)
-                self.assertIn(b"-j1", argv)
-                self.assertIn(b"-num-threads", argv)
-                self.assertEqual(argv[argv.index(b"--build-system") + 1], b"xcode")
-                parameters = json.loads((output / "CI-BUILD-PARAMETERS.json").read_text())
-                settings = parameters["overrides"]["synthesized"]["table"]
-                self.assertEqual(settings["SWIFT_SUPPRESS_WARNINGS"], "NO")
-                self.assertEqual(settings["SWIFT_TREAT_WARNINGS_AS_ERRORS"], "YES")
-                self.assertEqual(settings["SWIFT_USE_PARALLEL_WHOLE_MODULE_OPTIMIZATION"], "NO")
-                self.assertIn(b"--verbose", argv)
-                self.assertEqual(argv[-2:], [b"--product", b"imrse"])
+                self.assertIn(b"-onlyUsePackageVersionsFromResolvedFile", argv)
+                self.assertIn(b"-disableAutomaticPackageResolution", argv)
+                self.assertIn(b"-skipPackageUpdates", argv)
+                self.assertEqual(argv[argv.index(b"-jobs") + 1], b"1")
+                self.assertIn(b"OTHER_SWIFT_FLAGS=$(inherited) -warnings-as-errors -j1", argv)
+                self.assertIn(b"SWIFT_COMPILATION_MODE=wholemodule", argv)
+                self.assertIn(b"SWIFT_SUPPRESS_WARNINGS=NO", argv)
+                self.assertIn(b"SWIFT_TREAT_WARNINGS_AS_ERRORS=YES", argv)
+                self.assertIn(b"SWIFT_USE_PARALLEL_WHOLE_MODULE_OPTIMIZATION=NO", argv)
+                self.assertNotIn(b"-skipPackagePluginValidation", argv)
+                self.assertNotIn(b"-skipMacroValidation", argv)
+                self.assertEqual(argv[argv.index(b"-scheme") + 1], b"imrse")
                 self.assertTrue(output.is_dir())
 
     def test_ci_build_rejects_unsupported_host_before_invoking_swift(self):

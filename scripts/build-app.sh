@@ -145,32 +145,8 @@ if [[ "${IMRSE_REQUIRE_EMPTY_APP_OUTPUT:-0}" == "1" && ( -e "$APP" || -L "$APP" 
   printf 'The required fresh app output already exists: %s\n' "$APP" >&2
   exit 1
 fi
-BUILD_SYSTEM=swiftbuild
-if [[ "$CI_PACKAGE_VALIDATION" == "1" ]]; then
-  BUILD_SYSTEM=xcode
-  CI_BUILD_PARAMETERS="$DIST_DIR/CI-BUILD-PARAMETERS.json"
-  python3 - "$CI_BUILD_PARAMETERS" "$CI_BUILD_ARCHITECTURE" <<'PY'
-import json
-import sys
-
-settings = {
-    "ARCHS": sys.argv[2],
-    "SWIFT_SUPPRESS_WARNINGS": "NO",
-    "GCC_WARN_INHIBIT_ALL_WARNINGS": "NO",
-    "SWIFT_TREAT_WARNINGS_AS_ERRORS": "YES",
-    "SWIFT_COMPILATION_MODE": "wholemodule",
-    "SWIFT_USE_PARALLEL_WHOLE_MODULE_OPTIMIZATION": "NO",
-    "SWIFT_USE_PARALLEL_WMO_TARGETS": "NO",
-    "OTHER_SWIFT_FLAGS": "$(inherited) -warnings-as-errors -whole-module-optimization -j1 -num-threads 1",
-}
-with open(sys.argv[1], "x") as output:
-    json.dump({"configurationName": "Release", "overrides": {"synthesized": {"table": settings}},
-               "activeRunDestination": {"platform": "macosx", "sdk": "macosx", "sdkVariant": None,
-               "targetArchitecture": sys.argv[2], "supportedArchitectures": [], "disableOnlyActiveArch": True}}, output)
-PY
-fi
 SWIFT_FLAGS=(
-  --build-system "$BUILD_SYSTEM"
+  --build-system swiftbuild
   --configuration "$CONFIGURATION"
   --scratch-path "$SCRATCH_PATH"
   --cache-path "$CACHE_PATH"
@@ -178,21 +154,27 @@ SWIFT_FLAGS=(
   --security-path "$SECURITY_PATH"
   --only-use-versions-from-resolved-file
 )
-if [[ "$CI_PACKAGE_VALIDATION" == "1" ]]; then
-  SWIFT_FLAGS+=(--jobs 1 -Xswiftc -warnings-as-errors -Xswiftc -whole-module-optimization -Xswiftc -j1 -Xswiftc -num-threads -Xswiftc 1 --verbose)
-  SWIFT_FLAGS+=(-Xxcbuild --buildParametersFile -Xxcbuild "$CI_BUILD_PARAMETERS")
-fi
-if [[ -n "$CI_BUILD_ARCHITECTURE" ]]; then
-  SWIFT_FLAGS+=(--arch "$CI_BUILD_ARCHITECTURE")
-fi
 BUILD_COMMAND=(swift build "${SWIFT_FLAGS[@]}" --product imrse)
 if [[ "$CI_PACKAGE_VALIDATION" == "1" ]]; then
-  printf 'CI Swift build command:'
+  BUILD_COMMAND=(xcodebuild build -scheme imrse -configuration Release
+    -destination "platform=macOS,arch=$CI_BUILD_ARCHITECTURE"
+    -derivedDataPath "$SCRATCH_PATH/ci-derived-data" -clonedSourcePackagesDirPath "$SCRATCH_PATH"
+    -disableAutomaticPackageResolution -onlyUsePackageVersionsFromResolvedFile -skipPackageUpdates
+    -jobs 1 CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO
+    SWIFT_TREAT_WARNINGS_AS_ERRORS=YES SUPPRESS_WARNINGS=NO SWIFT_SUPPRESS_WARNINGS=NO
+    GCC_WARN_INHIBIT_ALL_WARNINGS=NO SWIFT_COMPILATION_MODE=wholemodule
+    SWIFT_USE_PARALLEL_WHOLE_MODULE_OPTIMIZATION=NO SWIFT_USE_PARALLEL_WMO_TARGETS=NO
+    'OTHER_SWIFT_FLAGS=$(inherited) -warnings-as-errors -j1')
+  printf 'CI native build command:'
   printf ' %q' "${BUILD_COMMAND[@]}"
   printf '\n'
+  printf '%s\n' "${BUILD_COMMAND[@]}" > "$DIST_DIR/CI-BUILD-COMMAND.txt"
+  "${BUILD_COMMAND[@]}"
+  BIN="$SCRATCH_PATH/ci-derived-data/Build/Products/Release"
+else
+  run_isolated_swift_build "${BUILD_COMMAND[@]}"
+  BIN="$(run_isolated_swift_build swift build "${SWIFT_FLAGS[@]}" --show-bin-path)"
 fi
-run_isolated_swift_build "${BUILD_COMMAND[@]}"
-BIN="$(run_isolated_swift_build swift build "${SWIFT_FLAGS[@]}" --show-bin-path)"
 STAGING="$(mktemp -d "$DIST_DIR/.imrse-package.XXXXXX")"
 trap 'rm -rf "$STAGING"' EXIT
 SIGNING_EXECUTION_RECEIPT="$STAGING/signing-execution-receipt.json"
