@@ -5,8 +5,20 @@ on:
 permissions:
   contents: read
 jobs:
+  namespace-qualification:
+    runs-on: namespace-profile-imrse
+    timeout-minutes: 3
+    steps:
+      - name: Verify Linux runner and container capability
+        shell: bash
+        run: |
+          uname -sm
+          test "$(uname -s)" = Linux
+          docker version --format '{{.Server.Os}}/{{.Server.Arch}}'
+          docker run --rm --pull=always alpine:3.21 uname -sm
   portable:
-    runs-on: ubuntu-latest
+    needs: namespace-qualification
+    runs-on: namespace-profile-imrse
     container: swift:6.2
     steps:
       - uses: actions/checkout@v4
@@ -50,7 +62,8 @@ jobs:
         env:
           IMRSE_DIST_DIR: ${{ runner.temp }}/imrse-ci-package-validation
   design:
-    runs-on: ubuntu-latest
+    needs: namespace-qualification
+    runs-on: namespace-profile-imrse
     defaults:
       run:
         working-directory: pill-kit/web
