@@ -154,10 +154,18 @@ SWIFT_FLAGS=(
   --security-path "$SECURITY_PATH"
   --only-use-versions-from-resolved-file
 )
+if [[ "$CI_PACKAGE_VALIDATION" == "1" ]]; then
+  SWIFT_FLAGS+=(--jobs 1 -Xswiftc -warnings-as-errors -Xswiftc -whole-module-optimization -Xswiftc -j1 -Xswiftc -num-threads -Xswiftc 1 --verbose)
+fi
 if [[ -n "$CI_BUILD_ARCHITECTURE" ]]; then
   SWIFT_FLAGS+=(--arch "$CI_BUILD_ARCHITECTURE")
 fi
 BUILD_COMMAND=(swift build "${SWIFT_FLAGS[@]}" --product imrse)
+if [[ "$CI_PACKAGE_VALIDATION" == "1" ]]; then
+  printf 'CI Swift build command:'
+  printf ' %q' "${BUILD_COMMAND[@]}"
+  printf '\n'
+fi
 run_isolated_swift_build "${BUILD_COMMAND[@]}"
 BIN="$(run_isolated_swift_build swift build "${SWIFT_FLAGS[@]}" --show-bin-path)"
 STAGING="$(mktemp -d "$DIST_DIR/.imrse-package.XXXXXX")"
