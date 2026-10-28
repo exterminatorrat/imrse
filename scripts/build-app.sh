@@ -158,6 +158,7 @@ BUILD_COMMAND=(swift build "${SWIFT_FLAGS[@]}" --product imrse)
 if [[ "$CI_PACKAGE_VALIDATION" == "1" ]]; then
   BUILD_COMMAND=(xcodebuild build -scheme imrse -configuration Release
     -destination "platform=macOS,arch=$CI_BUILD_ARCHITECTURE"
+    -resultBundlePath "$DIST_DIR/CI-BUILD.xcresult"
     -derivedDataPath "$SCRATCH_PATH/ci-derived-data" -clonedSourcePackagesDirPath "$SCRATCH_PATH"
     -disableAutomaticPackageResolution -onlyUsePackageVersionsFromResolvedFile -skipPackageUpdates
     -jobs 1 CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO

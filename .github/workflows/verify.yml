@@ -178,6 +178,18 @@ jobs:
           name: imrse-ci-arm64-unsigned-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/imrse-ci-candidate
           if-no-files-found: error
+      - name: Retain failed build diagnostics without a candidate
+        if: failure()
+        run: |
+          if [ -d "$IMRSE_DIST_DIR/CI-BUILD.xcresult" ]; then
+            xcrun xcresulttool get object --legacy --format json --path "$IMRSE_DIST_DIR/CI-BUILD.xcresult" > "$IMRSE_CI_CANDIDATE_DIR/failed-build-result.json"
+          fi
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: imrse-ci-failure-diagnostics-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/imrse-ci-candidate
+          if-no-files-found: warn
   design:
     needs: namespace-qualification
     runs-on: namespace-profile-imrse

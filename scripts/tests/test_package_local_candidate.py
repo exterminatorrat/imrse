@@ -1765,6 +1765,7 @@ class PackageLocalCandidateTests(unittest.TestCase):
                 self.assertIn(b"-onlyUsePackageVersionsFromResolvedFile", argv)
                 self.assertIn(b"-disableAutomaticPackageResolution", argv)
                 self.assertIn(b"-skipPackageUpdates", argv)
+                self.assertEqual(argv[argv.index(b"-resultBundlePath") + 1].decode(), str(output.resolve() / "CI-BUILD.xcresult"))
                 self.assertEqual(argv[argv.index(b"-jobs") + 1], b"1")
                 self.assertIn(b"OTHER_SWIFT_FLAGS=$(inherited) -warnings-as-errors -j1", argv)
                 self.assertIn(b"SWIFT_COMPILATION_MODE=wholemodule", argv)
