@@ -100,7 +100,7 @@ def export(args, root, commit, tree, tests):
         "host": {"os": "macOS", "architecture": "arm64", "minimumMacOS": info["LSMinimumSystemVersion"]},
         "toolchain": {"xcode": Path(args.xcode_version_log).read_text().strip(),
                       "swift": Path(args.swift_version_log).read_text().strip()},
-        "build": {"configuration": "release", "system": "swiftbuild", "jobs": 1, "warningsAsErrors": True,
+        "build": {"configuration": "release", "system": "xcode", "jobs": 1, "warningsAsErrors": True,
                   "wholeModuleOptimization": True, "eventsourceTestsExecuted": tests,
                   "buildLogSHA256": package.sha256_file(args.build_log),
                   "eventsourceTestLogSHA256": package.sha256_file(args.eventsource_test_log)},

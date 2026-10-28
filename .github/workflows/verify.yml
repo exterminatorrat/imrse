@@ -153,11 +153,16 @@ jobs:
           ./scripts/build-app.sh 2>&1 | tee "$IMRSE_CI_CANDIDATE_DIR/build.log"
           grep -F 'CI Swift build command:' "$IMRSE_CI_CANDIDATE_DIR/build.log" | grep -F -- '--jobs 1' | grep -F -- '-warnings-as-errors' | grep -F -- '-whole-module-optimization' | grep -F -- '--verbose'
           grep -E 'swiftc|swift-frontend' "$IMRSE_CI_CANDIDATE_DIR/build.log" | grep -F -- '-warnings-as-errors' | grep -F -- '-whole-module-optimization'
+          if grep -E 'builtin-SwiftDriver --.* (-suppress-warnings|-num-threads ([2-9]|[1-9][0-9]))' "$IMRSE_CI_CANDIDATE_DIR/build.log"; then
+            echo 'Compiler settings weakened the strict serial build.' >&2
+            exit 1
+          fi
           git diff --exit-code -- Package.resolved Vendor/EventSource
           test -z "$(git status --porcelain -- Package.resolved Vendor/EventSource)"
       - name: Validate and archive the CI candidate
         run: |
           set -o pipefail
+          cp "$IMRSE_DIST_DIR/CI-BUILD-PARAMETERS.json" "$IMRSE_CI_CANDIDATE_DIR/"
           python3 scripts/export-ci-candidate.py \
             --source-root . \
             --expected-commit "$IMRSE_EXPECTED_SOURCE_COMMIT" \

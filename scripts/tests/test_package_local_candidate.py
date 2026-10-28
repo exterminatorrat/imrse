@@ -1767,6 +1767,12 @@ class PackageLocalCandidateTests(unittest.TestCase):
                 self.assertIn(b"-whole-module-optimization", argv)
                 self.assertIn(b"-j1", argv)
                 self.assertIn(b"-num-threads", argv)
+                self.assertEqual(argv[argv.index(b"--build-system") + 1], b"xcode")
+                parameters = json.loads((output / "CI-BUILD-PARAMETERS.json").read_text())
+                settings = parameters["overrides"]["synthesized"]["table"]
+                self.assertEqual(settings["SWIFT_SUPPRESS_WARNINGS"], "NO")
+                self.assertEqual(settings["SWIFT_TREAT_WARNINGS_AS_ERRORS"], "YES")
+                self.assertEqual(settings["SWIFT_USE_PARALLEL_WHOLE_MODULE_OPTIMIZATION"], "NO")
                 self.assertIn(b"--verbose", argv)
                 self.assertEqual(argv[-2:], [b"--product", b"imrse"])
                 self.assertTrue(output.is_dir())

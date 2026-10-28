@@ -145,8 +145,32 @@ if [[ "${IMRSE_REQUIRE_EMPTY_APP_OUTPUT:-0}" == "1" && ( -e "$APP" || -L "$APP" 
   printf 'The required fresh app output already exists: %s\n' "$APP" >&2
   exit 1
 fi
+BUILD_SYSTEM=swiftbuild
+if [[ "$CI_PACKAGE_VALIDATION" == "1" ]]; then
+  BUILD_SYSTEM=xcode
+  CI_BUILD_PARAMETERS="$DIST_DIR/CI-BUILD-PARAMETERS.json"
+  python3 - "$CI_BUILD_PARAMETERS" "$CI_BUILD_ARCHITECTURE" <<'PY'
+import json
+import sys
+
+settings = {
+    "ARCHS": sys.argv[2],
+    "SWIFT_SUPPRESS_WARNINGS": "NO",
+    "GCC_WARN_INHIBIT_ALL_WARNINGS": "NO",
+    "SWIFT_TREAT_WARNINGS_AS_ERRORS": "YES",
+    "SWIFT_COMPILATION_MODE": "wholemodule",
+    "SWIFT_USE_PARALLEL_WHOLE_MODULE_OPTIMIZATION": "NO",
+    "SWIFT_USE_PARALLEL_WMO_TARGETS": "NO",
+    "OTHER_SWIFT_FLAGS": "$(inherited) -warnings-as-errors -whole-module-optimization -j1 -num-threads 1",
+}
+with open(sys.argv[1], "x") as output:
+    json.dump({"configurationName": "Release", "overrides": {"synthesized": {"table": settings}},
+               "activeRunDestination": {"platform": "macosx", "sdk": "macosx", "sdkVariant": None,
+               "targetArchitecture": sys.argv[2], "supportedArchitectures": [], "disableOnlyActiveArch": True}}, output)
+PY
+fi
 SWIFT_FLAGS=(
-  --build-system swiftbuild
+  --build-system "$BUILD_SYSTEM"
   --configuration "$CONFIGURATION"
   --scratch-path "$SCRATCH_PATH"
   --cache-path "$CACHE_PATH"
@@ -156,6 +180,7 @@ SWIFT_FLAGS=(
 )
 if [[ "$CI_PACKAGE_VALIDATION" == "1" ]]; then
   SWIFT_FLAGS+=(--jobs 1 -Xswiftc -warnings-as-errors -Xswiftc -whole-module-optimization -Xswiftc -j1 -Xswiftc -num-threads -Xswiftc 1 --verbose)
+  SWIFT_FLAGS+=(-Xxcbuild --buildParametersFile -Xxcbuild "$CI_BUILD_PARAMETERS")
 fi
 if [[ -n "$CI_BUILD_ARCHITECTURE" ]]; then
   SWIFT_FLAGS+=(--arch "$CI_BUILD_ARCHITECTURE")
