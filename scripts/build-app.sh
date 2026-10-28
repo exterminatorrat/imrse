@@ -193,6 +193,8 @@ done < <(
   find "$SCRATCH_PATH/checkouts" -mindepth 2 -maxdepth 2 -type f \
     \( -iname 'LICENSE' -o -iname 'LICENSE.*' -o -iname 'COPYING' -o -iname 'COPYING.*' \) -print0
 )
+cp "$ROOT/Vendor/EventSource/LICENSE.md" "$THIRD_PARTY_LICENSES/EventSource-LICENSE.md"
+cp "$ROOT/Vendor/EventSource/PROVENANCE.md" "$THIRD_PARTY_LICENSES/EventSource-PROVENANCE.md"
 if [[ -f "$SCRATCH_PATH/checkouts/mlx-swift/Source/Cmlx/mlx/LICENSE" ]]; then
   cp "$SCRATCH_PATH/checkouts/mlx-swift/Source/Cmlx/mlx/LICENSE" "$THIRD_PARTY_LICENSES/mlx-core-LICENSE"
 fi
