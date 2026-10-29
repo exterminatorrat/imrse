@@ -40,9 +40,9 @@ APPROVED_MLX_PATCH = {
         {
             "path": "Source/MLXNN/Module.swift",
             "originalSHA256": "41949db53925fc89ad79459d4ca8f16b051ae9f1470c1a385d2728626c210de6",
-            "patchedSHA256": "033f0ef3fddac02858dc9591b4ffcd8b45749cdb881641436526d867147341cc",
+            "patchedSHA256": "df2f9160fda6929ac38052da973a61a87532b0e31772bafb47f5d0ea6b1a4e3c",
             "originalSize": 61690,
-            "patchedSize": 61708,
+            "patchedSize": 61628,
             "replacements": [
                 {
                     "oldText": "if let value = value as? T {\n                return value",
@@ -51,6 +51,10 @@ APPROVED_MLX_PATCH = {
                 {
                     "oldText": "if let module = module as? T {\n                return module",
                     "newText": "if let module = (module as Any) as? T {\n                return module",
+                },
+                {
+                    "oldText": "            default:\n                fatalError(\"Unexpected leaf \\(vk) = \\(v)\")\n",
+                    "newText": "",
                 },
             ],
         },

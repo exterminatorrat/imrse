@@ -93,6 +93,7 @@ class MLXCandidateProvenanceTests(unittest.TestCase):
             "schema type": lambda value: value.update(schemaVersion=True),
             "missing getters": lambda value: value["files"].pop(),
             "getter hunk": lambda value: value["files"][1]["replacements"][0].update(newText="return value!"),
+            "exhaustive switch hunk": lambda value: value["files"][1]["replacements"][2].update(newText="return .none"),
             "getter bytes": lambda value: value["files"][1].update(patchedSHA256="0" * 64),
         }
         for name, mutate in cases.items():

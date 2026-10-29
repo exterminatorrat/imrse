@@ -15,16 +15,13 @@ from pathlib import Path, PurePosixPath
 
 
 APPROVAL_PATH = "scripts/patch-mlx-mask-fill.py"
+TRUSTED_APPROVAL_ROOT = Path(__file__).resolve().parents[1]
 MODULE_PATH = "Source/MLXNN/Module.swift"
 MODULE_CHECKOUT = ".build/checkouts/mlx-swift"
 FIXTURE_PATH = "scripts/tests/fixtures/MLXGetterCompatibility.swift"
 LOG_NAME = "mlx-getter-compatibility-tests.log"
 GENERATED_NAME = "MLXGetterCompatibility.generated.swift"
 BINARY_NAME = "mlx-getter-compatibility-tests"
-EXPECTED_ORIGINAL_SIZE = 61690
-EXPECTED_ORIGINAL_SHA256 = "41949db53925fc89ad79459d4ca8f16b051ae9f1470c1a385d2728626c210de6"
-EXPECTED_PATCHED_SIZE = 61708
-EXPECTED_PATCHED_SHA256 = "033f0ef3fddac02858dc9591b4ffcd8b45749cdb881641436526d867147341cc"
 SUCCESS_MARKER = "MLX getter compatibility checks passed."
 MATRIX_SENTINEL = "GETTER_MATRIX_PASSED"
 FILE_LIMIT = 4 * 1024 * 1024
@@ -70,43 +67,48 @@ def _read_regular(path):
         raise HarnessError("required input file is unavailable or unsafe") from error
 
 
-def _approved_patch(root):
-    helper = _safe_relative(root, APPROVAL_PATH)
+def _literal_dict(root, relative, name):
+    path = _safe_relative(root, relative)
     try:
-        tree = ast.parse(_read_regular(helper).decode("utf-8"), filename=str(helper))
+        tree = ast.parse(_read_regular(path).decode("utf-8"), filename=str(path))
     except (UnicodeDecodeError, SyntaxError) as error:
-        raise HarnessError("approved MLX patch literal is invalid") from error
+        raise HarnessError(f"{name} literal is invalid") from error
     assignments = [node.value for node in tree.body if isinstance(node, ast.Assign) and len(node.targets) == 1
-                   and isinstance(node.targets[0], ast.Name) and node.targets[0].id == "APPROVED_MLX_PATCH"]
-    _need(len(assignments) == 1, "approved MLX patch literal is missing or ambiguous")
+                   and isinstance(node.targets[0], ast.Name) and node.targets[0].id == name]
+    _need(len(assignments) == 1, f"{name} literal is missing or ambiguous")
     try:
         value = ast.literal_eval(assignments[0])
     except (ValueError, TypeError, SyntaxError) as error:
-        raise HarnessError("approved MLX patch is not literal data") from error
-    _need(isinstance(value, dict) and value.get("schemaVersion") == 1
-          and type(value.get("schemaVersion")) is int
-          and value.get("identity") == "mlx-swift" and value.get("version") == "0.31.6"
-          and value.get("revision") == "0bb916c67f4b9e5c682cbe02a42c701c93ab5021",
-          "approved MLX patch identity changed")
-    files = value.get("files")
-    _need(isinstance(files, list) and len(files) == 2 and isinstance(files[0], dict)
-          and files[0].get("path") == "Source/MLX/MLXArray+maskFill.swift",
-          "approved MLX patch file list changed")
-    spec = files[1]
-    _need(isinstance(spec, dict) and set(spec) == {"path", "originalSHA256", "patchedSHA256",
-                                                  "originalSize", "patchedSize", "replacements"}
-          and spec.get("path") == MODULE_PATH
-          and spec.get("originalSHA256") == EXPECTED_ORIGINAL_SHA256
-          and spec.get("originalSize") == EXPECTED_ORIGINAL_SIZE
-          and spec.get("patchedSHA256") == EXPECTED_PATCHED_SHA256
-          and spec.get("patchedSize") == EXPECTED_PATCHED_SIZE,
-          "approved Module.swift source identity changed")
+        raise HarnessError(f"{name} is not literal data") from error
+    _need(type(value) is dict, f"{name} must be a literal dictionary")
+    return value
+
+
+def _same_literal(left, right):
+    if type(left) is not type(right):
+        return False
+    if type(left) is dict:
+        return left.keys() == right.keys() and all(_same_literal(left[key], right[key]) for key in left)
+    if type(left) is list:
+        return len(left) == len(right) and all(_same_literal(a, b) for a, b in zip(left, right))
+    return left == right
+
+
+def _approved_patch(root):
+    trusted = _literal_dict(TRUSTED_APPROVAL_ROOT, "scripts/ci_mlx_approval.py", "MLX_PATCH")
+    value = _literal_dict(root, APPROVAL_PATH, "APPROVED_MLX_PATCH")
+    _need(_same_literal(value, trusted), "approved MLX patch does not match independent approval")
+    files = trusted.get("files")
+    specs = [item for item in files if isinstance(item, dict) and item.get("path") == MODULE_PATH] \
+        if isinstance(files, list) else []
+    _need(len(specs) == 1, "independent Module.swift approval is missing or ambiguous")
+    spec = specs[0]
     replacements = spec.get("replacements")
     expected = (("value", "__PARAMETER_GETTER__"), ("module", "__MODULE_GETTER__"))
-    _need(isinstance(replacements, list) and len(replacements) == len(expected),
-          "approved getter replacement list changed")
+    _need(isinstance(replacements, list) and len(replacements) >= len(expected),
+          "independent getter replacement list is incomplete")
     validated = []
-    for item, (name, _) in zip(replacements, expected):
+    for item, (name, marker) in zip(replacements, expected):
         _need(isinstance(item, dict) and set(item) == {"oldText", "newText"}
               and isinstance(item["oldText"], str) and isinstance(item["newText"], str),
               "approved getter replacement is invalid")
@@ -120,8 +122,8 @@ def _approved_patch(root):
               "approved getter replacement does not include the exact cast and return")
         changed = [(old, new) for old, new in zip(old_lines, new_lines) if old != new]
         _need(changed == [(old_cast, new_cast)], "approved getter replacement changes unrelated code")
-        validated.append((name, expected[len(validated)][1], "\n".join(old_lines), "\n".join(new_lines)))
-    return validated
+        validated.append((name, marker, "\n".join(old_lines), "\n".join(new_lines)))
+    return validated, spec
 
 
 def _mask_comments_and_strings(source):
@@ -270,11 +272,12 @@ def run(args):
         _need(source_root.is_dir(), "source root is not a directory")
         work_dir = _ensure_directory(args.work_dir, "work")
         _need(work_dir != output_dir, "output and work directories must be different")
-        approved = _approved_patch(source_root)
+        approved, module_spec = _approved_patch(source_root)
         module_path = _safe_relative(source_root, f"{MODULE_CHECKOUT}/{MODULE_PATH}")
         source_bytes = _read_regular(module_path)
         source_hash = _sha256(source_bytes)
-        _need(len(source_bytes) == EXPECTED_PATCHED_SIZE and source_hash == EXPECTED_PATCHED_SHA256,
+        _need(len(source_bytes) == module_spec.get("patchedSize")
+              and source_hash == module_spec.get("patchedSHA256"),
               "patched Module.swift size or SHA-256 does not match the approved source")
         source = source_bytes.decode("utf-8")
         getters = _verify_getters(source, approved)

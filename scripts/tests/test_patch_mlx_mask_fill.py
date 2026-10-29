@@ -46,10 +46,13 @@ class PatchMLXMaskFillTests(unittest.TestCase):
         self.module_relative = "Source/MLXNN/Module.swift"
         self.module_original = (b"if let value = value as? T {\n                return value\n"
                                 b"if let value = value as? T {\n        self.value = value\n"
-                                b"if let module = module as? T {\n                return module\n")
-        value_hunk, module_hunk = MODULE_APPROVAL["replacements"]
+                                b"if let module = module as? T {\n                return module\n"
+                                b"case .none:\ncase .value(.module(let module)):\ncase .value:\n"
+                                b"case .dictionary(let dictionary):\ncase .array(let array):\n"
+                                b"            default:\n                fatalError(\"Unexpected leaf \\(vk) = \\(v)\")\n")
+        module_hunks = MODULE_APPROVAL["replacements"]
         self.module_patched = self.module_original
-        for hunk in (value_hunk, module_hunk):
+        for hunk in module_hunks:
             self.module_patched = self.module_patched.replace(hunk["oldText"].encode(), hunk["newText"].encode(), 1)
         self.module_spec = dict(MODULE_APPROVAL, originalSHA256=digest(self.module_original),
                                 patchedSHA256=digest(self.module_patched), originalSize=len(self.module_original),
@@ -160,8 +163,8 @@ class PatchMLXMaskFillTests(unittest.TestCase):
             if args[1] == "--summary":
                 return b""
             if args[1] == "--numstat":
-                counts = {self.source_relative: 1, self.module_relative: 2}
-                return b"".join(f"{counts[relative]}\t{counts[relative]}\t".encode()
+                counts = {self.source_relative: (1, 1), self.module_relative: (4, 2)}
+                return b"".join(f"{counts[relative][0]}\t{counts[relative][1]}\t".encode()
                                  + relative.encode() + b"\0" for relative in changed)
         raise AssertionError((checkout, args))
 
@@ -197,9 +200,14 @@ class PatchMLXMaskFillTests(unittest.TestCase):
         self.invoke()
         self.assertEqual(self.source.read_bytes(), self.patched)
         self.assertEqual(self.source.stat().st_mode & 0o777, 0o744)
-        self.assertEqual(self.module_source.read_bytes(), self.module_patched)
-        self.assertEqual(self.module_source.read_bytes().count(b"if let value = (value as Any) as? T {"), 1)
-        self.assertIn(b"if let value = value as? T {\n        self.value = value", self.module_source.read_bytes())
+        module = self.module_source.read_bytes()
+        self.assertEqual(module, self.module_patched)
+        self.assertEqual(module.count(b"if let value = (value as Any) as? T {"), 1)
+        self.assertIn(b"if let value = value as? T {\n        self.value = value", module)
+        for case in (b"case .none:", b"case .value(.module", b"case .value:",
+                     b"case .dictionary(", b"case .array("):
+            self.assertIn(case, module)
+        self.assertNotIn(b"Unexpected leaf", module)
         self.assertEqual(self.receipt.read_bytes(), helper._json_bytes(self.approved))
         self.assertEqual(self.committed_reads, [(self.root, self.root_head, helper.EXTENSION_HELPER, "PACKAGES")])
         before_verification = self.snapshot()
