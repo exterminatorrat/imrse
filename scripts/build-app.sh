@@ -154,12 +154,33 @@ SWIFT_FLAGS=(
   --security-path "$SECURITY_PATH"
   --only-use-versions-from-resolved-file
 )
-if [[ -n "$CI_BUILD_ARCHITECTURE" ]]; then
-  SWIFT_FLAGS+=(--arch "$CI_BUILD_ARCHITECTURE")
-fi
 BUILD_COMMAND=(swift build "${SWIFT_FLAGS[@]}" --product imrse)
-run_isolated_swift_build "${BUILD_COMMAND[@]}"
-BIN="$(run_isolated_swift_build swift build "${SWIFT_FLAGS[@]}" --show-bin-path)"
+if [[ "$CI_PACKAGE_VALIDATION" == "1" ]]; then
+  BUILD_COMMAND=(xcodebuild build -scheme imrse -configuration Release
+    -destination "platform=macOS,arch=$CI_BUILD_ARCHITECTURE"
+    -resultBundlePath "$DIST_DIR/CI-BUILD.xcresult"
+    -derivedDataPath "$SCRATCH_PATH/ci-derived-data" -clonedSourcePackagesDirPath "$SCRATCH_PATH"
+    -disableAutomaticPackageResolution -onlyUsePackageVersionsFromResolvedFile -skipPackageUpdates
+    -jobs 1 CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO
+    SWIFT_TREAT_WARNINGS_AS_ERRORS=YES SUPPRESS_WARNINGS=NO SWIFT_SUPPRESS_WARNINGS=NO
+    GCC_WARN_INHIBIT_ALL_WARNINGS=NO SWIFT_COMPILATION_MODE=wholemodule
+    SWIFT_USE_PARALLEL_WHOLE_MODULE_OPTIMIZATION=NO SWIFT_USE_PARALLEL_WMO_TARGETS=NO
+    'OTHER_SWIFT_FLAGS=$(inherited) -warnings-as-errors -j1 -num-threads 1')
+  printf 'CI native build command:'
+  printf ' %q' "${BUILD_COMMAND[@]}"
+  printf '\n'
+  printf '%s\n' "${BUILD_COMMAND[@]}" > "$DIST_DIR/CI-BUILD-COMMAND.txt"
+  "${BUILD_COMMAND[@]}"
+  python3 "$ROOT/scripts/patch-argument-parser.py" --source-root "$SOURCE_ROOT" \
+    --receipt "$IMRSE_CI_CANDIDATE_DIR/argument-parser-compatibility.json" --verify-only
+  python3 "$ROOT/scripts/patch-mlx-mask-fill.py" --source-root "$SOURCE_ROOT" \
+    --extension-receipt "$IMRSE_CI_CANDIDATE_DIR/extension-enablement.json" \
+    --receipt "$IMRSE_CI_CANDIDATE_DIR/mlx-mask-fill-compatibility.json" --verify-only
+  BIN="$SCRATCH_PATH/ci-derived-data/Build/Products/Release"
+else
+  run_isolated_swift_build "${BUILD_COMMAND[@]}"
+  BIN="$(run_isolated_swift_build swift build "${SWIFT_FLAGS[@]}" --show-bin-path)"
+fi
 STAGING="$(mktemp -d "$DIST_DIR/.imrse-package.XXXXXX")"
 trap 'rm -rf "$STAGING"' EXIT
 SIGNING_EXECUTION_RECEIPT="$STAGING/signing-execution-receipt.json"
@@ -193,6 +214,12 @@ done < <(
   find "$SCRATCH_PATH/checkouts" -mindepth 2 -maxdepth 2 -type f \
     \( -iname 'LICENSE' -o -iname 'LICENSE.*' -o -iname 'COPYING' -o -iname 'COPYING.*' \) -print0
 )
+cp -f "$ROOT/Vendor/EventSource/LICENSE.md" "$THIRD_PARTY_LICENSES/EventSource-LICENSE.md"
+cp "$ROOT/Vendor/EventSource/PROVENANCE.md" "$THIRD_PARTY_LICENSES/EventSource-PROVENANCE.md"
+if [[ "$CI_PACKAGE_VALIDATION" == "1" ]]; then
+  cp "$IMRSE_CI_CANDIDATE_DIR/argument-parser-compatibility.json" "$THIRD_PARTY_LICENSES/swift-argument-parser-COMPATIBILITY.json"
+  cp "$IMRSE_CI_CANDIDATE_DIR/mlx-mask-fill-compatibility.json" "$THIRD_PARTY_LICENSES/mlx-swift-COMPATIBILITY.json"
+fi
 if [[ -f "$SCRATCH_PATH/checkouts/mlx-swift/Source/Cmlx/mlx/LICENSE" ]]; then
   cp "$SCRATCH_PATH/checkouts/mlx-swift/Source/Cmlx/mlx/LICENSE" "$THIRD_PARTY_LICENSES/mlx-core-LICENSE"
 fi

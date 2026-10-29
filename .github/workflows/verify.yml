@@ -2,11 +2,24 @@ name: Verify
 on:
   push:
   pull_request:
+  workflow_dispatch:
 permissions:
   contents: read
 jobs:
+  namespace-qualification:
+    runs-on: namespace-profile-imrse
+    timeout-minutes: 3
+    steps:
+      - name: Verify Linux runner and container capability
+        shell: bash
+        run: |
+          uname -sm
+          test "$(uname -s)" = Linux
+          docker version --format '{{.Server.Os}}/{{.Server.Arch}}'
+          docker run --rm --pull=always alpine:3.21 uname -sm
   portable:
-    runs-on: ubuntu-latest
+    needs: namespace-qualification
+    runs-on: namespace-profile-imrse
     container: swift:6.2
     steps:
       - uses: actions/checkout@v4
@@ -31,26 +44,322 @@ jobs:
     env:
       DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
       IMRSE_CI_PACKAGE_VALIDATION: "1"
+      IMRSE_EXPECTED_SOURCE_COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
       PYTHONDONTWRITEBYTECODE: "1"
     steps:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
-      - run: xcodebuild -version && swift --version
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Require arm64 and record the toolchain
+        run: |
+          set -euo pipefail
+          uname -sm
+          test "$(uname -s)" = Darwin
+          test "$(uname -m)" = arm64
+          IMRSE_CI_CANDIDATE_DIR="$RUNNER_TEMP/imrse-ci-candidate"
+          IMRSE_DIST_DIR="$RUNNER_TEMP/imrse-ci-package-validation"
+          echo "IMRSE_CI_CANDIDATE_DIR=$IMRSE_CI_CANDIDATE_DIR" >> "$GITHUB_ENV"
+          echo "IMRSE_DIST_DIR=$IMRSE_DIST_DIR" >> "$GITHUB_ENV"
+          test ! -e "$IMRSE_CI_CANDIDATE_DIR"
+          mkdir -p "$IMRSE_CI_CANDIDATE_DIR"
+          xcodebuild -version | tee "$IMRSE_CI_CANDIDATE_DIR/xcode-version.txt"
+          swift --version | tee "$IMRSE_CI_CANDIDATE_DIR/swift-version.txt"
       - run: bash -n scripts/build-app.sh
       - run: plutil -lint Resources/Info.plist
-      - run: python3 -m unittest discover -s scripts/tests -p 'test_package_local_candidate.py' -v
+      - run: python3 -m unittest discover -s scripts/tests -p 'test_*.py' -v
       - name: Ensure Metal compiler is available
         run: |
           if ! xcrun --sdk macosx metal --version; then
             xcodebuild -downloadComponent MetalToolchain
           fi
           xcrun --sdk macosx metal --version
-      - run: ./scripts/build-app.sh
+      - name: Run vendored EventSource suite without optional traits
+        run: |
+          set -o pipefail
+          swift test --package-path Vendor/EventSource --jobs 1 -Xswiftc -warnings-as-errors 2>&1 | tee "$IMRSE_CI_CANDIDATE_DIR/eventsource-tests.log"
+          git diff --exit-code -- Package.resolved Vendor/EventSource
+          test -z "$(git status --porcelain -- Package.resolved Vendor/EventSource)"
+      - name: Resolve the root graph from the frozen lock
+        run: |
+          set -o pipefail
+          swift package resolve --only-use-versions-from-resolved-file 2>&1 | tee "$IMRSE_CI_CANDIDATE_DIR/root-resolve.log"
+          git diff --exit-code -- Package.resolved
+          swift package show-dependencies --only-use-versions-from-resolved-file --format json > "$IMRSE_CI_CANDIDATE_DIR/root-effective-dependency-graph.json" 2> "$IMRSE_CI_CANDIDATE_DIR/root-show-dependencies.log"
+          git diff --exit-code -- Package.resolved
+          python3 - <<'PY'
+          import json
+          import os
+          import subprocess
+          from pathlib import Path
+
+          root = Path.cwd().resolve()
+          graph = json.loads((Path(os.environ["IMRSE_CI_CANDIDATE_DIR"]) / "root-effective-dependency-graph.json").read_text())
+          pins = {item["identity"].lower(): item["state"] for item in json.loads(Path("Package.resolved").read_text())["pins"]}
+          nodes, pending = [], [graph]
+          while pending:
+              node = pending.pop()
+              if not isinstance(node, dict) or not isinstance(node.get("dependencies", []), list):
+                  raise SystemExit("invalid root dependency graph")
+              nodes.append(node)
+              pending.extend(node.get("dependencies", []))
+          vendor = (root / "Vendor/EventSource").resolve()
+          checkouts = (root / ".build/checkouts").resolve()
+          found_vendor = False
+          for node in nodes:
+              raw = node.get("path")
+              path = Path(raw) if isinstance(raw, str) else None
+              resolved = (path if path and path.is_absolute() else root / path).resolve() if path else None
+              identity = str(node.get("identity") or (path.name if path else node.get("name", ""))).lower()
+              names = {"".join(c for c in value.lower() if c.isalnum()) for value in (identity, str(node.get("name", "")))}
+              if resolved == vendor or identity.replace("-", "") == "eventsource" or "eventsource" in names:
+                  found_vendor = True
+                  if resolved != vendor:
+                      raise SystemExit("EventSource must resolve to Vendor/EventSource, not its historical remote pin")
+              if any(name == "asynchttpclient" or name.startswith("swiftnio") or
+                     name in {"niocore", "nioposix", "niohttp1", "niohttp2", "niossl", "niotls"} for name in names):
+                  raise SystemExit("root graph activates optional EventSource AsyncHTTPClient/NIO dependencies")
+              if resolved and resolved != vendor and resolved.is_relative_to(checkouts):
+                  if identity not in pins or resolved != checkouts / identity:
+                      raise SystemExit(f"invalid locked checkout: {identity}")
+                  revision = subprocess.check_output(["git", "-C", str(resolved), "rev-parse", "HEAD"], text=True).strip()
+                  if revision != pins[identity].get("revision"):
+                      raise SystemExit(f"checkout revision differs from Package.resolved: {identity}")
+                  version = pins[identity].get("version")
+                  if version and node.get("version") and version != node["version"]:
+                      raise SystemExit(f"checkout version differs from Package.resolved: {identity}")
+              elif resolved not in {root, root / "pill-kit/native", vendor}:
+                  raise SystemExit(f"remote dependency is outside .build/checkouts: {identity}")
+          if not found_vendor:
+              raise SystemExit("root graph omits local EventSource")
+          log = (Path(os.environ["IMRSE_CI_CANDIDATE_DIR"]) / "eventsource-tests.log").read_text().splitlines()
+          tests = {
+              "callbackDeliveryAndOrder": "URLSession.AsyncBytes delivers public callbacks in order",
+              "closeFromFirstMessageStopsStream": "Closing in the first message callback stops later data and reconnection",
+              "closeFromOpenPreventsLateCallbacks": "Closing from open before byte consumption suppresses late callbacks",
+          }
+          for function, title in tests.items():
+              events = [line for line in log if "Test " in line and (function in line or title in line)]
+              if len(events) != 2 or sum("started" in line for line in events) != 1 or sum("passed" in line for line in events) != 1:
+                  raise SystemExit(f"EventSource test did not run and pass exactly once: {function}")
+          status = subprocess.check_output(["git", "status", "--porcelain", "--", "Package.resolved", "Vendor/EventSource"], text=True)
+          if status.strip():
+              raise SystemExit("Package.resolved or vendored EventSource changed during validation")
+          print("Verified locked root graph and all three ConcreteTransportTests.")
+          PY
+      - name: Apply the exact two-annotation CI-only compatibility exception
+        run: |
+          python3 scripts/patch-argument-parser.py --source-root . --receipt "$IMRSE_CI_CANDIDATE_DIR/argument-parser-compatibility.json"
+      - name: Verify legacy ArgumentParser behavior with strict warnings
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          import os
+          import shutil
+          from pathlib import Path
+
+          fixture = Path(os.environ["RUNNER_TEMP"]) / "argument-parser-compatibility"
+          fixture.mkdir()
+          source = fixture / "Sources/ArgumentParserCompatibility"
+          source.mkdir(parents=True)
+          shutil.copyfile("scripts/tests/fixtures/ArgumentParserCompatibility.swift", source / "main.swift")
+          dependency = json.dumps(str(Path(".build/checkouts/swift-argument-parser").resolve(strict=True)))
+          (fixture / "Package.swift").write_text(
+              '// swift-tools-version: 6.0\nimport PackageDescription\n'
+              'let package = Package(name: "ArgumentParserCompatibility", dependencies: ['
+              f'.package(path: {dependency})], targets: ['
+              '.executableTarget(name: "ArgumentParserCompatibility", dependencies: ['
+              '.product(name: "ArgumentParser", package: "swift-argument-parser")])])\n')
+          PY
+          swift run --package-path "$RUNNER_TEMP/argument-parser-compatibility" \
+            --scratch-path "$RUNNER_TEMP/argument-parser-compatibility-build" \
+            --configuration release --jobs 1 -Xswiftc -warnings-as-errors \
+            ArgumentParserCompatibility 2>&1 | tee "$IMRSE_CI_CANDIDATE_DIR/argument-parser-compatibility-tests.log"
+          swift run --package-path .build/checkouts/swift-argument-parser \
+            --scratch-path "$RUNNER_TEMP/argument-parser-math-build" \
+            --configuration release --jobs 1 -Xswiftc -warnings-as-errors \
+            math --experimental-dump-help \
+            > "$IMRSE_CI_CANDIDATE_DIR/argument-parser-dump-help.json" \
+            2>> "$IMRSE_CI_CANDIDATE_DIR/argument-parser-compatibility-tests.log"
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          output = Path(os.environ["IMRSE_CI_CANDIDATE_DIR"])
+          actual = json.loads((output / "argument-parser-dump-help.json").read_text())
+          snapshot = Path(".build/checkouts/swift-argument-parser/Tests/ArgumentParserUnitTests/Snapshots/testMathDumpHelp().json")
+          expected = json.loads(snapshot.read_text())
+          if actual != expected or '"customDeprecated"' not in snapshot.read_text():
+              raise SystemExit("ArgumentParser dump-help differs from its pinned upstream snapshot")
+          with (output / "argument-parser-compatibility-tests.log").open("a") as log:
+              log.write("ArgumentParser compatibility checks passed.\n")
+          PY
+          python3 scripts/patch-argument-parser.py --source-root . --receipt "$IMRSE_CI_CANDIDATE_DIR/argument-parser-compatibility.json" --verify-only
+      - name: Enable only the two reviewed revision-bound extensions
+        run: |
+          python3 scripts/enable-ci-extensions.py --source-root . --receipt "$IMRSE_CI_CANDIDATE_DIR/extension-enablement.json"
+      - name: Apply the exact MLX compatibility repairs after pristine extension validation
+        run: |
+          python3 scripts/patch-mlx-mask-fill.py --source-root . \
+            --extension-receipt "$IMRSE_CI_CANDIDATE_DIR/extension-enablement.json" \
+            --receipt "$IMRSE_CI_CANDIDATE_DIR/mlx-mask-fill-compatibility.json"
+      - name: Verify the exact patched MLX guard control flow without Metal
+        run: |
+          set -euo pipefail
+          ulimit -c 0
+          swiftc -parse-as-library -swift-version 6 -warnings-as-errors \
+            .build/checkouts/mlx-swift/Source/MLX/MLXArray+maskFill.swift \
+            scripts/tests/fixtures/MLXMaskFillCompatibility.swift \
+            -o "$RUNNER_TEMP/mlx-mask-fill-control-flow-tests" \
+            2>&1 | tee "$IMRSE_CI_CANDIDATE_DIR/mlx-mask-fill-control-flow-tests.log"
+          python3 - <<'PY'
+          import os
+          import subprocess
+          from pathlib import Path
+
+          executable = str(Path(os.environ["RUNNER_TEMP"]) / "mlx-mask-fill-control-flow-tests")
+          valid = subprocess.run([executable], capture_output=True)
+          invalid = subprocess.run([executable, "invalid"], capture_output=True)
+          with (Path(os.environ["IMRSE_CI_CANDIDATE_DIR"]) / "mlx-mask-fill-control-flow-tests.log").open("ab") as log:
+              log.write(valid.stdout + valid.stderr + invalid.stdout + invalid.stderr)
+              if (valid.returncode != 0 or invalid.returncode == 0
+                      or b"maskFill requires a floating-point dtype, got int32" not in invalid.stderr
+                      or b"unexpected greatestFiniteMagnitudeArray" in invalid.stderr):
+                  raise SystemExit("MLX mask-fill control-flow fixture failed")
+              log.write(b"\nMLX mask-fill control-flow checks passed.\n")
+          PY
+          python3 scripts/patch-mlx-mask-fill.py --source-root . \
+            --extension-receipt "$IMRSE_CI_CANDIDATE_DIR/extension-enablement.json" \
+            --receipt "$IMRSE_CI_CANDIDATE_DIR/mlx-mask-fill-compatibility.json" --verify-only
+      - name: Verify exact MLX getters preserve nested optional values and traps
+        run: |
+          set -euo pipefail
+          ulimit -c 0
+          python3 scripts/test-mlx-getters.py --source-root . \
+            --output-dir "$IMRSE_CI_CANDIDATE_DIR" --work-dir "$RUNNER_TEMP/mlx-getters"
+          python3 scripts/patch-mlx-mask-fill.py --source-root . \
+            --extension-receipt "$IMRSE_CI_CANDIDATE_DIR/extension-enablement.json" \
+            --receipt "$IMRSE_CI_CANDIDATE_DIR/mlx-mask-fill-compatibility.json" --verify-only
+      - name: Build the unsigned CI app with one scheduler job and WMO frontend thread
+        id: ci-build
+        run: |
+          set -o pipefail
+          ./scripts/build-app.sh 2>&1 | tee "$IMRSE_CI_CANDIDATE_DIR/build.log"
+          grep -F 'CI native build command:' "$IMRSE_CI_CANDIDATE_DIR/build.log" | grep -F -- '-jobs 1' | grep -F -- 'SWIFT_TREAT_WARNINGS_AS_ERRORS=YES' | grep -F -- 'SWIFT_COMPILATION_MODE=wholemodule'
+          grep -E 'swiftc|swift-frontend' "$IMRSE_CI_CANDIDATE_DIR/build.log" | grep -F -- '-warnings-as-errors' | grep -F -- '-whole-module-optimization'
+          grep -F 'builtin-SwiftDriver --' "$IMRSE_CI_CANDIDATE_DIR/build.log" | grep -F -- '-num-threads 1'
+          if grep -E 'builtin-SwiftDriver --.* (-suppress-warnings|-num-threads ([2-9]|[1-9][0-9]))' "$IMRSE_CI_CANDIDATE_DIR/build.log"; then
+            echo 'Compiler settings weakened warning validation or frontend thread count.' >&2
+            exit 1
+          fi
+          git diff --exit-code -- Package.resolved Vendor/EventSource
+          test -z "$(git status --porcelain -- Package.resolved Vendor/EventSource)"
+          python3 - <<'PY'
+          import ast
+          import hashlib
+          import json
+          import os
+          import shlex
+          import shutil
+          from pathlib import Path
+
+          root = Path.cwd().resolve()
+          output = Path(os.environ["IMRSE_CI_CANDIDATE_DIR"])
+          build = (output / "build.log").read_text().splitlines()
+          for helper, constant, targets, proof_name in (
+              ("patch-argument-parser.py", "APPROVED_PATCH", ("ArgumentParser", "ArgumentParserToolInfo"), "argument-parser-build-inputs.json"),
+              ("patch-mlx-mask-fill.py", "APPROVED_MLX_PATCH", ("MLX", "MLXNN"), "mlx-mask-fill-build-inputs.json"),
+          ):
+              tree = ast.parse((Path("scripts") / helper).read_text())
+              approval = next(ast.literal_eval(node.value) for node in tree.body if isinstance(node, ast.Assign)
+                              and any(isinstance(target, ast.Name) and target.id == constant for target in node.targets))
+              records = []
+              if len(targets) != len(approval["files"]):
+                  raise SystemExit("compiler proof does not cover every approved source")
+              for target, spec in zip(targets, approval["files"]):
+                  filelist = root / f".build/ci-derived-data/Build/Intermediates.noindex/{approval['identity']}.build/Release/{target}.build/Objects-normal/arm64/{target}.SwiftFileList"
+                  commands = [shlex.split(line.split("builtin-SwiftDriver --", 1)[1]) for line in build
+                              if "builtin-SwiftDriver --" in line and f"-module-name {target} " in line]
+                  if not any("@" + str(filelist) in command for command in commands):
+                      raise SystemExit(f"compiler did not consume the expected {target} input list")
+                  inputs = [Path(value).resolve(strict=True) for line in filelist.read_text().splitlines()
+                            for value in shlex.split(line)]
+                  source = root / ".build/checkouts" / approval["identity"] / spec["path"]
+                  digest = hashlib.sha256(source.read_bytes()).hexdigest()
+                  if inputs.count(source) != 1 or digest != spec["patchedSHA256"]:
+                      raise SystemExit(f"compiler input does not match patched {target} source")
+                  shutil.copyfile(filelist, output / filelist.name)
+                  records.append({"target": target, "source": spec["path"], "sourceSHA256": digest,
+                                  "inputFileList": filelist.name,
+                                  "inputFileListSHA256": hashlib.sha256(filelist.read_bytes()).hexdigest()})
+              (output / proof_name).write_text(json.dumps(records, indent=2, sort_keys=True) + "\n")
+          PY
+      - name: Retain and check the RealModule output contract
+        if: always()
         env:
-          IMRSE_DIST_DIR: ${{ runner.temp }}/imrse-ci-package-validation
+          IMRSE_CI_BUILD_OUTCOME: ${{ steps.ci-build.outcome }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import shutil
+          from pathlib import Path
+
+          if "IMRSE_CI_CANDIDATE_DIR" not in os.environ:
+              raise SystemExit(0)
+          output = Path(os.environ["IMRSE_CI_CANDIDATE_DIR"])
+          objects = Path(".build/ci-derived-data/Build/Intermediates.noindex/swift-numerics.build/Release/RealModule.build/Objects-normal/arm64")
+          if output.is_dir() and objects.is_dir():
+              for name in ("RealModule-OutputFileMap.json", "RealModule.LinkFileList"):
+                  if (objects / name).is_file():
+                      shutil.copyfile(objects / name, output / name)
+              link_list = objects / "RealModule.LinkFileList"
+              listed = link_list.read_text().splitlines() if link_list.is_file() else []
+              present = {item: Path(item).is_file() and Path(item).stat().st_size > 0 for item in listed}
+              (output / "RealModule-object-inventory.json").write_text(json.dumps(present, indent=2, sort_keys=True) + "\n")
+              if os.environ["IMRSE_CI_BUILD_OUTCOME"] == "success" and (not present or not all(present.values()) or not (objects / "AlgebraicField.o").is_file()):
+                  raise SystemExit("RealModule compile/link object contract is incomplete")
+          elif os.environ["IMRSE_CI_BUILD_OUTCOME"] == "success":
+              raise SystemExit("RealModule compile/link object evidence is missing")
+          PY
+      - name: Validate and archive the CI candidate
+        run: |
+          set -o pipefail
+          cp "$IMRSE_DIST_DIR/CI-BUILD-COMMAND.txt" "$IMRSE_CI_CANDIDATE_DIR/"
+          python3 scripts/export-ci-candidate.py \
+            --source-root . \
+            --expected-commit "$IMRSE_EXPECTED_SOURCE_COMMIT" \
+            --graph-json "$IMRSE_CI_CANDIDATE_DIR/root-effective-dependency-graph.json" \
+            --eventsource-test-log "$IMRSE_CI_CANDIDATE_DIR/eventsource-tests.log" \
+            --argument-parser-patch-receipt "$IMRSE_CI_CANDIDATE_DIR/argument-parser-compatibility.json" \
+            --mlx-mask-fill-patch-receipt "$IMRSE_CI_CANDIDATE_DIR/mlx-mask-fill-compatibility.json" \
+            --app "$IMRSE_DIST_DIR/imrse.app" \
+            --output-dir "$IMRSE_CI_CANDIDATE_DIR" \
+            --swift-version-log "$IMRSE_CI_CANDIDATE_DIR/swift-version.txt" \
+            --xcode-version-log "$IMRSE_CI_CANDIDATE_DIR/xcode-version.txt" \
+            --build-log "$IMRSE_CI_CANDIDATE_DIR/build.log" 2>&1 | tee "$IMRSE_CI_CANDIDATE_DIR/export.log"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: imrse-ci-arm64-unsigned-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/imrse-ci-candidate
+          if-no-files-found: error
+      - name: Retain failed build diagnostics without a candidate
+        if: failure()
+        run: |
+          if [ -d "$IMRSE_DIST_DIR/CI-BUILD.xcresult" ]; then
+            xcrun xcresulttool get object --legacy --format json --path "$IMRSE_DIST_DIR/CI-BUILD.xcresult" > "$IMRSE_CI_CANDIDATE_DIR/failed-build-result.json"
+          fi
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: imrse-ci-failure-diagnostics-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/imrse-ci-candidate
+          if-no-files-found: warn
   design:
-    runs-on: ubuntu-latest
+    needs: namespace-qualification
+    runs-on: namespace-profile-imrse
     defaults:
       run:
         working-directory: pill-kit/web
