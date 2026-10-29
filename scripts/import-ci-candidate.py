@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-import ast
 import hashlib
 import json
 import os
@@ -15,6 +14,7 @@ import zipfile
 from pathlib import Path
 
 import package_local_candidate as pkg
+import ci_approval
 load = pkg.strict_json_loads
 A, M, R, MAX, COUNT = (
     "imrse-ci-candidate-arm64.tar.gz",
@@ -23,6 +23,14 @@ A, M, R, MAX, COUNT = (
     2 * 1024**3,
     100_000,
 )
+LICENSES = "Contents/Resources/ThirdPartyLicenses/"
+P, PR, PL = (
+    "argument-parser-compatibility.json",
+    LICENSES + "swift-argument-parser-COMPATIBILITY.json",
+    LICENSES + "swift-argument-parser-LICENSE.txt",
+)
+PT, PD, BI = "argument-parser-compatibility-tests.log", "argument-parser-dump-help.json", "argument-parser-build-inputs.json"
+approved_patch = ci_approval.approved_patch
 
 
 class CandidateError(Exception):
@@ -107,17 +115,7 @@ def git_id(root):
 
 
 def approved_extensions(root, commit):
-    source = subprocess.check_output(
-        ["git", "-C", str(root), "show", f"{commit}:scripts/enable-ci-extensions.py"], text=True
-    )
-    tree = ast.parse(source)
-    assignment = next(
-        node
-        for node in tree.body
-        if isinstance(node, ast.Assign)
-        and any(isinstance(target, ast.Name) and target.id == "PACKAGES" for target in node.targets)
-    )
-    packages = ast.literal_eval(assignment.value)
+    packages = ci_approval.committed_literal(root, commit, "scripts/enable-ci-extensions.py", "PACKAGES")
     need(tuple(packages) == ("mlx-swift", "mlx-swift-lm"))
     records = []
     for identity, spec in packages.items():
@@ -135,7 +133,7 @@ def approved_extensions(root, commit):
     return {"schemaVersion": 1, "packages": records}
 
 
-def verify(m, expected, root, z, files):
+def verify(m, expected, root, z, files, patch_raw):
     need(git_id(root) == expected[:2])
     need(isinstance(m, dict) and m.get("schemaVersion") == 1)
     source, ci, build, dependencies = (m[key] for key in ("source", "ci", "build", "dependencies"))
@@ -145,12 +143,18 @@ def verify(m, expected, root, z, files):
         and ci["runID"] == expected[2]
         and ci["runAttempt"] == expected[3]
     )
-    for digest, name in (
-        (build.get("buildLogSHA256"), "build.log"),
+    for digest, name in ((build.get("buildLogSHA256"), "build.log"),
         (build.get("eventsourceTestLogSHA256"), "eventsource-tests.log"),
         (dependencies.get("rootGraphSHA256"), "root-effective-dependency-graph.json"),
-    ):
+        (dependencies.get("argumentParserCompatibilityTestLogSHA256"), PT),
+        (dependencies.get("argumentParserDumpHelpSHA256"), PD),
+        (dependencies.get("argumentParserBuildInputsSHA256"), BI)):
         need(sha_ok(digest) and name in files and read_zip(z, files[name]) == digest)
+    patch = approved_patch(root, expected[0])
+    canonical = (json.dumps(patch, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n").encode()
+    need(patch_raw == canonical and load(patch_raw) == patch
+         and dependencies.get("argumentParserPatchReceiptSHA256") == sha(patch_raw))
+    license_hash = patch["license"]["sha256"]
     extension = load(read_zip(z, files["extension-enablement.json"], 16 * 1024**2, raw=True))
     need(
         isinstance(extension, dict)
@@ -185,13 +189,34 @@ def verify(m, expected, root, z, files):
                 for index in range(1, len(parts))
             )
         )
-    receipt_path = "Contents/Resources/" + R
-    need(inventory[receipt_path]["type"] == "file" and inventory[receipt_path]["size"] <= 16 * 1024**2)
+    receipt = inventory.get("Contents/Resources/" + R)
+    patch_entry, license_entry = inventory.get(PR), inventory.get(PL)
+    need(receipt and receipt["type"] == "file" and receipt["size"] <= 16 * 1024**2)
+    need(patch_entry and patch_entry["type"] == "file" and patch_entry["size"] == len(patch_raw) and patch_entry["sha256"] == sha(patch_raw))
+    need(license_entry and license_entry["type"] == "file" and license_entry["sha256"] == license_hash)
     tree_hash = sha(json.dumps(entries, sort_keys=True, separators=(",", ":")).encode())
     need(tree_hash == app["bundleTreeSHA256"])
     archive = m["archive"]
     need(archive["file"] == A and archive["format"] == "tar.gz; Unix modes preserved" and sha_ok(archive["sha256"]))
     return inventory, tree_hash, archive["sha256"], dependencies["packageResolvedSHA256"]
+
+
+def preflight(inner, patch_raw):
+    inner.seek(0)
+    count, total, found = 0, 0, False
+    with tarfile.open(fileobj=inner, mode="r|gz") as tar:
+        for member in tar:
+            count, total = count + 1, total + member.size
+            need(count <= COUNT and 0 <= member.size and total <= MAX)
+            if member.name == "imrse.app/" + PR:
+                need(not found and member.isfile() and member.size == len(patch_raw))
+                source = tar.extractfile(member)
+                need(source is not None)
+                with source:
+                    need(source.read(len(patch_raw) + 1) == patch_raw)
+                found = True
+    need(found)
+    inner.seek(0)
 
 
 def extract_file(tar, member, path, mode):
@@ -247,22 +272,15 @@ def check_receipt(raw, inventory, expected):
     source, product = receipt.get("source"), receipt.get("product")
     executable = inventory.get("Contents/MacOS/imrse")
     architectures = product.get("machoArchitectures") if isinstance(product, dict) else None
-    claims = {
-        "schemaVersion": 1,
-        "validationMode": "unsigned-ci-package-validation-only",
-        "distributionEligible": False,
-        "codeSigningPerformed": False,
-        "releaseBuildProvenanceCreated": False,
-        "signingCertificateSHA1": None,
-        "signatureReceipt": None,
-    }
     need(
         isinstance(source, dict)
-        and set(source) == {"commitSHA", "treeSHA"}
         and source == {"commitSHA": expected[0], "treeSHA": expected[1]}
         and executable
         and executable["type"] == "file"
-        and all(receipt.get(key) == value for key, value in claims.items())
+        and all(receipt.get(key) == value for key, value in (("schemaVersion", 1),
+            ("validationMode", "unsigned-ci-package-validation-only"), ("distributionEligible", False),
+            ("codeSigningPerformed", False), ("releaseBuildProvenanceCreated", False),
+            ("signingCertificateSHA1", None), ("signatureReceipt", None)))
         and isinstance(product, dict)
         and product.get("executableSHA256") == executable["sha256"]
         and product.get("bundleIdentifier") == "org.imrse.app"
@@ -301,6 +319,7 @@ def import_candidate(zip_path, expected_sha, source_root, commit, tree, run_id, 
         required = (
             A,
             M,
+            P,
             "build.log",
             "eventsource-tests.log",
             "root-effective-dependency-graph.json",
@@ -308,10 +327,11 @@ def import_candidate(zip_path, expected_sha, source_root, commit, tree, run_id, 
         )
         need(all(name in files and not files[name].is_dir() for name in required))
         raw = read_zip(z, files[M], 16 * 1024**2, raw=True)
-        inventory, tree_hash, archive_hash, lock_hash = verify(load(raw), e, root, z, files)
+        patch_raw = read_zip(z, files[P], 1024 * 1024, raw=True)
+        inventory, tree_hash, archive_hash, lock_hash = verify(load(raw), e, root, z, files, patch_raw)
         with tempfile.TemporaryFile() as inner:
             need(read_zip(z, files[A], MAX, inner) == archive_hash)
-            inner.seek(0)
+            preflight(inner, patch_raw)
             with tarfile.open(fileobj=inner, mode="r|gz") as tar:
                 evidence = {
                     "schemaVersion": 1,
@@ -338,8 +358,10 @@ def import_candidate(zip_path, expected_sha, source_root, commit, tree, run_id, 
                         pkg.sha256_file(root / "Package.resolved") == lock_hash
                         and git_id(root) == e[:2]
                     )
-                    (out / M).write_bytes(raw)
-                    os.chmod(out / M, 0o600)
+                    for name, data in ((M, raw), (P, patch_raw)):
+                        proof = out / name
+                        proof.write_bytes(data)
+                        os.chmod(proof, 0o600)
                     receipt_path = out / "candidate-import-receipt.json"
                     receipt_path.write_text(json.dumps(evidence, sort_keys=True, indent=2) + "\n")
                     os.chmod(receipt_path, 0o600)

@@ -3,11 +3,14 @@ import argparse
 import json
 import os
 import platform
+import stat
 import sys
 import tarfile
 from pathlib import Path
 
 import package_local_candidate as package
+import ci_approval
+approved_patch = ci_approval.approved_patch
 
 TESTS = {
     "callbackDeliveryAndOrder": "URLSession.AsyncBytes delivers public callbacks in order",
@@ -15,6 +18,13 @@ TESTS = {
     "closeFromOpenPreventsLateCallbacks": "Closing from open before byte consumption suppresses late callbacks",
 }
 RECEIPT = "CI-PACKAGE-VALIDATION.json"
+PATCH_SIDECAR = "argument-parser-compatibility.json"
+PATCH_APP_RECEIPT = "ThirdPartyLicenses/swift-argument-parser-COMPATIBILITY.json"
+PATCH_APP_LICENSE = "ThirdPartyLicenses/swift-argument-parser-LICENSE.txt"
+PATCH_TEST_LOG = "argument-parser-compatibility-tests.log"
+PATCH_DUMP = "argument-parser-dump-help.json"
+PATCH_BUILD_INPUTS = "argument-parser-build-inputs.json"
+MAX_PATCH_PROOF = 1024 * 1024
 
 
 class ExportError(Exception):
@@ -28,6 +38,76 @@ def need(value, message):
 
 def git(root, *args):
     return package.run(["git", "-C", str(root), *args]).strip()
+
+
+def read_regular(path, limit=MAX_PATCH_PROOF):
+    try:
+        path = Path(path)
+        info = path.lstat()
+        need(stat.S_ISREG(info.st_mode) and info.st_size <= limit, "proof is not a bounded regular file")
+        return path.read_bytes()
+    except OSError as error:
+        raise ExportError("required patch proof is missing") from error
+
+
+def approved_license(root, patch):
+    license_record = patch.get("license")
+    need(isinstance(license_record, dict), "patch approval lacks its upstream license")
+    path, digest = license_record.get("path"), license_record.get("sha256")
+    need(
+        isinstance(path, str)
+        and path
+        and not path.startswith("/")
+        and "\\" not in path
+        and all(part not in {"", ".", ".."} for part in path.split("/"))
+        and isinstance(digest, str)
+        and len(digest) == 64
+        and all(char in "0123456789abcdef" for char in digest),
+        "patch approval has an invalid upstream license pin",
+    )
+    source = root / ".build/checkouts/swift-argument-parser"
+    for index, part in enumerate(path.split("/")):
+        source /= part
+        info = source.lstat()
+        need(
+            not stat.S_ISLNK(info.st_mode)
+            and (stat.S_ISREG(info.st_mode) if index == len(path.split("/")) - 1 else stat.S_ISDIR(info.st_mode)),
+            "upstream license path is not a regular source file",
+        )
+    need(source.resolve(strict=True) == source, "upstream license path traverses a symlink")
+    data = read_regular(source)
+    need(package.sha256_file(source) == digest, "upstream swift-argument-parser license differs from approval")
+    return data
+
+
+def patch_proof(args, root, bundle, commit):
+    patch = approved_patch(root, commit)
+    external = read_regular(args.argument_parser_patch_receipt)
+    try:
+        canonical = (json.dumps(patch, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
+        need(external == canonical and package.strict_json_loads(external) == patch,
+             "compatibility receipt differs from canonical committed approval")
+    except (ValueError, TypeError) as error:
+        raise ExportError("compatibility receipt is not strict JSON") from error
+    original_license = approved_license(root, patch)
+    resources = bundle / "Contents/Resources"
+    need(read_regular(resources / PATCH_APP_RECEIPT) == external,
+         "embedded compatibility receipt differs from external proof")
+    need(read_regular(resources / PATCH_APP_LICENSE) == original_license,
+         "embedded swift-argument-parser license differs from upstream")
+    return patch, external
+
+
+def qualification_logs(output):
+    log = output / PATCH_TEST_LOG
+    dump = output / PATCH_DUMP
+    build_inputs = output / PATCH_BUILD_INPUTS
+    text = read_regular(log, 16 * 1024**2).decode("utf-8")
+    need(text.splitlines() and text.splitlines()[-1] == "ArgumentParser compatibility checks passed.",
+         "ArgumentParser compatibility log lacks its completion marker")
+    read_regular(dump, 16 * 1024**2)
+    read_regular(build_inputs, 16 * 1024**2)
+    return tuple(package.sha256_file(path) for path in (log, dump, build_inputs))
 
 
 def source(root, expected):
@@ -85,8 +165,15 @@ def export(args, root, commit, tree, tests):
     output = Path(args.output_dir).expanduser().resolve(strict=True)
     need(not output.is_relative_to(root), "candidate output must be outside source checkout")
     bundle, info = app_bundle(args.app, root, commit, tree)
+    patch_bytes = patch_proof(args, root, bundle, commit)[1]
+    patch_test_hash, patch_dump_hash, patch_build_hash = qualification_logs(output)
     archive, manifest = output / "imrse-ci-candidate-arm64.tar.gz", output / "candidate-provenance.json"
+    patch_sidecar = output / PATCH_SIDECAR
     need(not archive.exists() and not manifest.exists(), "candidate output already exists")
+    if os.path.lexists(patch_sidecar):
+        need(read_regular(patch_sidecar) == patch_bytes, "output compatibility sidecar differs from proof")
+    else:
+        patch_sidecar.write_bytes(patch_bytes)
     inventory = package.bundle_tree_entries(bundle)
     with tarfile.open(archive, "x:gz") as tar:
         tar.add(bundle, arcname="imrse.app", recursive=True)
@@ -106,7 +193,11 @@ def export(args, root, commit, tree, tests):
                   "eventsourceTestLogSHA256": package.sha256_file(args.eventsource_test_log)},
         "dependencies": {"rootGraphSHA256": package.sha256_file(args.graph_json),
                           "packageResolvedSHA256": package.sha256_file(root / "Package.resolved"),
-                          "vendorEventSourceTreeSHA256": package.bundle_tree_sha256(root / "Vendor/EventSource")},
+                          "vendorEventSourceTreeSHA256": package.bundle_tree_sha256(root / "Vendor/EventSource"),
+                          "argumentParserPatchReceiptSHA256": package.sha256_file(patch_sidecar),
+                          "argumentParserCompatibilityTestLogSHA256": patch_test_hash,
+                          "argumentParserDumpHelpSHA256": patch_dump_hash,
+                          "argumentParserBuildInputsSHA256": patch_build_hash},
         "app": {"bundleTreeSHA256": package.bundle_tree_sha256(bundle), "inventory": inventory},
         "archive": {"file": archive.name, "sha256": archive_hash, "format": "tar.gz; Unix modes preserved"},
     }
@@ -122,6 +213,7 @@ def main(argv=None):
     parser.add_argument("--expected-commit", required=True)
     parser.add_argument("--graph-json", required=True, type=Path)
     parser.add_argument("--eventsource-test-log", required=True, type=Path)
+    parser.add_argument("--argument-parser-patch-receipt", required=True, type=Path)
     for name in ("app", "output-dir", "swift-version-log", "xcode-version-log", "build-log"):
         parser.add_argument(f"--{name}", type=Path)
     args = parser.parse_args(argv)

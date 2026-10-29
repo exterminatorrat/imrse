@@ -147,6 +147,56 @@ jobs:
               raise SystemExit("Package.resolved or vendored EventSource changed during validation")
           print("Verified locked root graph and all three ConcreteTransportTests.")
           PY
+      - name: Apply the exact two-annotation CI-only compatibility exception
+        run: |
+          python3 scripts/patch-argument-parser.py --source-root . --receipt "$IMRSE_CI_CANDIDATE_DIR/argument-parser-compatibility.json"
+      - name: Verify legacy ArgumentParser behavior with strict warnings
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          import os
+          import shutil
+          from pathlib import Path
+
+          fixture = Path(os.environ["RUNNER_TEMP"]) / "argument-parser-compatibility"
+          fixture.mkdir()
+          source = fixture / "Sources/ArgumentParserCompatibility"
+          source.mkdir(parents=True)
+          shutil.copyfile("scripts/tests/fixtures/ArgumentParserCompatibility.swift", source / "main.swift")
+          dependency = json.dumps(str(Path(".build/checkouts/swift-argument-parser").resolve(strict=True)))
+          (fixture / "Package.swift").write_text(
+              '// swift-tools-version: 6.0\nimport PackageDescription\n'
+              'let package = Package(name: "ArgumentParserCompatibility", dependencies: ['
+              f'.package(path: {dependency})], targets: ['
+              '.executableTarget(name: "ArgumentParserCompatibility", dependencies: ['
+              '.product(name: "ArgumentParser", package: "swift-argument-parser")])])\n')
+          PY
+          swift run --package-path "$RUNNER_TEMP/argument-parser-compatibility" \
+            --scratch-path "$RUNNER_TEMP/argument-parser-compatibility-build" \
+            --configuration release --jobs 1 -Xswiftc -warnings-as-errors \
+            ArgumentParserCompatibility 2>&1 | tee "$IMRSE_CI_CANDIDATE_DIR/argument-parser-compatibility-tests.log"
+          swift run --package-path .build/checkouts/swift-argument-parser \
+            --scratch-path "$RUNNER_TEMP/argument-parser-math-build" \
+            --configuration release --jobs 1 -Xswiftc -warnings-as-errors \
+            math --experimental-dump-help \
+            > "$IMRSE_CI_CANDIDATE_DIR/argument-parser-dump-help.json" \
+            2>> "$IMRSE_CI_CANDIDATE_DIR/argument-parser-compatibility-tests.log"
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          output = Path(os.environ["IMRSE_CI_CANDIDATE_DIR"])
+          actual = json.loads((output / "argument-parser-dump-help.json").read_text())
+          snapshot = Path(".build/checkouts/swift-argument-parser/Tests/ArgumentParserUnitTests/Snapshots/testMathDumpHelp().json")
+          expected = json.loads(snapshot.read_text())
+          if actual != expected or '"customDeprecated"' not in snapshot.read_text():
+              raise SystemExit("ArgumentParser dump-help differs from its pinned upstream snapshot")
+          with (output / "argument-parser-compatibility-tests.log").open("a") as log:
+              log.write("ArgumentParser compatibility checks passed.\n")
+          PY
+          python3 scripts/patch-argument-parser.py --source-root . --receipt "$IMRSE_CI_CANDIDATE_DIR/argument-parser-compatibility.json" --verify-only
       - name: Enable only the two reviewed revision-bound extensions
         run: |
           python3 scripts/enable-ci-extensions.py --source-root . --receipt "$IMRSE_CI_CANDIDATE_DIR/extension-enablement.json"
@@ -164,6 +214,40 @@ jobs:
           fi
           git diff --exit-code -- Package.resolved Vendor/EventSource
           test -z "$(git status --porcelain -- Package.resolved Vendor/EventSource)"
+          python3 - <<'PY'
+          import ast
+          import hashlib
+          import json
+          import os
+          import shlex
+          import shutil
+          from pathlib import Path
+
+          root = Path.cwd().resolve()
+          output = Path(os.environ["IMRSE_CI_CANDIDATE_DIR"])
+          tree = ast.parse(Path("scripts/patch-argument-parser.py").read_text())
+          approval = next(ast.literal_eval(node.value) for node in tree.body if isinstance(node, ast.Assign)
+                          and any(isinstance(target, ast.Name) and target.id == "APPROVED_PATCH" for target in node.targets))
+          build = (output / "build.log").read_text().splitlines()
+          records = []
+          for target, spec in zip(("ArgumentParser", "ArgumentParserToolInfo"), approval["files"]):
+              filelist = root / f".build/ci-derived-data/Build/Intermediates.noindex/swift-argument-parser.build/Release/{target}.build/Objects-normal/arm64/{target}.SwiftFileList"
+              commands = [shlex.split(line.split("builtin-SwiftDriver --", 1)[1]) for line in build
+                          if "builtin-SwiftDriver --" in line and f"-module-name {target} " in line]
+              if not any("@" + str(filelist) in command for command in commands):
+                  raise SystemExit(f"compiler did not consume the expected {target} input list")
+              inputs = [Path(value).resolve(strict=True) for line in filelist.read_text().splitlines()
+                        for value in shlex.split(line)]
+              source = root / ".build/checkouts/swift-argument-parser" / spec["path"]
+              digest = hashlib.sha256(source.read_bytes()).hexdigest()
+              if inputs.count(source) != 1 or digest != spec["patchedSHA256"]:
+                  raise SystemExit(f"compiler input does not match patched {target} source")
+              shutil.copyfile(filelist, output / filelist.name)
+              records.append({"target": target, "source": spec["path"], "sourceSHA256": digest,
+                              "inputFileList": filelist.name,
+                              "inputFileListSHA256": hashlib.sha256(filelist.read_bytes()).hexdigest()})
+          (output / "argument-parser-build-inputs.json").write_text(json.dumps(records, indent=2, sort_keys=True) + "\n")
+          PY
       - name: Retain and check the RealModule output contract
         if: always()
         env:
@@ -201,6 +285,7 @@ jobs:
             --expected-commit "$IMRSE_EXPECTED_SOURCE_COMMIT" \
             --graph-json "$IMRSE_CI_CANDIDATE_DIR/root-effective-dependency-graph.json" \
             --eventsource-test-log "$IMRSE_CI_CANDIDATE_DIR/eventsource-tests.log" \
+            --argument-parser-patch-receipt "$IMRSE_CI_CANDIDATE_DIR/argument-parser-compatibility.json" \
             --app "$IMRSE_DIST_DIR/imrse.app" \
             --output-dir "$IMRSE_CI_CANDIDATE_DIR" \
             --swift-version-log "$IMRSE_CI_CANDIDATE_DIR/swift-version.txt" \

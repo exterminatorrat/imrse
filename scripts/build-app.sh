@@ -171,6 +171,8 @@ if [[ "$CI_PACKAGE_VALIDATION" == "1" ]]; then
   printf '\n'
   printf '%s\n' "${BUILD_COMMAND[@]}" > "$DIST_DIR/CI-BUILD-COMMAND.txt"
   "${BUILD_COMMAND[@]}"
+  python3 "$ROOT/scripts/patch-argument-parser.py" --source-root "$SOURCE_ROOT" \
+    --receipt "$IMRSE_CI_CANDIDATE_DIR/argument-parser-compatibility.json" --verify-only
   BIN="$SCRATCH_PATH/ci-derived-data/Build/Products/Release"
 else
   run_isolated_swift_build "${BUILD_COMMAND[@]}"
@@ -211,6 +213,9 @@ done < <(
 )
 cp -f "$ROOT/Vendor/EventSource/LICENSE.md" "$THIRD_PARTY_LICENSES/EventSource-LICENSE.md"
 cp "$ROOT/Vendor/EventSource/PROVENANCE.md" "$THIRD_PARTY_LICENSES/EventSource-PROVENANCE.md"
+if [[ "$CI_PACKAGE_VALIDATION" == "1" ]]; then
+  cp "$IMRSE_CI_CANDIDATE_DIR/argument-parser-compatibility.json" "$THIRD_PARTY_LICENSES/swift-argument-parser-COMPATIBILITY.json"
+fi
 if [[ -f "$SCRATCH_PATH/checkouts/mlx-swift/Source/Cmlx/mlx/LICENSE" ]]; then
   cp "$SCRATCH_PATH/checkouts/mlx-swift/Source/Cmlx/mlx/LICENSE" "$THIRD_PARTY_LICENSES/mlx-core-LICENSE"
 fi
