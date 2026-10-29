@@ -156,7 +156,8 @@ jobs:
           ./scripts/build-app.sh 2>&1 | tee "$IMRSE_CI_CANDIDATE_DIR/build.log"
           grep -F 'CI native build command:' "$IMRSE_CI_CANDIDATE_DIR/build.log" | grep -F -- '-jobs 1' | grep -F -- 'SWIFT_TREAT_WARNINGS_AS_ERRORS=YES' | grep -F -- 'SWIFT_COMPILATION_MODE=wholemodule'
           grep -E 'swiftc|swift-frontend' "$IMRSE_CI_CANDIDATE_DIR/build.log" | grep -F -- '-warnings-as-errors' | grep -F -- '-whole-module-optimization'
-          if grep -E 'builtin-SwiftDriver --.* (-suppress-warnings|-num-threads ([2-9]|[1-9][0-9]))' "$IMRSE_CI_CANDIDATE_DIR/build.log"; then
+          grep -F 'builtin-SwiftDriver --' "$IMRSE_CI_CANDIDATE_DIR/build.log" | grep -F -- '-num-threads 1'
+          if grep -E 'builtin-SwiftDriver --.* (-suppress-warnings|-num-threads ([2-9]|[1-9][0-9])|-j[2-9]|-j[1-9][0-9])' "$IMRSE_CI_CANDIDATE_DIR/build.log"; then
             echo 'Compiler settings weakened the strict serial build.' >&2
             exit 1
           fi

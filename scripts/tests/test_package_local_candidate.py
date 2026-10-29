@@ -1769,6 +1769,7 @@ class PackageLocalCandidateTests(unittest.TestCase):
                 self.assertEqual(argv[argv.index(b"-jobs") + 1], b"1")
                 self.assertIn(b"OTHER_SWIFT_FLAGS=$(inherited) -warnings-as-errors -j1", argv)
                 self.assertIn(b"SWIFT_COMPILATION_MODE=wholemodule", argv)
+                self.assertIn(b"SWIFT_WHOLE_MODULE_OPTIMIZATION=YES", argv)
                 self.assertIn(b"SWIFT_SUPPRESS_WARNINGS=NO", argv)
                 self.assertIn(b"SWIFT_TREAT_WARNINGS_AS_ERRORS=YES", argv)
                 self.assertIn(b"SWIFT_USE_PARALLEL_WHOLE_MODULE_OPTIMIZATION=NO", argv)
