@@ -163,9 +163,9 @@ if [[ "$CI_PACKAGE_VALIDATION" == "1" ]]; then
     -disableAutomaticPackageResolution -onlyUsePackageVersionsFromResolvedFile -skipPackageUpdates
     -jobs 1 CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO
     SWIFT_TREAT_WARNINGS_AS_ERRORS=YES SUPPRESS_WARNINGS=NO SWIFT_SUPPRESS_WARNINGS=NO
-    GCC_WARN_INHIBIT_ALL_WARNINGS=NO SWIFT_COMPILATION_MODE=wholemodule SWIFT_WHOLE_MODULE_OPTIMIZATION=YES
+    GCC_WARN_INHIBIT_ALL_WARNINGS=NO SWIFT_COMPILATION_MODE=wholemodule
     SWIFT_USE_PARALLEL_WHOLE_MODULE_OPTIMIZATION=NO SWIFT_USE_PARALLEL_WMO_TARGETS=NO
-    'OTHER_SWIFT_FLAGS=$(inherited) -warnings-as-errors -j1')
+    'OTHER_SWIFT_FLAGS=$(inherited) -warnings-as-errors -j1 -num-threads 1')
   printf 'CI native build command:'
   printf ' %q' "${BUILD_COMMAND[@]}"
   printf '\n'

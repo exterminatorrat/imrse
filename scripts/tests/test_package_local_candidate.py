@@ -7,6 +7,7 @@ import plistlib
 import subprocess
 import sys
 import tempfile
+import textwrap
 import unittest
 import zipfile
 from pathlib import Path
@@ -1767,9 +1768,8 @@ class PackageLocalCandidateTests(unittest.TestCase):
                 self.assertIn(b"-skipPackageUpdates", argv)
                 self.assertEqual(argv[argv.index(b"-resultBundlePath") + 1].decode(), str(output.resolve() / "CI-BUILD.xcresult"))
                 self.assertEqual(argv[argv.index(b"-jobs") + 1], b"1")
-                self.assertIn(b"OTHER_SWIFT_FLAGS=$(inherited) -warnings-as-errors -j1", argv)
+                self.assertIn(b"OTHER_SWIFT_FLAGS=$(inherited) -warnings-as-errors -j1 -num-threads 1", argv)
                 self.assertIn(b"SWIFT_COMPILATION_MODE=wholemodule", argv)
-                self.assertIn(b"SWIFT_WHOLE_MODULE_OPTIMIZATION=YES", argv)
                 self.assertIn(b"SWIFT_SUPPRESS_WARNINGS=NO", argv)
                 self.assertIn(b"SWIFT_TREAT_WARNINGS_AS_ERRORS=YES", argv)
                 self.assertIn(b"SWIFT_USE_PARALLEL_WHOLE_MODULE_OPTIMIZATION=NO", argv)
@@ -1822,6 +1822,34 @@ class PackageLocalCandidateTests(unittest.TestCase):
         self.assertNotIn("actions/create-release", package_job)
         self.assertNotIn("gh release", package_job)
         self.assertNotIn("continue-on-error", package_job)
+
+    def test_ci_realmodule_output_contract_checks_actual_objects(self):
+        workflow = (ROOT / ".github/workflows/verify.yml").read_text()
+        step = workflow.partition("      - name: Retain and check the RealModule output contract\n")[2]
+        script = step.partition("          python3 - <<'PY'\n")[2].partition("          PY\n")[0]
+        script = textwrap.dedent(script)
+        self.assertIn("AlgebraicField.o", script)
+        with tempfile.TemporaryDirectory() as temp:
+            base = Path(temp)
+            objects = base / ".build/ci-derived-data/Build/Intermediates.noindex/swift-numerics.build/Release/RealModule.build/Objects-normal/arm64"
+            objects.mkdir(parents=True)
+            output = base / "evidence"
+            output.mkdir()
+            object_file = objects / "AlgebraicField.o"
+            (objects / "RealModule.LinkFileList").write_text(str(object_file) + "\n")
+            (objects / "RealModule-OutputFileMap.json").write_text("{}")
+            environment = {**os.environ, "IMRSE_CI_CANDIDATE_DIR": str(output), "IMRSE_CI_BUILD_OUTCOME": "success"}
+            def invoke():
+                return subprocess.run([sys.executable, "-c", script], cwd=base, env=environment, capture_output=True, text=True)
+            result = invoke()
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("object contract is incomplete", result.stderr)
+            object_file.write_bytes(b"fixture-object")
+            self.assertEqual(invoke().returncode, 0)
+            self.assertTrue(all(json.loads((output / "RealModule-object-inventory.json").read_text()).values()))
+            object_file.unlink()
+            environment["IMRSE_CI_BUILD_OUTCOME"] = "failure"
+            self.assertEqual(invoke().returncode, 0)
 
     def test_ci_python_bytecode_suppression_keeps_fresh_source_clone_clean(self):
         self.assertEqual(
