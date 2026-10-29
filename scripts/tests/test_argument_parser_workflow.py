@@ -5,6 +5,7 @@ import tempfile
 import textwrap
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 
@@ -29,6 +30,8 @@ class ArgumentParserWorkflowTests(unittest.TestCase):
             "Apply the exact two-annotation CI-only compatibility exception",
             "Verify legacy ArgumentParser behavior with strict warnings",
             "Enable only the two reviewed revision-bound extensions",
+            "Apply the exact MLX guard repair after pristine extension validation",
+            "Verify the exact patched MLX guard control flow without Metal",
             "Build the unsigned CI app with one scheduler job and WMO frontend thread",
         )]
         self.assertEqual(positions, sorted(positions))
@@ -104,22 +107,24 @@ class ArgumentParserWorkflowTests(unittest.TestCase):
                 base = Path(temporary).resolve()
                 output = base / "output"
                 output.mkdir()
-                sources, commands = [], []
-                for target in ("ArgumentParser", "ArgumentParserToolInfo"):
+                sources, commands = {"swift-argument-parser": [], "mlx-swift": []}, []
+                for identity, target in (("swift-argument-parser", "ArgumentParser"),
+                                         ("swift-argument-parser", "ArgumentParserToolInfo"), ("mlx-swift", "MLX")):
                     relative = f"Sources/{target}/source with spaces.swift"
-                    source = base / ".build/checkouts/swift-argument-parser" / relative
+                    source = base / ".build/checkouts" / identity / relative
                     source.parent.mkdir(parents=True)
                     source.write_bytes(b"patched fixture")
-                    sources.append({"path": relative, "patchedSHA256": hashlib.sha256(source.read_bytes()).hexdigest()})
-                    filelist = base / f".build/ci-derived-data/Build/Intermediates.noindex/swift-argument-parser.build/Release/{target}.build/Objects-normal/arm64/{target}.SwiftFileList"
+                    sources[identity].append({"path": relative, "patchedSHA256": hashlib.sha256(source.read_bytes()).hexdigest()})
+                    filelist = base / f".build/ci-derived-data/Build/Intermediates.noindex/{identity}.build/Release/{target}.build/Objects-normal/arm64/{target}.SwiftFileList"
                     filelist.parent.mkdir(parents=True)
                     filelist.write_text(json.dumps(str(source)) + "\n")
                     commands.append(f'builtin-SwiftDriver -- swiftc -module-name {target} @{filelist}')
                     if wrong_bytes:
                         source.write_bytes(b"unexpected source")
-                helper = base / "scripts/patch-argument-parser.py"
-                helper.parent.mkdir()
-                helper.write_text("APPROVED_PATCH = " + repr({"files": sources}))
+                (base / "scripts").mkdir()
+                for helper, constant, identity in (("patch-argument-parser.py", "APPROVED_PATCH", "swift-argument-parser"),
+                                                   ("patch-mlx-mask-fill.py", "APPROVED_MLX_PATCH", "mlx-swift")):
+                    (base / "scripts" / helper).write_text(constant + " = " + repr({"identity": identity, "files": sources[identity]}))
                 (output / "build.log").write_text("\n".join(commands[1:] if missing_command else commands))
                 previous = Path.cwd()
                 try:
@@ -136,6 +141,33 @@ class ArgumentParserWorkflowTests(unittest.TestCase):
                 self.assertEqual(proof.exists(), not (missing_command or wrong_bytes))
                 if proof.exists():
                     self.assertEqual(len(json.loads(proof.read_text())), 2)
+                    self.assertEqual(len(json.loads((output / "mlx-mask-fill-build-inputs.json").read_text())), 1)
+
+    def test_mlx_control_flow_marker_requires_valid_and_expected_fatal_paths(self):
+        workflow = (ROOT / ".github/workflows/verify.yml").read_text()
+        step = workflow.split("- name: Verify the exact patched MLX guard control flow without Metal\n", 1)[1].split(
+            "      - name:", 1)[0]
+        self.assertIn("swiftc -parse-as-library -swift-version 6 -warnings-as-errors", step)
+        self.assertIn(".build/checkouts/mlx-swift/Source/MLX/MLXArray+maskFill.swift", step)
+        program = textwrap.dedent(step.split("python3 - <<'PY'\n", 1)[1].split("          PY\n", 1)[0])
+        expected_error = b"maskFill requires a floating-point dtype, got int32"
+        for valid_code, invalid_code, stderr in ((0, -5, expected_error), (1, -5, expected_error),
+                                                  (0, 0, expected_error), (0, -5, b"wrong fatal branch"),
+                                                  (0, -5, expected_error + b"unexpected greatestFiniteMagnitudeArray")):
+            with self.subTest(valid_code=valid_code, invalid_code=invalid_code, stderr=stderr), tempfile.TemporaryDirectory() as temporary:
+                output = Path(temporary)
+                accepted = valid_code == 0 and invalid_code != 0 and stderr == expected_error
+                results = (SimpleNamespace(returncode=valid_code, stdout=b"", stderr=b""),
+                           SimpleNamespace(returncode=invalid_code, stdout=b"", stderr=stderr))
+                with patch.dict(os.environ, RUNNER_TEMP=str(output), IMRSE_CI_CANDIDATE_DIR=str(output)), patch(
+                    "subprocess.run", side_effect=results):
+                    if accepted:
+                        exec(program, {})
+                    else:
+                        with self.assertRaisesRegex(SystemExit, "control-flow fixture failed"):
+                            exec(program, {})
+                log = (output / "mlx-mask-fill-control-flow-tests.log").read_text()
+                self.assertEqual(log.endswith("MLX mask-fill control-flow checks passed.\n"), accepted)
 
 
 if __name__ == "__main__":

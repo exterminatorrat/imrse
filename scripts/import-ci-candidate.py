@@ -30,7 +30,12 @@ P, PR, PL = (
     LICENSES + "swift-argument-parser-LICENSE.txt",
 )
 PT, PD, BI = "argument-parser-compatibility-tests.log", "argument-parser-dump-help.json", "argument-parser-build-inputs.json"
+MLX_SIDECAR = "mlx-mask-fill-compatibility.json"
+MLX_CONTROL_FLOW_LOG = "mlx-mask-fill-control-flow-tests.log"
+MLX_BUILD_INPUTS = "mlx-mask-fill-build-inputs.json"
 approved_patch = ci_approval.approved_patch
+approved_mlx_patch = ci_approval.approved_mlx_patch
+approved_extensions = ci_approval.approved_extensions
 
 
 class CandidateError(Exception):
@@ -114,26 +119,7 @@ def git_id(root):
     )
 
 
-def approved_extensions(root, commit):
-    packages = ci_approval.committed_literal(root, commit, "scripts/enable-ci-extensions.py", "PACKAGES")
-    need(tuple(packages) == ("mlx-swift", "mlx-swift-lm"))
-    records = []
-    for identity, spec in packages.items():
-        entry = {"fingerprint": spec["revision"], "packageIdentity": identity, "targetName": spec["target"]}
-        records.append(
-            {
-                "identity": identity,
-                "url": spec["url"],
-                "version": spec["version"],
-                "revision": spec["revision"],
-                "sourceSHA256": spec["sources"],
-                "registryEntry": entry,
-            }
-        )
-    return {"schemaVersion": 1, "packages": records}
-
-
-def verify(m, expected, root, z, files, patch_raw):
+def verify(m, expected, root, z, files, patch_raw, mlx_raw):
     need(git_id(root) == expected[:2])
     need(isinstance(m, dict) and m.get("schemaVersion") == 1)
     source, ci, build, dependencies = (m[key] for key in ("source", "ci", "build", "dependencies"))
@@ -150,11 +136,17 @@ def verify(m, expected, root, z, files, patch_raw):
         (dependencies.get("argumentParserDumpHelpSHA256"), PD),
         (dependencies.get("argumentParserBuildInputsSHA256"), BI)):
         need(sha_ok(digest) and name in files and read_zip(z, files[name]) == digest)
+    for digest, name in (
+        (dependencies.get("mlxMaskFillControlFlowTestLogSHA256"), MLX_CONTROL_FLOW_LOG),
+        (dependencies.get("mlxMaskFillBuildInputsSHA256"), MLX_BUILD_INPUTS)):
+        need(sha_ok(digest) and name in files and files[name].file_size > 0
+             and read_zip(z, files[name], 16 * 1024**2) == digest)
     patch = approved_patch(root, expected[0])
     canonical = (json.dumps(patch, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n").encode()
     need(patch_raw == canonical and load(patch_raw) == patch
          and dependencies.get("argumentParserPatchReceiptSHA256") == sha(patch_raw))
     license_hash = patch["license"]["sha256"]
+    mlx_patch = approved_mlx_patch(root, expected[0])
     extension = load(read_zip(z, files["extension-enablement.json"], 16 * 1024**2, raw=True))
     need(
         isinstance(extension, dict)
@@ -194,29 +186,15 @@ def verify(m, expected, root, z, files, patch_raw):
     need(receipt and receipt["type"] == "file" and receipt["size"] <= 16 * 1024**2)
     need(patch_entry and patch_entry["type"] == "file" and patch_entry["size"] == len(patch_raw) and patch_entry["sha256"] == sha(patch_raw))
     need(license_entry and license_entry["type"] == "file" and license_entry["sha256"] == license_hash)
+    try:
+        mlx_license_hash = ci_approval.validate_mlx_receipt(mlx_patch, mlx_raw, dependencies, inventory)
+    except (ValueError, TypeError, KeyError):
+        need(False)
     tree_hash = sha(json.dumps(entries, sort_keys=True, separators=(",", ":")).encode())
     need(tree_hash == app["bundleTreeSHA256"])
     archive = m["archive"]
     need(archive["file"] == A and archive["format"] == "tar.gz; Unix modes preserved" and sha_ok(archive["sha256"]))
-    return inventory, tree_hash, archive["sha256"], dependencies["packageResolvedSHA256"]
-
-
-def preflight(inner, patch_raw):
-    inner.seek(0)
-    count, total, found = 0, 0, False
-    with tarfile.open(fileobj=inner, mode="r|gz") as tar:
-        for member in tar:
-            count, total = count + 1, total + member.size
-            need(count <= COUNT and 0 <= member.size and total <= MAX)
-            if member.name == "imrse.app/" + PR:
-                need(not found and member.isfile() and member.size == len(patch_raw))
-                source = tar.extractfile(member)
-                need(source is not None)
-                with source:
-                    need(source.read(len(patch_raw) + 1) == patch_raw)
-                found = True
-    need(found)
-    inner.seek(0)
+    return inventory, tree_hash, archive["sha256"], dependencies["packageResolvedSHA256"], mlx_license_hash
 
 
 def extract_file(tar, member, path, mode):
@@ -320,6 +298,7 @@ def import_candidate(zip_path, expected_sha, source_root, commit, tree, run_id, 
             A,
             M,
             P,
+            MLX_SIDECAR,
             "build.log",
             "eventsource-tests.log",
             "root-effective-dependency-graph.json",
@@ -328,10 +307,16 @@ def import_candidate(zip_path, expected_sha, source_root, commit, tree, run_id, 
         need(all(name in files and not files[name].is_dir() for name in required))
         raw = read_zip(z, files[M], 16 * 1024**2, raw=True)
         patch_raw = read_zip(z, files[P], 1024 * 1024, raw=True)
-        inventory, tree_hash, archive_hash, lock_hash = verify(load(raw), e, root, z, files, patch_raw)
+        mlx_raw = read_zip(z, files[MLX_SIDECAR], 1024 * 1024, raw=True)
+        inventory, tree_hash, archive_hash, lock_hash, mlx_license_hash = verify(
+            load(raw), e, root, z, files, patch_raw, mlx_raw
+        )
         with tempfile.TemporaryFile() as inner:
             need(read_zip(z, files[A], MAX, inner) == archive_hash)
-            preflight(inner, patch_raw)
+            try:
+                ci_approval.preflight_candidate_archive(inner, patch_raw, mlx_raw, mlx_license_hash, COUNT, MAX)
+            except (OSError, ValueError, tarfile.TarError):
+                need(False)
             with tarfile.open(fileobj=inner, mode="r|gz") as tar:
                 evidence = {
                     "schemaVersion": 1,
@@ -358,7 +343,7 @@ def import_candidate(zip_path, expected_sha, source_root, commit, tree, run_id, 
                         pkg.sha256_file(root / "Package.resolved") == lock_hash
                         and git_id(root) == e[:2]
                     )
-                    for name, data in ((M, raw), (P, patch_raw)):
+                    for name, data in ((M, raw), (P, patch_raw), (MLX_SIDECAR, mlx_raw)):
                         proof = out / name
                         proof.write_bytes(data)
                         os.chmod(proof, 0o600)

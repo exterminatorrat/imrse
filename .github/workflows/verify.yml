@@ -200,6 +200,39 @@ jobs:
       - name: Enable only the two reviewed revision-bound extensions
         run: |
           python3 scripts/enable-ci-extensions.py --source-root . --receipt "$IMRSE_CI_CANDIDATE_DIR/extension-enablement.json"
+      - name: Apply the exact MLX guard repair after pristine extension validation
+        run: |
+          python3 scripts/patch-mlx-mask-fill.py --source-root . \
+            --extension-receipt "$IMRSE_CI_CANDIDATE_DIR/extension-enablement.json" \
+            --receipt "$IMRSE_CI_CANDIDATE_DIR/mlx-mask-fill-compatibility.json"
+      - name: Verify the exact patched MLX guard control flow without Metal
+        run: |
+          set -euo pipefail
+          ulimit -c 0
+          swiftc -parse-as-library -swift-version 6 -warnings-as-errors \
+            .build/checkouts/mlx-swift/Source/MLX/MLXArray+maskFill.swift \
+            scripts/tests/fixtures/MLXMaskFillCompatibility.swift \
+            -o "$RUNNER_TEMP/mlx-mask-fill-control-flow-tests" \
+            2>&1 | tee "$IMRSE_CI_CANDIDATE_DIR/mlx-mask-fill-control-flow-tests.log"
+          python3 - <<'PY'
+          import os
+          import subprocess
+          from pathlib import Path
+
+          executable = str(Path(os.environ["RUNNER_TEMP"]) / "mlx-mask-fill-control-flow-tests")
+          valid = subprocess.run([executable], capture_output=True)
+          invalid = subprocess.run([executable, "invalid"], capture_output=True)
+          with (Path(os.environ["IMRSE_CI_CANDIDATE_DIR"]) / "mlx-mask-fill-control-flow-tests.log").open("ab") as log:
+              log.write(valid.stdout + valid.stderr + invalid.stdout + invalid.stderr)
+              if (valid.returncode != 0 or invalid.returncode == 0
+                      or b"maskFill requires a floating-point dtype, got int32" not in invalid.stderr
+                      or b"unexpected greatestFiniteMagnitudeArray" in invalid.stderr):
+                  raise SystemExit("MLX mask-fill control-flow fixture failed")
+              log.write(b"\nMLX mask-fill control-flow checks passed.\n")
+          PY
+          python3 scripts/patch-mlx-mask-fill.py --source-root . \
+            --extension-receipt "$IMRSE_CI_CANDIDATE_DIR/extension-enablement.json" \
+            --receipt "$IMRSE_CI_CANDIDATE_DIR/mlx-mask-fill-compatibility.json" --verify-only
       - name: Build the unsigned CI app with one scheduler job and WMO frontend thread
         id: ci-build
         run: |
@@ -225,28 +258,32 @@ jobs:
 
           root = Path.cwd().resolve()
           output = Path(os.environ["IMRSE_CI_CANDIDATE_DIR"])
-          tree = ast.parse(Path("scripts/patch-argument-parser.py").read_text())
-          approval = next(ast.literal_eval(node.value) for node in tree.body if isinstance(node, ast.Assign)
-                          and any(isinstance(target, ast.Name) and target.id == "APPROVED_PATCH" for target in node.targets))
           build = (output / "build.log").read_text().splitlines()
-          records = []
-          for target, spec in zip(("ArgumentParser", "ArgumentParserToolInfo"), approval["files"]):
-              filelist = root / f".build/ci-derived-data/Build/Intermediates.noindex/swift-argument-parser.build/Release/{target}.build/Objects-normal/arm64/{target}.SwiftFileList"
-              commands = [shlex.split(line.split("builtin-SwiftDriver --", 1)[1]) for line in build
-                          if "builtin-SwiftDriver --" in line and f"-module-name {target} " in line]
-              if not any("@" + str(filelist) in command for command in commands):
-                  raise SystemExit(f"compiler did not consume the expected {target} input list")
-              inputs = [Path(value).resolve(strict=True) for line in filelist.read_text().splitlines()
-                        for value in shlex.split(line)]
-              source = root / ".build/checkouts/swift-argument-parser" / spec["path"]
-              digest = hashlib.sha256(source.read_bytes()).hexdigest()
-              if inputs.count(source) != 1 or digest != spec["patchedSHA256"]:
-                  raise SystemExit(f"compiler input does not match patched {target} source")
-              shutil.copyfile(filelist, output / filelist.name)
-              records.append({"target": target, "source": spec["path"], "sourceSHA256": digest,
-                              "inputFileList": filelist.name,
-                              "inputFileListSHA256": hashlib.sha256(filelist.read_bytes()).hexdigest()})
-          (output / "argument-parser-build-inputs.json").write_text(json.dumps(records, indent=2, sort_keys=True) + "\n")
+          for helper, constant, targets, proof_name in (
+              ("patch-argument-parser.py", "APPROVED_PATCH", ("ArgumentParser", "ArgumentParserToolInfo"), "argument-parser-build-inputs.json"),
+              ("patch-mlx-mask-fill.py", "APPROVED_MLX_PATCH", ("MLX",), "mlx-mask-fill-build-inputs.json"),
+          ):
+              tree = ast.parse((Path("scripts") / helper).read_text())
+              approval = next(ast.literal_eval(node.value) for node in tree.body if isinstance(node, ast.Assign)
+                              and any(isinstance(target, ast.Name) and target.id == constant for target in node.targets))
+              records = []
+              for target, spec in zip(targets, approval["files"]):
+                  filelist = root / f".build/ci-derived-data/Build/Intermediates.noindex/{approval['identity']}.build/Release/{target}.build/Objects-normal/arm64/{target}.SwiftFileList"
+                  commands = [shlex.split(line.split("builtin-SwiftDriver --", 1)[1]) for line in build
+                              if "builtin-SwiftDriver --" in line and f"-module-name {target} " in line]
+                  if not any("@" + str(filelist) in command for command in commands):
+                      raise SystemExit(f"compiler did not consume the expected {target} input list")
+                  inputs = [Path(value).resolve(strict=True) for line in filelist.read_text().splitlines()
+                            for value in shlex.split(line)]
+                  source = root / ".build/checkouts" / approval["identity"] / spec["path"]
+                  digest = hashlib.sha256(source.read_bytes()).hexdigest()
+                  if inputs.count(source) != 1 or digest != spec["patchedSHA256"]:
+                      raise SystemExit(f"compiler input does not match patched {target} source")
+                  shutil.copyfile(filelist, output / filelist.name)
+                  records.append({"target": target, "source": spec["path"], "sourceSHA256": digest,
+                                  "inputFileList": filelist.name,
+                                  "inputFileListSHA256": hashlib.sha256(filelist.read_bytes()).hexdigest()})
+              (output / proof_name).write_text(json.dumps(records, indent=2, sort_keys=True) + "\n")
           PY
       - name: Retain and check the RealModule output contract
         if: always()
@@ -286,6 +323,7 @@ jobs:
             --graph-json "$IMRSE_CI_CANDIDATE_DIR/root-effective-dependency-graph.json" \
             --eventsource-test-log "$IMRSE_CI_CANDIDATE_DIR/eventsource-tests.log" \
             --argument-parser-patch-receipt "$IMRSE_CI_CANDIDATE_DIR/argument-parser-compatibility.json" \
+            --mlx-mask-fill-patch-receipt "$IMRSE_CI_CANDIDATE_DIR/mlx-mask-fill-compatibility.json" \
             --app "$IMRSE_DIST_DIR/imrse.app" \
             --output-dir "$IMRSE_CI_CANDIDATE_DIR" \
             --swift-version-log "$IMRSE_CI_CANDIDATE_DIR/swift-version.txt" \

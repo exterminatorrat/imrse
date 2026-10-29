@@ -173,6 +173,9 @@ if [[ "$CI_PACKAGE_VALIDATION" == "1" ]]; then
   "${BUILD_COMMAND[@]}"
   python3 "$ROOT/scripts/patch-argument-parser.py" --source-root "$SOURCE_ROOT" \
     --receipt "$IMRSE_CI_CANDIDATE_DIR/argument-parser-compatibility.json" --verify-only
+  python3 "$ROOT/scripts/patch-mlx-mask-fill.py" --source-root "$SOURCE_ROOT" \
+    --extension-receipt "$IMRSE_CI_CANDIDATE_DIR/extension-enablement.json" \
+    --receipt "$IMRSE_CI_CANDIDATE_DIR/mlx-mask-fill-compatibility.json" --verify-only
   BIN="$SCRATCH_PATH/ci-derived-data/Build/Products/Release"
 else
   run_isolated_swift_build "${BUILD_COMMAND[@]}"
@@ -215,6 +218,7 @@ cp -f "$ROOT/Vendor/EventSource/LICENSE.md" "$THIRD_PARTY_LICENSES/EventSource-L
 cp "$ROOT/Vendor/EventSource/PROVENANCE.md" "$THIRD_PARTY_LICENSES/EventSource-PROVENANCE.md"
 if [[ "$CI_PACKAGE_VALIDATION" == "1" ]]; then
   cp "$IMRSE_CI_CANDIDATE_DIR/argument-parser-compatibility.json" "$THIRD_PARTY_LICENSES/swift-argument-parser-COMPATIBILITY.json"
+  cp "$IMRSE_CI_CANDIDATE_DIR/mlx-mask-fill-compatibility.json" "$THIRD_PARTY_LICENSES/mlx-swift-COMPATIBILITY.json"
 fi
 if [[ -f "$SCRATCH_PATH/checkouts/mlx-swift/Source/Cmlx/mlx/LICENSE" ]]; then
   cp "$SCRATCH_PATH/checkouts/mlx-swift/Source/Cmlx/mlx/LICENSE" "$THIRD_PARTY_LICENSES/mlx-core-LICENSE"

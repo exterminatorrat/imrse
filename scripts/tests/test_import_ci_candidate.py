@@ -10,6 +10,8 @@ import unittest
 import zipfile
 from pathlib import Path
 from unittest.mock import patch
+from scripts.tests.ci_candidate_fixtures import MLX_LICENSE, MLX_PATCH, MLX_PATCH_BYTES
+from scripts.tests.ci_candidate_fixtures import PARSER_LICENSE as LICENSE, PARSER_PATCH as APPROVED_PATCH, PARSER_BYTES as PATCH_RAW
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -22,24 +24,6 @@ SPEC.loader.exec_module(importer)
 COMMIT, TREE = importer.git_id(ROOT)
 EVENT = "c" * 40
 EXTENSIONS = importer.approved_extensions(ROOT, COMMIT)
-LICENSE = b"synthetic upstream swift-argument-parser license\n"
-APPROVED_PATCH = {
-    "schemaVersion": 1,
-    "identity": "swift-argument-parser",
-    "version": "1.8.2",
-    "url": "https://github.com/apple/swift-argument-parser",
-    "revision": "6a52f3251125d74daf04fcbd5e6f08a75d074382",
-    "license": {"path": "LICENSE.txt", "sha256": hashlib.sha256(LICENSE).hexdigest()},
-    "files": [
-        {"path": "Sources/ArgumentParser/Parsable Types/ParsableArguments.swift",
-         "originalSHA256": "a" * 64, "patchedSHA256": "b" * 64, "originalSize": 120,
-         "patchedSize": 80, "removedAnnotation": '@available(*, deprecated, message: "Use _errorPrefix instead.")'},
-        {"path": "Sources/ArgumentParserToolInfo/ToolInfo.swift",
-         "originalSHA256": "c" * 64, "patchedSHA256": "d" * 64, "originalSize": 121,
-         "patchedSize": 81, "removedAnnotation": '@available(*, deprecated, message: "Use custom instead.")'},
-    ],
-}
-PATCH_RAW = (json.dumps(APPROVED_PATCH, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n").encode()
 
 
 def sha256(data):
@@ -88,6 +72,8 @@ def make(
     app_license.write_bytes(
         b"tampered app license\n" if patch_bad == "app-license" else LICENSE
     )
+    (resources / "ThirdPartyLicenses/mlx-swift-COMPATIBILITY.json").write_bytes(MLX_PATCH_BYTES)
+    (resources / "ThirdPartyLicenses/mlx-swift-LICENSE").write_bytes(MLX_LICENSE)
     (resources / "data").write_bytes(b"synthetic resource")
     readonly = resources / "readonly"
     readonly.write_bytes(b"read-only resource")
@@ -146,6 +132,9 @@ def make(
         importer.PT: b"ArgumentParser compatibility checks passed.\n",
         importer.PD: b"{}\n",
         importer.BI: b'{"checkedCompilerInputs": []}\n',
+        "mlx-mask-fill-compatibility.json": MLX_PATCH_BYTES,
+        "mlx-mask-fill-build-inputs.json": b"[]\n",
+        "mlx-mask-fill-control-flow-tests.log": b"MLX mask-fill control-flow checks passed.\n",
     }
     extension_receipt = json.loads(json.dumps(EXTENSIONS))
     if extension_bad == "revision":
@@ -188,6 +177,9 @@ def make(
             "argumentParserCompatibilityTestLogSHA256": sha256(files[importer.PT]),
             "argumentParserDumpHelpSHA256": sha256(files[importer.PD]),
             "argumentParserBuildInputsSHA256": sha256(files[importer.BI]),
+            "mlxMaskFillPatchReceiptSHA256": sha256(MLX_PATCH_BYTES),
+            "mlxMaskFillBuildInputsSHA256": sha256(files["mlx-mask-fill-build-inputs.json"]),
+            "mlxMaskFillControlFlowTestLogSHA256": sha256(files["mlx-mask-fill-control-flow-tests.log"]),
         },
         "app": {"bundleTreeSHA256": tree_hash, "inventory": entries},
         "archive": {
@@ -250,6 +242,11 @@ def reject(test, base, expected=None, **args):
 
 
 class ImportTests(unittest.TestCase):
+    def setUp(self):
+        approval = patch.object(importer, "approved_mlx_patch", return_value=MLX_PATCH)
+        approval.start()
+        self.addCleanup(approval.stop)
+
     def test_positive_preserves_modes_receipt_and_two_evidence_records(self):
         with tempfile.TemporaryDirectory() as temp:
             base = Path(temp)

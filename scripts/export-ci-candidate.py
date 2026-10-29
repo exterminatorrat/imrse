@@ -11,6 +11,7 @@ from pathlib import Path
 import package_local_candidate as package
 import ci_approval
 approved_patch = ci_approval.approved_patch
+approved_mlx_patch = ci_approval.approved_mlx_patch
 
 TESTS = {
     "callbackDeliveryAndOrder": "URLSession.AsyncBytes delivers public callbacks in order",
@@ -24,6 +25,12 @@ PATCH_APP_LICENSE = "ThirdPartyLicenses/swift-argument-parser-LICENSE.txt"
 PATCH_TEST_LOG = "argument-parser-compatibility-tests.log"
 PATCH_DUMP = "argument-parser-dump-help.json"
 PATCH_BUILD_INPUTS = "argument-parser-build-inputs.json"
+MLX_SIDECAR = "mlx-mask-fill-compatibility.json"
+MLX_APP_RECEIPT = "ThirdPartyLicenses/mlx-swift-COMPATIBILITY.json"
+MLX_APP_LICENSE = "ThirdPartyLicenses/mlx-swift-LICENSE"
+MLX_CONTROL_FLOW_LOG = "mlx-mask-fill-control-flow-tests.log"
+MLX_BUILD_INPUTS = "mlx-mask-fill-build-inputs.json"
+MLX_CONTROL_FLOW_MARKER = "MLX mask-fill control-flow checks passed."
 MAX_PATCH_PROOF = 1024 * 1024
 
 
@@ -98,6 +105,47 @@ def patch_proof(args, root, bundle, commit):
     return patch, external
 
 
+def approved_mlx_license(root, patch):
+    license_record = patch.get("license")
+    need(isinstance(license_record, dict) and set(license_record) == {"path", "sha256"}
+         and license_record.get("path") == "LICENSE" and isinstance(license_record.get("sha256"), str)
+         and len(license_record["sha256"]) == 64
+         and all(char in "0123456789abcdef" for char in license_record["sha256"]),
+         "MLX approval has an invalid upstream license pin")
+    source = root
+    for index, part in enumerate((".build", "checkouts", "mlx-swift", "LICENSE")):
+        source /= part
+        info = source.lstat()
+        need(not stat.S_ISLNK(info.st_mode)
+             and (stat.S_ISREG(info.st_mode) if index == 3 else stat.S_ISDIR(info.st_mode)),
+             "upstream MLX license path is not a regular source file")
+    data = read_regular(source)
+    need(package.sha256_file(source) == license_record["sha256"], "upstream mlx-swift license differs from approval")
+    return data
+
+
+def mlx_patch_proof(args, root, bundle, commit, inventory):
+    patch = approved_mlx_patch(root, commit)
+    external = read_regular(args.mlx_mask_fill_patch_receipt)
+    try:
+        canonical = (json.dumps(patch, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
+        need(external == canonical and package.strict_json_loads(external) == patch,
+             "MLX compatibility receipt differs from canonical committed approval")
+    except (ValueError, TypeError) as error:
+        raise ExportError("MLX compatibility receipt is not strict JSON") from error
+    original_license = approved_mlx_license(root, patch)
+    resources = bundle / "Contents/Resources"
+    need(read_regular(resources / MLX_APP_RECEIPT) == external,
+         "embedded MLX compatibility receipt differs from external proof")
+    need(read_regular(resources / MLX_APP_LICENSE) == original_license,
+         "embedded mlx-swift license differs from upstream")
+    try:
+        ci_approval.validate_mlx_inventory(patch, {entry["path"]: entry for entry in inventory}, external)
+    except (ValueError, TypeError, KeyError) as error:
+        raise ExportError("app MLX compatibility receipt or license inventory differs from approval") from error
+    return patch, external
+
+
 def qualification_logs(output):
     log = output / PATCH_TEST_LOG
     dump = output / PATCH_DUMP
@@ -108,6 +156,16 @@ def qualification_logs(output):
     read_regular(dump, 16 * 1024**2)
     read_regular(build_inputs, 16 * 1024**2)
     return tuple(package.sha256_file(path) for path in (log, dump, build_inputs))
+
+
+def mlx_qualification(output):
+    control_flow_log = output / MLX_CONTROL_FLOW_LOG
+    build_inputs = output / MLX_BUILD_INPUTS
+    text = read_regular(control_flow_log, 16 * 1024**2).decode("utf-8")
+    need(text.splitlines() and text.splitlines()[-1] == MLX_CONTROL_FLOW_MARKER,
+         "MLX mask-fill control-flow log lacks its completion marker")
+    need(read_regular(build_inputs, 16 * 1024**2), "MLX build inputs proof is empty")
+    return package.sha256_file(control_flow_log), package.sha256_file(build_inputs)
 
 
 def source(root, expected):
@@ -165,16 +223,23 @@ def export(args, root, commit, tree, tests):
     output = Path(args.output_dir).expanduser().resolve(strict=True)
     need(not output.is_relative_to(root), "candidate output must be outside source checkout")
     bundle, info = app_bundle(args.app, root, commit, tree)
+    inventory = package.bundle_tree_entries(bundle)
     patch_bytes = patch_proof(args, root, bundle, commit)[1]
+    mlx_patch_bytes = mlx_patch_proof(args, root, bundle, commit, inventory)[1]
     patch_test_hash, patch_dump_hash, patch_build_hash = qualification_logs(output)
+    mlx_control_flow_hash, mlx_build_hash = mlx_qualification(output)
     archive, manifest = output / "imrse-ci-candidate-arm64.tar.gz", output / "candidate-provenance.json"
     patch_sidecar = output / PATCH_SIDECAR
+    mlx_sidecar = output / MLX_SIDECAR
     need(not archive.exists() and not manifest.exists(), "candidate output already exists")
     if os.path.lexists(patch_sidecar):
         need(read_regular(patch_sidecar) == patch_bytes, "output compatibility sidecar differs from proof")
     else:
         patch_sidecar.write_bytes(patch_bytes)
-    inventory = package.bundle_tree_entries(bundle)
+    if os.path.lexists(mlx_sidecar):
+        need(read_regular(mlx_sidecar) == mlx_patch_bytes, "output MLX compatibility sidecar differs from proof")
+    else:
+        mlx_sidecar.write_bytes(mlx_patch_bytes)
     with tarfile.open(archive, "x:gz") as tar:
         tar.add(bundle, arcname="imrse.app", recursive=True)
     archive_hash = package.sha256_file(archive)
@@ -197,7 +262,10 @@ def export(args, root, commit, tree, tests):
                           "argumentParserPatchReceiptSHA256": package.sha256_file(patch_sidecar),
                           "argumentParserCompatibilityTestLogSHA256": patch_test_hash,
                           "argumentParserDumpHelpSHA256": patch_dump_hash,
-                          "argumentParserBuildInputsSHA256": patch_build_hash},
+                          "argumentParserBuildInputsSHA256": patch_build_hash,
+                          "mlxMaskFillPatchReceiptSHA256": package.sha256_file(mlx_sidecar),
+                          "mlxMaskFillControlFlowTestLogSHA256": mlx_control_flow_hash,
+                          "mlxMaskFillBuildInputsSHA256": mlx_build_hash},
         "app": {"bundleTreeSHA256": package.bundle_tree_sha256(bundle), "inventory": inventory},
         "archive": {"file": archive.name, "sha256": archive_hash, "format": "tar.gz; Unix modes preserved"},
     }
@@ -214,6 +282,7 @@ def main(argv=None):
     parser.add_argument("--graph-json", required=True, type=Path)
     parser.add_argument("--eventsource-test-log", required=True, type=Path)
     parser.add_argument("--argument-parser-patch-receipt", required=True, type=Path)
+    parser.add_argument("--mlx-mask-fill-patch-receipt", required=True, type=Path)
     for name in ("app", "output-dir", "swift-version-log", "xcode-version-log", "build-log"):
         parser.add_argument(f"--{name}", type=Path)
     args = parser.parse_args(argv)

@@ -10,6 +10,7 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
+from scripts.tests.ci_candidate_fixtures import MLX_LICENSE, MLX_PATCH, MLX_PATCH_BYTES
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "scripts"))
@@ -39,6 +40,11 @@ PATCH_BYTES = (json.dumps(APPROVED_PATCH, ensure_ascii=False, sort_keys=True, se
 
 
 class ExportCICandidateTests(unittest.TestCase):
+    def setUp(self):
+        approval = patch.object(exporter, "approved_mlx_patch", return_value=MLX_PATCH)
+        approval.start()
+        self.addCleanup(approval.stop)
+
     def test_workflow_graph_accepts_only_owned_local_nodes_and_pinned_remote(self):
         workflow = (ROOT / ".github/workflows/verify.yml").read_text()
         gate = textwrap.dedent(workflow.split("python3 - <<'PY'\n", 1)[1].split("          PY\n", 1)[0])
@@ -82,6 +88,9 @@ class ExportCICandidateTests(unittest.TestCase):
         upstream_license = root / ".build/checkouts/swift-argument-parser" / LICENSE_PATH
         upstream_license.parent.mkdir(parents=True)
         upstream_license.write_bytes(LICENSE)
+        mlx_license = root / ".build/checkouts/mlx-swift/LICENSE"
+        mlx_license.parent.mkdir(parents=True)
+        mlx_license.write_bytes(MLX_LICENSE)
         app = base / "imrse.app"
         resources = app / "Contents/Resources"
         executable = app / "Contents/MacOS/imrse"
@@ -102,6 +111,8 @@ class ExportCICandidateTests(unittest.TestCase):
         (licenses / "EventSource-PROVENANCE.md").write_bytes((vendor / "PROVENANCE.md").read_bytes())
         (licenses / "swift-argument-parser-COMPATIBILITY.json").write_bytes(patch_bytes)
         (licenses / "swift-argument-parser-LICENSE.txt").write_bytes(app_license)
+        (licenses / "mlx-swift-COMPATIBILITY.json").write_bytes(MLX_PATCH_BYTES)
+        (licenses / "mlx-swift-LICENSE").write_bytes(MLX_LICENSE)
         receipt = {
             "validationMode": "unsigned-ci-package-validation-only", "distributionEligible": False,
             "codeSigningPerformed": False, "releaseBuildProvenanceCreated": False,
@@ -125,12 +136,17 @@ class ExportCICandidateTests(unittest.TestCase):
             xcode.write_text("Xcode fixture")
             patch_receipt = base / "compatibility.json"
             patch_receipt.write_bytes(PATCH_BYTES)
+            mlx_receipt = output / "mlx-mask-fill-compatibility.json"
+            mlx_receipt.write_bytes(MLX_PATCH_BYTES)
+            (output / "mlx-mask-fill-build-inputs.json").write_text("{}\n")
+            (output / "mlx-mask-fill-control-flow-tests.log").write_text("MLX mask-fill control-flow checks passed.\n")
             (output / exporter.PATCH_TEST_LOG).write_text("fixture\nArgumentParser compatibility checks passed.\n")
             (output / exporter.PATCH_DUMP).write_text("{}\n")
             (output / exporter.PATCH_BUILD_INPUTS).write_text("{}\n")
             args = SimpleNamespace(app=app, output_dir=output, expected_commit="a" * 40, graph_json=graph,
                                    eventsource_test_log=tests, build_log=build, swift_version_log=swift,
-                                   xcode_version_log=xcode, argument_parser_patch_receipt=patch_receipt)
+                                   xcode_version_log=xcode, argument_parser_patch_receipt=patch_receipt,
+                                   mlx_mask_fill_patch_receipt=mlx_receipt)
             with patch.object(exporter, "approved_patch", return_value=APPROVED_PATCH):
                 exporter.export(args, root, "a" * 40, "b" * 40, 3)
             archive = output / "imrse-ci-candidate-arm64.tar.gz"
@@ -175,6 +191,10 @@ class ExportCICandidateTests(unittest.TestCase):
                                                 b"tampered license\n" if case == "app-license" else LICENSE)
                 output = base / "output"
                 output.mkdir()
+                mlx_receipt = output / "mlx-mask-fill-compatibility.json"
+                mlx_receipt.write_bytes(MLX_PATCH_BYTES)
+                (output / "mlx-mask-fill-build-inputs.json").write_text("{}\n")
+                (output / "mlx-mask-fill-control-flow-tests.log").write_text("MLX mask-fill control-flow checks passed.\n")
                 (output / exporter.PATCH_TEST_LOG).write_text(
                     "fixture\nArgumentParser compatibility checks passed.\n"
                     if case != "marker" else "completion marker missing\n"
@@ -204,7 +224,8 @@ class ExportCICandidateTests(unittest.TestCase):
                 args = SimpleNamespace(app=app, output_dir=output, expected_commit="a" * 40,
                                        graph_json=base / "graph.json", eventsource_test_log=base / "eventsource.log",
                                        build_log=base / "build.log", swift_version_log=base / "swift.txt",
-                                       xcode_version_log=base / "xcode.txt", argument_parser_patch_receipt=proof)
+                                       xcode_version_log=base / "xcode.txt", argument_parser_patch_receipt=proof,
+                                       mlx_mask_fill_patch_receipt=mlx_receipt)
                 with patch.object(exporter, "approved_patch", return_value=APPROVED_PATCH):
                     with self.assertRaises((exporter.ExportError, OSError)):
                         exporter.export(args, root, "a" * 40, "b" * 40, 3)
