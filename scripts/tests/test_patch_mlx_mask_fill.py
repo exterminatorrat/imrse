@@ -13,10 +13,13 @@ from unittest.mock import patch
 ROOT = Path(__file__).resolve().parents[2]
 HELPER_PATH = ROOT / "scripts/patch-mlx-mask-fill.py"
 sys.path.insert(0, str(ROOT / "scripts"))
+from ci_mlx_approval import MLX_PATCH as EXPECTED_PATCH
+
 SPEC = importlib.util.spec_from_file_location("patch_mlx_mask_fill", HELPER_PATH)
 helper = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = helper
 SPEC.loader.exec_module(helper)
+MODULE_APPROVAL = EXPECTED_PATCH["files"][1]
 
 
 def digest(contents):
@@ -39,8 +42,18 @@ class PatchMLXMaskFillTests(unittest.TestCase):
         self.extension_receipt = self.output / "extensions.json"
         self.source_relative = "Source/MLX/MLXArray+maskFill.swift"
         self.original = b"before approved fixture\n"
-        self.git_preimage = self.original
         self.patched = b"after approved fixture\n"
+        self.module_relative = "Source/MLXNN/Module.swift"
+        self.module_original = (b"if let value = value as? T {\n                return value\n"
+                                b"if let value = value as? T {\n        self.value = value\n"
+                                b"if let module = module as? T {\n                return module\n")
+        value_hunk, module_hunk = MODULE_APPROVAL["replacements"]
+        self.module_patched = self.module_original
+        for hunk in (value_hunk, module_hunk):
+            self.module_patched = self.module_patched.replace(hunk["oldText"].encode(), hunk["newText"].encode(), 1)
+        self.module_spec = dict(MODULE_APPROVAL, originalSHA256=digest(self.module_original),
+                                patchedSHA256=digest(self.module_patched), originalSize=len(self.module_original),
+                                patchedSize=len(self.module_patched))
         self.license_bytes = b"synthetic license\n"
         self.file_spec = {
             "path": self.source_relative,
@@ -58,21 +71,22 @@ class PatchMLXMaskFillTests(unittest.TestCase):
             "url": "https://github.com/ml-explore/mlx-swift",
             "revision": "a" * 40,
             "license": {"path": "LICENSE", "sha256": digest(self.license_bytes)},
-            "files": [self.file_spec],
+            "files": [self.file_spec, self.module_spec],
         }
         self.packages = {
-            "mlx-swift": {
-                "url": "https://github.com/ml-explore/mlx-swift", "version": "0.31.6",
+            "mlx-swift": {"url": "https://github.com/ml-explore/mlx-swift", "version": "0.31.6",
                 "revision": self.approved["revision"], "target": "FixturePlugin",
                 "registry": "plugins.json", "sources": {"Plugins/Fixture/plugin.swift": digest(b"plugin\n")},
             },
-            "mlx-swift-lm": {
-                "url": "https://example.invalid/mlx-swift-lm", "version": "test-2",
+            "mlx-swift-lm": {"url": "https://example.invalid/mlx-swift-lm", "version": "test-2",
                 "revision": "b" * 40, "target": "FixtureMacro", "registry": "macros.json",
                 "sources": {"Sources/Fixture/macro.swift": digest(b"macro\n")},
             },
         }
         self._write(self.mlx / self.source_relative, self.original)
+        self._write(self.mlx / self.module_relative, self.module_original)
+        self.source_paths = {self.source_relative: self.source, self.module_relative: self.module_source}
+        self.source_preimages = {self.source_relative: self.original, self.module_relative: self.module_original}
         self._write(self.mlx / "LICENSE", self.license_bytes)
         self._write(self.mlx / "Plugins/Fixture/plugin.swift", b"plugin\n")
         self._write(self.lm / "Sources/Fixture/macro.swift", b"macro\n")
@@ -85,6 +99,7 @@ class PatchMLXMaskFillTests(unittest.TestCase):
         self.root_head = "c" * 40
         self.dirty_lm = False
         self.extra_drift = False
+        self.partial_diff = False
         self.committed_reads = []
         self.patchers = [
             patch.object(helper, "APPROVED_MLX_PATCH", self.approved),
@@ -106,14 +121,12 @@ class PatchMLXMaskFillTests(unittest.TestCase):
         path.write_bytes(contents)
 
     def _extension_receipt(self):
-        records = []
-        for identity, spec in self.packages.items():
-            entry = {"fingerprint": spec["revision"], "packageIdentity": identity,
-                     "targetName": spec["target"]}
-            records.append({"identity": identity, "url": spec["url"], "version": spec["version"],
-                            "revision": spec["revision"], "sourceSHA256": spec["sources"],
-                            "registryEntry": entry})
-        return {"schemaVersion": 1, "packages": records}
+        return {"schemaVersion": 1, "packages": [
+            {"identity": identity, "url": spec["url"], "version": spec["version"],
+             "revision": spec["revision"], "sourceSHA256": spec["sources"],
+             "registryEntry": {"fingerprint": spec["revision"], "packageIdentity": identity,
+                               "targetName": spec["target"]}}
+            for identity, spec in self.packages.items()]}
 
     def _committed_literal(self, root, commit, path, name):
         self.committed_reads.append((Path(root), commit, path, name))
@@ -123,47 +136,55 @@ class PatchMLXMaskFillTests(unittest.TestCase):
 
     def _fake_git(self, checkout, *args):
         checkout = Path(checkout)
-        if args == ("rev-parse", "--show-toplevel"):
-            return (str(checkout) + "\n").encode()
-        if args == ("rev-parse", "HEAD"):
+        if args[:1] == ("rev-parse",):
+            if args[1] == "--show-toplevel":
+                return (str(checkout) + "\n").encode()
             if checkout == self.root:
                 return (self.root_head + "\n").encode()
             identity = "mlx-swift" if checkout == self.mlx else "mlx-swift-lm"
             return (self.packages[identity]["revision"] + "\n").encode()
         if args[:1] == ("show",):
-            self.assertEqual(args[1], f"HEAD:{self.source_relative}")
-            return self.git_preimage
-        if checkout == self.mlx and args[:1] == ("status",):
-            if self.source.read_bytes() != self.original:
-                result = b" M " + self.source_relative.encode() + b"\0"
-                return result + (b"?? unexpected\0" if self.extra_drift else b"")
-            return b""
-        if checkout == self.lm and args[:1] == ("status",):
-            return b" M drift\0" if self.dirty_lm else b""
+            relative = args[1].removeprefix("HEAD:")
+            return self.source_preimages[relative]
+        if args[:1] == ("status",):
+            if checkout == self.lm:
+                return b" M drift\0" if self.dirty_lm else b""
+            result = b"".join(b" M " + relative.encode() + b"\0" for relative in self._changed_sources())
+            return result + (b"?? unexpected\0" if self.extra_drift else b"")
         if checkout == self.mlx and args[:1] == ("diff",):
-            changed = self.source.read_bytes() != self.original
+            changed = self._changed_sources()
+            if self.partial_diff:
+                changed = changed[:1]
             if args[1] == "--name-only":
-                return self.source_relative.encode() + b"\0" if changed else b""
+                return b"".join(relative.encode() + b"\0" for relative in changed)
             if args[1] == "--summary":
                 return b""
             if args[1] == "--numstat":
-                return b"1\t1\t" + self.source_relative.encode() + b"\0" if changed else b""
+                counts = {self.source_relative: 1, self.module_relative: 2}
+                return b"".join(f"{counts[relative]}\t{counts[relative]}\t".encode()
+                                 + relative.encode() + b"\0" for relative in changed)
         raise AssertionError((checkout, args))
+
+    def _changed_sources(self):
+        return [relative for relative in sorted(self.source_paths)
+                if self.source_paths[relative].read_bytes() != self.source_preimages[relative]]
 
     @property
     def source(self):
         return self.mlx / self.source_relative
 
+    @property
+    def module_source(self):
+        return self.mlx / self.module_relative
+
     def invoke(self, verify_only=False):
         return helper.run(self.root, self.receipt, self.extension_receipt, verify_only)
 
     def snapshot(self):
-        return (self.source.read_bytes(), self.source.stat().st_mode & 0o777,
-                (self.root / "Package.resolved").read_bytes(), self.extension_receipt.read_bytes(),
-                (self.mlx / "LICENSE").read_bytes(),
-                (self.mlx / "Plugins/Fixture/plugin.swift").read_bytes(),
-                (self.lm / "Sources/Fixture/macro.swift").read_bytes(),
-                self.receipt.read_bytes() if self.receipt.exists() else None)
+        other = (self.root / "Package.resolved", self.extension_receipt, self.mlx / "LICENSE",
+                 self.mlx / "Plugins/Fixture/plugin.swift", self.lm / "Sources/Fixture/macro.swift")
+        return (tuple((path.read_bytes(), path.stat().st_mode & 0o777) for path in self.source_paths.values()),
+                *(path.read_bytes() for path in other), self.receipt.read_bytes() if self.receipt.exists() else None)
 
     def assert_rejected_without_patch(self):
         before = self.snapshot()
@@ -176,11 +197,43 @@ class PatchMLXMaskFillTests(unittest.TestCase):
         self.invoke()
         self.assertEqual(self.source.read_bytes(), self.patched)
         self.assertEqual(self.source.stat().st_mode & 0o777, 0o744)
+        self.assertEqual(self.module_source.read_bytes(), self.module_patched)
+        self.assertEqual(self.module_source.read_bytes().count(b"if let value = (value as Any) as? T {"), 1)
+        self.assertIn(b"if let value = value as? T {\n        self.value = value", self.module_source.read_bytes())
         self.assertEqual(self.receipt.read_bytes(), helper._json_bytes(self.approved))
         self.assertEqual(self.committed_reads, [(self.root, self.root_head, helper.EXTENSION_HELPER, "PACKAGES")])
         before_verification = self.snapshot()
         self.invoke(verify_only=True)
         self.assertEqual(self.snapshot(), before_verification)
+
+    def test_second_source_preimage_fails_before_any_write(self):
+        self.module_original = b"wrong second preimage\n"
+        self.module_source.write_bytes(self.module_original)
+        self.source_preimages[self.module_relative] = self.module_original
+        self.assert_rejected_without_patch()
+
+    def test_partial_source_diff_is_rejected_in_verify_only(self):
+        self.invoke()
+        self.partial_diff = True
+        before = self.snapshot()
+        with self.assertRaisesRegex(helper.PatchError, "approved source change"):
+            self.invoke(verify_only=True)
+        self.assertEqual(self.snapshot(), before)
+
+    def test_receipt_failure_rolls_back_both_sources(self):
+        before = self.snapshot()
+        with patch.object(helper.ci_mlx_patch_sources.os, "link", side_effect=OSError("receipt creation failed")), \
+                self.assertRaisesRegex(helper.PatchError, "unable to create the new MLX patch receipt"):
+            self.invoke()
+        self.assertEqual(self.snapshot(), before)
+
+    def test_duplicate_full_hunk_is_rejected_before_any_write(self):
+        hunk = self.module_spec["replacements"][0]["oldText"].encode()
+        self.module_original += b"\n" + hunk
+        self.module_source.write_bytes(self.module_original)
+        self.source_preimages[self.module_relative] = self.module_original
+        self.module_spec.update(originalSHA256=digest(self.module_original), originalSize=len(self.module_original))
+        self.assert_rejected_without_patch()
 
     def test_wrong_host_fails_before_any_write(self):
         before = self.snapshot()
@@ -196,7 +249,7 @@ class PatchMLXMaskFillTests(unittest.TestCase):
         self.assert_rejected_without_patch()
 
     def test_wrong_source_preimage_fails_before_any_write(self):
-        self.git_preimage = b"unexpected preimage\n"
+        self.source_preimages[self.source_relative] = b"unexpected preimage\n"
         self.assert_rejected_without_patch()
 
     def test_wrong_license_fails_before_any_write(self):
@@ -231,6 +284,7 @@ class PatchMLXMaskFillTests(unittest.TestCase):
 
     def test_verify_only_rejects_unrelated_untracked_drift_without_writes(self):
         self.source.write_bytes(self.patched)
+        self.module_source.write_bytes(self.module_patched)
         self.receipt.write_bytes(helper._json_bytes(self.approved))
         self.extra_drift = True
         before = self.snapshot()
@@ -256,26 +310,8 @@ class ApprovedLiteralTests(unittest.TestCase):
                           and any(isinstance(target, ast.Name) and target.id == "APPROVED_MLX_PATCH"
                                   for target in node.targets))
         value = ast.literal_eval(assignment.value)
+        self.assertEqual(value, EXPECTED_PATCH)
         self.assertEqual(value, helper.APPROVED_MLX_PATCH)
-        self.assertEqual(set(value), {"schemaVersion", "identity", "version", "url", "revision", "license", "files"})
-        self.assertEqual((value["schemaVersion"], value["identity"], value["version"], value["url"],
-                          value["revision"]),
-                         (1, "mlx-swift", "0.31.6", "https://github.com/ml-explore/mlx-swift",
-                          "0bb916c67f4b9e5c682cbe02a42c701c93ab5021"))
-        self.assertEqual(set(value["license"]), {"path", "sha256"})
-        self.assertEqual(value["license"], {"path": "LICENSE",
-                                             "sha256": "44326a4ea062241ae6fc26ee2ec90bdc81af7eb7b9d3966181b733fa69d42057"})
-        self.assertEqual(set(value["files"][0]), {"path", "originalSHA256", "patchedSHA256",
-                                                    "originalSize", "patchedSize", "oldText", "newText"})
-        self.assertEqual(value["files"][0]["path"], "Source/MLX/MLXArray+maskFill.swift")
-        self.assertEqual(value["files"][0]["originalSHA256"],
-                         "5e6ae4e844cbd2ea61032a3c45e5281248072a350be012ae6409ade2250920fe")
-        self.assertEqual(value["files"][0]["patchedSHA256"],
-                         "391cde3f3480fe9fd434b5ce4bcd4a55166e06db18a7c5a0e1577f43f06a4063")
-        self.assertEqual(value["files"][0]["oldText"], "guard let info = dtype.finfo else {")
-        self.assertEqual(value["files"][0]["newText"], "guard dtype.finfo != nil else {")
-        self.assertEqual(value["files"][0]["originalSize"], 495)
-        self.assertEqual(value["files"][0]["patchedSize"], 491)
 
 
 if __name__ == "__main__":

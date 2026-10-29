@@ -10,7 +10,7 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
-from scripts.tests.ci_candidate_fixtures import MLX_LICENSE, MLX_PATCH, MLX_PATCH_BYTES
+from scripts.tests.ci_candidate_fixtures import MLX_LICENSE, MLX_PATCH, MLX_PATCH_BYTES, MLX_EVIDENCE
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "scripts"))
@@ -138,8 +138,8 @@ class ExportCICandidateTests(unittest.TestCase):
             patch_receipt.write_bytes(PATCH_BYTES)
             mlx_receipt = output / "mlx-mask-fill-compatibility.json"
             mlx_receipt.write_bytes(MLX_PATCH_BYTES)
-            (output / "mlx-mask-fill-build-inputs.json").write_text("{}\n")
-            (output / "mlx-mask-fill-control-flow-tests.log").write_text("MLX mask-fill control-flow checks passed.\n")
+            for name, data in MLX_EVIDENCE.items():
+                (output / name).write_bytes(data)
             (output / exporter.PATCH_TEST_LOG).write_text("fixture\nArgumentParser compatibility checks passed.\n")
             (output / exporter.PATCH_DUMP).write_text("{}\n")
             (output / exporter.PATCH_BUILD_INPUTS).write_text("{}\n")
@@ -193,8 +193,8 @@ class ExportCICandidateTests(unittest.TestCase):
                 output.mkdir()
                 mlx_receipt = output / "mlx-mask-fill-compatibility.json"
                 mlx_receipt.write_bytes(MLX_PATCH_BYTES)
-                (output / "mlx-mask-fill-build-inputs.json").write_text("{}\n")
-                (output / "mlx-mask-fill-control-flow-tests.log").write_text("MLX mask-fill control-flow checks passed.\n")
+                for name, data in MLX_EVIDENCE.items():
+                    (output / name).write_bytes(data)
                 (output / exporter.PATCH_TEST_LOG).write_text(
                     "fixture\nArgumentParser compatibility checks passed.\n"
                     if case != "marker" else "completion marker missing\n"

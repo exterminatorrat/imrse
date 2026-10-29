@@ -91,6 +91,9 @@ class MLXCandidateProvenanceTests(unittest.TestCase):
             "license": lambda value: value["license"].update(sha256="0" * 64),
             "size": lambda value: value["files"][0].update(originalSize=494),
             "schema type": lambda value: value.update(schemaVersion=True),
+            "missing getters": lambda value: value["files"].pop(),
+            "getter hunk": lambda value: value["files"][1]["replacements"][0].update(newText="return value!"),
+            "getter bytes": lambda value: value["files"][1].update(patchedSHA256="0" * 64),
         }
         for name, mutate in cases.items():
             with self.subTest(case=name):
@@ -151,9 +154,11 @@ class MLXCandidateProvenanceTests(unittest.TestCase):
             output = Path(temporary)
             log = output / exporter.MLX_CONTROL_FLOW_LOG
             inputs = output / exporter.MLX_BUILD_INPUTS
+            getters = output / ci_approval.GETTER_LOG
+            getters.write_text("MLX getter compatibility checks passed.\n")
             log.write_text("valid and invalid DType branches passed.\n" + exporter.MLX_CONTROL_FLOW_MARKER + "\n")
             inputs.write_text('{"command": ["swiftc"], "sources": ["Source/MLX/MLXArray+maskFill.swift"]}\n')
-            expected = (hashlib.sha256(log.read_bytes()).hexdigest(), hashlib.sha256(inputs.read_bytes()).hexdigest())
+            expected = tuple(hashlib.sha256(path.read_bytes()).hexdigest() for path in (log, inputs, getters))
             self.assertEqual(exporter.mlx_qualification(output), expected)
             log.write_text("MLX mask-fill control-flow checks failed.\n")
             with self.assertRaises(exporter.ExportError):

@@ -1,5 +1,6 @@
 import hashlib
 import json
+from scripts.ci_mlx_approval import MLX_PATCH as APPROVED_MLX_PATCH
 
 
 MLX_LICENSE = b"synthetic upstream MLX license\n"
@@ -20,7 +21,22 @@ MLX_PATCH = {
         "newText": "guard dtype.finfo != nil else {",
     }],
 }
+MLX_PATCH["files"].append(json.loads(json.dumps(APPROVED_MLX_PATCH["files"][1])))
 MLX_PATCH_BYTES = (json.dumps(MLX_PATCH, sort_keys=True, separators=(",", ":")) + "\n").encode()
+MLX_EVIDENCE = {
+    "mlx-mask-fill-build-inputs.json": b"[]\n",
+    "mlx-mask-fill-control-flow-tests.log": b"MLX mask-fill control-flow checks passed.\n",
+    "mlx-getter-compatibility-tests.log": b"MLX getter compatibility checks passed.\n",
+}
+MLX_EVIDENCE_FIELDS = {
+    "mlxMaskFillBuildInputsSHA256": "mlx-mask-fill-build-inputs.json",
+    "mlxMaskFillControlFlowTestLogSHA256": "mlx-mask-fill-control-flow-tests.log",
+    "mlxGetterCompatibilityTestLogSHA256": "mlx-getter-compatibility-tests.log",
+}
+
+
+def mlx_evidence_hashes(files):
+    return {field: hashlib.sha256(files[name]).hexdigest() for field, name in MLX_EVIDENCE_FIELDS.items()}
 
 PARSER_LICENSE = b"synthetic upstream swift-argument-parser license\n"
 PARSER_PATCH = {

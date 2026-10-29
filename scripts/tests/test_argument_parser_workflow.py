@@ -30,8 +30,9 @@ class ArgumentParserWorkflowTests(unittest.TestCase):
             "Apply the exact two-annotation CI-only compatibility exception",
             "Verify legacy ArgumentParser behavior with strict warnings",
             "Enable only the two reviewed revision-bound extensions",
-            "Apply the exact MLX guard repair after pristine extension validation",
+            "Apply the exact MLX compatibility repairs after pristine extension validation",
             "Verify the exact patched MLX guard control flow without Metal",
+            "Verify exact MLX getters preserve nested optional values and traps",
             "Build the unsigned CI app with one scheduler job and WMO frontend thread",
         )]
         self.assertEqual(positions, sorted(positions))
@@ -109,7 +110,8 @@ class ArgumentParserWorkflowTests(unittest.TestCase):
                 output.mkdir()
                 sources, commands = {"swift-argument-parser": [], "mlx-swift": []}, []
                 for identity, target in (("swift-argument-parser", "ArgumentParser"),
-                                         ("swift-argument-parser", "ArgumentParserToolInfo"), ("mlx-swift", "MLX")):
+                                         ("swift-argument-parser", "ArgumentParserToolInfo"),
+                                         ("mlx-swift", "MLX"), ("mlx-swift", "MLXNN")):
                     relative = f"Sources/{target}/source with spaces.swift"
                     source = base / ".build/checkouts" / identity / relative
                     source.parent.mkdir(parents=True)
@@ -141,7 +143,7 @@ class ArgumentParserWorkflowTests(unittest.TestCase):
                 self.assertEqual(proof.exists(), not (missing_command or wrong_bytes))
                 if proof.exists():
                     self.assertEqual(len(json.loads(proof.read_text())), 2)
-                    self.assertEqual(len(json.loads((output / "mlx-mask-fill-build-inputs.json").read_text())), 1)
+                    self.assertEqual(len(json.loads((output / "mlx-mask-fill-build-inputs.json").read_text())), 2)
 
     def test_mlx_control_flow_marker_requires_valid_and_expected_fatal_paths(self):
         workflow = (ROOT / ".github/workflows/verify.yml").read_text()

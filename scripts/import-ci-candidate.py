@@ -141,6 +141,12 @@ def verify(m, expected, root, z, files, patch_raw, mlx_raw):
         (dependencies.get("mlxMaskFillBuildInputsSHA256"), MLX_BUILD_INPUTS)):
         need(sha_ok(digest) and name in files and files[name].file_size > 0
              and read_zip(z, files[name], 16 * 1024**2) == digest)
+    try:
+        digest = dependencies.get("mlxGetterCompatibilityTestLogSHA256")
+        need(sha_ok(digest) and ci_approval.GETTER_LOG in files)
+        need(ci_approval.getter_log_digest(read_zip(z, files[ci_approval.GETTER_LOG], 16 * 1024**2, raw=True)) == digest)
+    except ValueError:
+        need(False)
     patch = approved_patch(root, expected[0])
     canonical = (json.dumps(patch, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n").encode()
     need(patch_raw == canonical and load(patch_raw) == patch

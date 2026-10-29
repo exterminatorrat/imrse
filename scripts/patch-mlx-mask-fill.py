@@ -8,12 +8,12 @@ import re
 import stat
 import subprocess
 import sys
-import tempfile
 from pathlib import Path, PurePosixPath
 
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import ci_approval
+import ci_mlx_patch_sources
 from package_local_candidate import strict_json_loads
 
 
@@ -36,6 +36,23 @@ APPROVED_MLX_PATCH = {
             "patchedSize": 491,
             "oldText": "guard let info = dtype.finfo else {",
             "newText": "guard dtype.finfo != nil else {",
+        },
+        {
+            "path": "Source/MLXNN/Module.swift",
+            "originalSHA256": "41949db53925fc89ad79459d4ca8f16b051ae9f1470c1a385d2728626c210de6",
+            "patchedSHA256": "033f0ef3fddac02858dc9591b4ffcd8b45749cdb881641436526d867147341cc",
+            "originalSize": 61690,
+            "patchedSize": 61708,
+            "replacements": [
+                {
+                    "oldText": "if let value = value as? T {\n                return value",
+                    "newText": "if let value = (value as Any) as? T {\n                return value",
+                },
+                {
+                    "oldText": "if let module = module as? T {\n                return module",
+                    "newText": "if let module = (module as Any) as? T {\n                return module",
+                },
+            ],
         },
     ],
 }
@@ -239,76 +256,6 @@ def _verify_license(checkout):
     _need(_sha256(contents) == license_record["sha256"], "MLX license changed")
 
 
-def _source_baseline(checkout, file_spec):
-    original = _git(checkout, "show", f"HEAD:{file_spec['path']}")
-    _need(len(original) == file_spec["originalSize"] and _sha256(original) == file_spec["originalSHA256"],
-          "MLX Git preimage changed")
-    old = file_spec["oldText"].encode("utf-8")
-    new = file_spec["newText"].encode("utf-8")
-    _need(original.count(old) == 1, "approved MLX hunk is not unique")
-    patched = original.replace(old, new, 1)
-    _need(len(patched) == file_spec["patchedSize"] and _sha256(patched) == file_spec["patchedSHA256"],
-          "approved MLX hunk produces unexpected bytes")
-    return original, patched
-
-
-def _verify_exact_patch_diff(checkout, file_spec):
-    path = file_spec["path"].encode("utf-8")
-    _need(_git(checkout, "diff", "--name-only", "-z", "HEAD", "--") == path + b"\0"
-          and _git(checkout, "status", "--porcelain=v1", "-z", "--untracked-files=all") == b" M " + path + b"\0"
-          and not _git(checkout, "diff", "--summary", "-z", "HEAD", "--")
-          and _git(checkout, "diff", "--numstat", "-z", "HEAD", "--") == b"1\t1\t" + path + b"\0",
-          "MLX checkout diff is not the approved source change")
-
-
-def _atomic_replace(path, contents, mode):
-    descriptor, temporary_name = tempfile.mkstemp(prefix=".imrse-mlx-mask-fill-", dir=str(path.parent))
-    temporary = Path(temporary_name)
-    try:
-        with os.fdopen(descriptor, "wb") as output:
-            output.write(contents)
-            output.flush()
-            os.fsync(output.fileno())
-        os.chmod(temporary, mode)
-        os.replace(temporary, path)
-    finally:
-        if temporary.exists():
-            temporary.unlink()
-
-
-def _write_new_receipt(path, contents):
-    directory = os.open(path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | NOFOLLOW)
-    temporary_name = None
-    try:
-        descriptor, temporary_path = tempfile.mkstemp(prefix=".imrse-mlx-mask-fill-receipt-", dir=str(path.parent))
-        temporary_name = Path(temporary_path).name
-        with os.fdopen(descriptor, "wb") as output:
-            output.write(contents)
-            output.flush()
-            os.fsync(output.fileno())
-            os.fchmod(output.fileno(), 0o644)
-        os.link(temporary_name, path.name, src_dir_fd=directory, dst_dir_fd=directory, follow_symlinks=False)
-        os.unlink(temporary_name, dir_fd=directory)
-        temporary_name = None
-        actual, _ = _read_regular(path)
-        _need(actual == contents, "MLX patch receipt readback did not match")
-    except OSError as error:
-        raise PatchError("unable to create the new MLX patch receipt") from error
-    finally:
-        if temporary_name is not None:
-            try:
-                os.unlink(temporary_name, dir_fd=directory)
-            except FileNotFoundError:
-                pass
-        os.close(directory)
-
-
-def _rollback_source(path, original, patched, mode):
-    current, current_mode = _read_regular(path)
-    if current == patched and current_mode == mode:
-        _atomic_replace(path, original, mode)
-
-
 def run(source_root, receipt_path, extension_receipt_path, verify_only=False):
     _require_host()
     try:
@@ -320,42 +267,32 @@ def run(source_root, receipt_path, extension_receipt_path, verify_only=False):
     extension_receipt = _absolute_external_file(extension_receipt_path, root, must_exist=True)
     _need(receipt != extension_receipt, "MLX patch receipt must be separate from the extension receipt")
     head, packages, expected_extensions = _root_approvals(root)
-    file_spec = APPROVED_MLX_PATCH["files"][0]
     lock_bytes = _validate_lock(root, packages)
     _validate_extension_receipt(extension_receipt, expected_extensions)
     _validate_extension_sources(root, packages, allow_mlx_patch=verify_only)
     checkout = root / ".build/checkouts/mlx-swift"
     _check_git_identity(checkout, APPROVED_MLX_PATCH["revision"], clean=not verify_only)
     _verify_license(checkout)
-    original, patched = _source_baseline(checkout, file_spec)
-    source_path = _safe_relative(checkout, file_spec["path"])
+    plans = ci_mlx_patch_sources.preflight(checkout, APPROVED_MLX_PATCH["files"], _safe_relative,
+                                           _read_regular, _git, _need, verify_only=verify_only)
     receipt_bytes = _json_bytes(APPROVED_MLX_PATCH)
     if verify_only:
-        current, _ = _read_regular(source_path)
-        _need(current == patched, "MLX source does not match the approved patched bytes")
-        _verify_exact_patch_diff(checkout, file_spec)
+        ci_mlx_patch_sources.verify(checkout, plans, _read_regular, _git, _need)
         stored, _ = _read_regular(receipt)
         _need(stored == receipt_bytes, "MLX patch receipt does not match the approved literal")
         _need(_validate_lock(root, packages) == lock_bytes, "root Package.resolved changed during verification")
         _verify_license(checkout)
         _need(_git_text(root, "rev-parse", "HEAD") == head, "source root HEAD changed during verification")
         return
-    current, mode = _read_regular(source_path)
-    _need(len(current) == file_spec["originalSize"] and _sha256(current) == file_spec["originalSHA256"]
-          and current == original, "MLX source does not match the approved upstream bytes")
-    _atomic_replace(source_path, patched, mode)
-    try:
-        current, current_mode = _read_regular(source_path)
-        _need(current == patched and current_mode == mode, "MLX source postcheck failed")
-        _verify_exact_patch_diff(checkout, file_spec)
+
+    def validate_after_patch():
         _need(_validate_lock(root, packages) == lock_bytes, "root Package.resolved changed during patching")
         _verify_license(checkout)
         _need(_git_text(root, "rev-parse", "HEAD") == head, "source root HEAD changed during patching")
         _validate_extension_sources(root, packages, allow_mlx_patch=True)
-        _write_new_receipt(receipt, receipt_bytes)
-    except Exception:
-        _rollback_source(source_path, original, patched, mode)
-        raise
+
+    ci_mlx_patch_sources.apply(checkout, plans, receipt, receipt_bytes, _read_regular, _git, _need,
+                               validate_after_patch)
 
 
 def main():

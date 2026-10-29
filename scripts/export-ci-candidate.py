@@ -165,7 +165,11 @@ def mlx_qualification(output):
     need(text.splitlines() and text.splitlines()[-1] == MLX_CONTROL_FLOW_MARKER,
          "MLX mask-fill control-flow log lacks its completion marker")
     need(read_regular(build_inputs, 16 * 1024**2), "MLX build inputs proof is empty")
-    return package.sha256_file(control_flow_log), package.sha256_file(build_inputs)
+    try:
+        getter_hash = ci_approval.getter_log_digest(read_regular(output / ci_approval.GETTER_LOG, 16 * 1024**2))
+    except ValueError as error:
+        raise ExportError(str(error)) from error
+    return package.sha256_file(control_flow_log), package.sha256_file(build_inputs), getter_hash
 
 
 def source(root, expected):
@@ -227,7 +231,7 @@ def export(args, root, commit, tree, tests):
     patch_bytes = patch_proof(args, root, bundle, commit)[1]
     mlx_patch_bytes = mlx_patch_proof(args, root, bundle, commit, inventory)[1]
     patch_test_hash, patch_dump_hash, patch_build_hash = qualification_logs(output)
-    mlx_control_flow_hash, mlx_build_hash = mlx_qualification(output)
+    mlx_control_flow_hash, mlx_build_hash, mlx_getter_hash = mlx_qualification(output)
     archive, manifest = output / "imrse-ci-candidate-arm64.tar.gz", output / "candidate-provenance.json"
     patch_sidecar = output / PATCH_SIDECAR
     mlx_sidecar = output / MLX_SIDECAR
@@ -265,6 +269,7 @@ def export(args, root, commit, tree, tests):
                           "argumentParserBuildInputsSHA256": patch_build_hash,
                           "mlxMaskFillPatchReceiptSHA256": package.sha256_file(mlx_sidecar),
                           "mlxMaskFillControlFlowTestLogSHA256": mlx_control_flow_hash,
+                          "mlxGetterCompatibilityTestLogSHA256": mlx_getter_hash,
                           "mlxMaskFillBuildInputsSHA256": mlx_build_hash},
         "app": {"bundleTreeSHA256": package.bundle_tree_sha256(bundle), "inventory": inventory},
         "archive": {"file": archive.name, "sha256": archive_hash, "format": "tar.gz; Unix modes preserved"},

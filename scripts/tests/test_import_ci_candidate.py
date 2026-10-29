@@ -10,7 +10,7 @@ import unittest
 import zipfile
 from pathlib import Path
 from unittest.mock import patch
-from scripts.tests.ci_candidate_fixtures import MLX_LICENSE, MLX_PATCH, MLX_PATCH_BYTES
+from scripts.tests.ci_candidate_fixtures import MLX_LICENSE, MLX_PATCH, MLX_PATCH_BYTES, MLX_EVIDENCE, mlx_evidence_hashes
 from scripts.tests.ci_candidate_fixtures import PARSER_LICENSE as LICENSE, PARSER_PATCH as APPROVED_PATCH, PARSER_BYTES as PATCH_RAW
 
 
@@ -133,8 +133,7 @@ def make(
         importer.PD: b"{}\n",
         importer.BI: b'{"checkedCompilerInputs": []}\n',
         "mlx-mask-fill-compatibility.json": MLX_PATCH_BYTES,
-        "mlx-mask-fill-build-inputs.json": b"[]\n",
-        "mlx-mask-fill-control-flow-tests.log": b"MLX mask-fill control-flow checks passed.\n",
+        **MLX_EVIDENCE,
     }
     extension_receipt = json.loads(json.dumps(EXTENSIONS))
     if extension_bad == "revision":
@@ -178,8 +177,7 @@ def make(
             "argumentParserDumpHelpSHA256": sha256(files[importer.PD]),
             "argumentParserBuildInputsSHA256": sha256(files[importer.BI]),
             "mlxMaskFillPatchReceiptSHA256": sha256(MLX_PATCH_BYTES),
-            "mlxMaskFillBuildInputsSHA256": sha256(files["mlx-mask-fill-build-inputs.json"]),
-            "mlxMaskFillControlFlowTestLogSHA256": sha256(files["mlx-mask-fill-control-flow-tests.log"]),
+            **mlx_evidence_hashes(files),
         },
         "app": {"bundleTreeSHA256": tree_hash, "inventory": entries},
         "archive": {

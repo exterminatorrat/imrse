@@ -200,7 +200,7 @@ jobs:
       - name: Enable only the two reviewed revision-bound extensions
         run: |
           python3 scripts/enable-ci-extensions.py --source-root . --receipt "$IMRSE_CI_CANDIDATE_DIR/extension-enablement.json"
-      - name: Apply the exact MLX guard repair after pristine extension validation
+      - name: Apply the exact MLX compatibility repairs after pristine extension validation
         run: |
           python3 scripts/patch-mlx-mask-fill.py --source-root . \
             --extension-receipt "$IMRSE_CI_CANDIDATE_DIR/extension-enablement.json" \
@@ -233,6 +233,15 @@ jobs:
           python3 scripts/patch-mlx-mask-fill.py --source-root . \
             --extension-receipt "$IMRSE_CI_CANDIDATE_DIR/extension-enablement.json" \
             --receipt "$IMRSE_CI_CANDIDATE_DIR/mlx-mask-fill-compatibility.json" --verify-only
+      - name: Verify exact MLX getters preserve nested optional values and traps
+        run: |
+          set -euo pipefail
+          ulimit -c 0
+          python3 scripts/test-mlx-getters.py --source-root . \
+            --output-dir "$IMRSE_CI_CANDIDATE_DIR" --work-dir "$RUNNER_TEMP/mlx-getters"
+          python3 scripts/patch-mlx-mask-fill.py --source-root . \
+            --extension-receipt "$IMRSE_CI_CANDIDATE_DIR/extension-enablement.json" \
+            --receipt "$IMRSE_CI_CANDIDATE_DIR/mlx-mask-fill-compatibility.json" --verify-only
       - name: Build the unsigned CI app with one scheduler job and WMO frontend thread
         id: ci-build
         run: |
@@ -261,12 +270,14 @@ jobs:
           build = (output / "build.log").read_text().splitlines()
           for helper, constant, targets, proof_name in (
               ("patch-argument-parser.py", "APPROVED_PATCH", ("ArgumentParser", "ArgumentParserToolInfo"), "argument-parser-build-inputs.json"),
-              ("patch-mlx-mask-fill.py", "APPROVED_MLX_PATCH", ("MLX",), "mlx-mask-fill-build-inputs.json"),
+              ("patch-mlx-mask-fill.py", "APPROVED_MLX_PATCH", ("MLX", "MLXNN"), "mlx-mask-fill-build-inputs.json"),
           ):
               tree = ast.parse((Path("scripts") / helper).read_text())
               approval = next(ast.literal_eval(node.value) for node in tree.body if isinstance(node, ast.Assign)
                               and any(isinstance(target, ast.Name) and target.id == constant for target in node.targets))
               records = []
+              if len(targets) != len(approval["files"]):
+                  raise SystemExit("compiler proof does not cover every approved source")
               for target, spec in zip(targets, approval["files"]):
                   filelist = root / f".build/ci-derived-data/Build/Intermediates.noindex/{approval['identity']}.build/Release/{target}.build/Objects-normal/arm64/{target}.SwiftFileList"
                   commands = [shlex.split(line.split("builtin-SwiftDriver --", 1)[1]) for line in build
