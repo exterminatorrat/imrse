@@ -303,11 +303,13 @@ def run(args):
         matrix_argv = [str(binary_path)]
         lines.append("matrix_argv=" + json.dumps(matrix_argv, separators=(",", ":")))
         matrix = _run(matrix_argv, "getter behavior matrix", lines, "matrix", timeout=20)
-        _need(matrix.stdout.strip() == MATRIX_SENTINEL, "getter behavior matrix did not report its sentinel")
+        _need(matrix.stdout == MATRIX_SENTINEL + "\n" and "REFERENCE_MATRIX:" in matrix.stderr,
+              "getter matrix output or reference diagnostics are invalid")
         _expect_trap(binary_path, "--missing-parameter", lines, "parameter_missing_value")
         _expect_trap(binary_path, "--missing-module", lines, "module_missing_value")
         _expect_trap(binary_path, "--negative-control-parameter", lines, "parameter_negative_control")
         _expect_trap(binary_path, "--negative-control-module", lines, "module_negative_control")
+        _expect_trap(binary_path, "--missing-reference", lines, "reference_missing_value")
         lines.append("The harness is not an MLX/Metal module acceptance test.")
         lines.append(SUCCESS_MARKER)
         _write_log(log_path, lines)

@@ -125,7 +125,8 @@ class MLXGetterFixtureTests(unittest.TestCase):
             if argv[0] == "swiftc":
                 return SimpleNamespace(returncode=0, stdout="compiler output\n", stderr="compiler diagnostic\n")
             if len(argv) == 1:
-                return SimpleNamespace(returncode=0, stdout=harness.MATRIX_SENTINEL + "\n", stderr="matrix detail\n")
+                return SimpleNamespace(returncode=0, stdout=harness.MATRIX_SENTINEL + "\n",
+                                       stderr="REFERENCE_MATRIX:Int?:outer nil reference=nil match=true\nmatrix detail\n")
             marker = f"GETTER_TRAP_MODE:{argv[1][2:]}"
             return SimpleNamespace(returncode=-signal.SIGILL, stdout="", stderr=marker + "\nFatal error: expected trap")
 
@@ -151,9 +152,9 @@ class MLXGetterFixtureTests(unittest.TestCase):
         self.assertIn('compile_stderr="compiler diagnostic\\n"', lines)
         self.assertIn("matrix_returncode=0", lines)
         self.assertIn('matrix_stdout="GETTER_MATRIX_PASSED\\n"', lines)
-        self.assertIn('matrix_stderr="matrix detail\\n"', lines)
+        self.assertIn('matrix_stderr="REFERENCE_MATRIX:Int?:outer nil reference=nil match=true\\nmatrix detail\\n"', lines)
         for label in ("parameter_missing_value", "module_missing_value",
-                      "parameter_negative_control", "module_negative_control"):
+                      "parameter_negative_control", "module_negative_control", "reference_missing_value"):
             self.assertIn(f"{label}_returncode={-signal.SIGILL}", lines)
         self.assertIn('parameter_missing_value_stderr="GETTER_TRAP_MODE:missing-parameter\\nFatal error: expected trap"', lines)
         compile_argv = json.loads(next(line.removeprefix("compile_argv=") for line in lines
@@ -164,7 +165,7 @@ class MLXGetterFixtureTests(unittest.TestCase):
         self.assertEqual(calls[0], compile_argv)
         self.assertEqual([call[1] for call in calls[2:]], [
             "--missing-parameter", "--missing-module",
-            "--negative-control-parameter", "--negative-control-module",
+            "--negative-control-parameter", "--negative-control-module", "--missing-reference",
         ])
         self.assertIn("-warnings-as-errors", compile_argv)
         self.assertFalse(any("suppress" in arg for arg in compile_argv))
@@ -209,12 +210,40 @@ class MLXGetterFixtureTests(unittest.TestCase):
         self.assertIn('matrix_stdout="matrix stdout"', log)
         self.assertIn('matrix_stderr="matrix stderr"', log)
 
+    def test_matrix_requires_exact_stdout_sentinel_and_reference_diagnostics(self):
+        def noisy_matrix(argv, **kwargs):
+            if argv[0] == "swiftc":
+                return SimpleNamespace(returncode=0, stdout="", stderr="")
+            return SimpleNamespace(returncode=0, stdout=harness.MATRIX_SENTINEL + "\nextra\n",
+                                   stderr="REFERENCE_MATRIX:Int?:outer nil\n")
+
+        with self.assertRaisesRegex(harness.HarnessError, "matrix output or reference diagnostics"):
+            self.invoke(side_effect=noisy_matrix)
+        log = (self.output / harness.LOG_NAME).read_text(encoding="utf-8")
+        self.assertNotIn(harness.SUCCESS_MARKER, log)
+        self.assertIn('matrix_stdout="GETTER_MATRIX_PASSED\\nextra\\n"', log)
+
+    def test_fixture_uses_independent_cast_oracle_and_spec_depth_cases(self):
+        fixture = FIXTURE_PATH.read_text(encoding="utf-8")
+        self.assertIn("referenceCast<Source, Destination>", fixture)
+        self.assertIn("@inline(never)\nprivate func referenceCast", fixture)
+        self.assertIn("value as? Destination", fixture)
+        self.assertIn("referenceGetter<T>", fixture)
+        self.assertIn("REFERENCE_MATRIX:", fixture)
+        for case in ("Int?", "Int??", "ReferenceValue?", "ReferenceValue??",
+                     "outer nil", "middle nil", "inner nil", "identity"):
+            with self.subTest(case=case):
+                self.assertIn(case, fixture)
+        self.assertIn("let depthOne: Int????", fixture)
+        self.assertIn("let depthFour: Int???? = .none", fixture)
+
     def test_non_signal_trap_exit_records_diagnostics_but_no_success_marker(self):
         def unexpected_exit(argv, **kwargs):
             if argv[0] == "swiftc":
                 return SimpleNamespace(returncode=0, stdout="", stderr="")
             if len(argv) == 1:
-                return SimpleNamespace(returncode=0, stdout=harness.MATRIX_SENTINEL, stderr="")
+                return SimpleNamespace(returncode=0, stdout=harness.MATRIX_SENTINEL + "\n",
+                                       stderr="REFERENCE_MATRIX:Int?:outer nil\n")
             if argv[1] == "--missing-parameter":
                 return SimpleNamespace(returncode=1, stdout="", stderr="GETTER_TRAP_MODE:missing-parameter\nordinary failure")
             return SimpleNamespace(returncode=-signal.SIGILL, stdout="",
@@ -232,7 +261,8 @@ class MLXGetterFixtureTests(unittest.TestCase):
             if argv[0] == "swiftc":
                 return SimpleNamespace(returncode=0, stdout="", stderr="")
             if len(argv) == 1:
-                return SimpleNamespace(returncode=0, stdout=harness.MATRIX_SENTINEL, stderr="")
+                return SimpleNamespace(returncode=0, stdout=harness.MATRIX_SENTINEL + "\n",
+                                       stderr="REFERENCE_MATRIX:Int?:outer nil\n")
             return SimpleNamespace(returncode=-signal.SIGTRAP, stdout="", stderr="unrelated crash")
 
         with self.assertRaisesRegex(harness.HarnessError, "Darwin fatal trap"):
@@ -244,12 +274,13 @@ class MLXGetterFixtureTests(unittest.TestCase):
     def test_fixture_emits_each_mode_marker_before_getter_access(self):
         fixture = FIXTURE_PATH.read_text(encoding="utf-8")
         self.assertIn("GETTER_TRAP_MODE:", fixture)
-        modes = ("missing-parameter", "missing-module",
+        modes = ("missing-reference", "missing-parameter", "missing-module",
                  "negative-control-parameter", "negative-control-module")
         for mode in modes:
             with self.subTest(mode=mode):
                 case = fixture.split(f'case "--{mode}":', 1)[1].split("case ", 1)[0]
-                self.assertLess(case.index(f'announceTrapMode("{mode}")'), case.index(".wrappedValue"))
+                access = "referenceGetter" if mode == "missing-reference" else ".wrappedValue"
+                self.assertLess(case.index(f'announceTrapMode("{mode}")'), case.index(access))
 
     def test_host_guard_rejects_non_arm64_before_process_execution(self):
         with patch.object(harness.platform, "machine", return_value="x86_64"), \
