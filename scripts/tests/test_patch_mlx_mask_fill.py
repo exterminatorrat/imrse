@@ -163,7 +163,7 @@ class PatchMLXMaskFillTests(unittest.TestCase):
             if args[1] == "--summary":
                 return b""
             if args[1] == "--numstat":
-                counts = {self.source_relative: (1, 1), self.module_relative: (4, 2)}
+                counts = {self.source_relative: (1, 1), self.module_relative: (2, 4)}
                 return b"".join(f"{counts[relative][0]}\t{counts[relative][1]}\t".encode()
                                  + relative.encode() + b"\0" for relative in changed)
         raise AssertionError((checkout, args))

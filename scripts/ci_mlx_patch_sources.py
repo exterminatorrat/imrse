@@ -63,7 +63,7 @@ def _verify_diff(checkout, plans, git, need):
     paths = [plan["relative"].encode("utf-8") for plan in plans]
     names = b"".join(path + b"\0" for path in paths)
     status = b"".join(b" M " + path + b"\0" for path in paths)
-    numstat = b"".join(f"{plan['removed']}\t{plan['added']}\t".encode() + plan["relative"].encode("utf-8") + b"\0"
+    numstat = b"".join(f"{plan['added']}\t{plan['removed']}\t".encode() + plan["relative"].encode("utf-8") + b"\0"
                         for plan in plans)
     need(git(checkout, "diff", "--name-only", "-z", "HEAD", "--") == names
          and git(checkout, "status", "--porcelain=v1", "-z", "--untracked-files=all") == status
