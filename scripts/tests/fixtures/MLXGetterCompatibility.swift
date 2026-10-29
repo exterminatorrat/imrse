@@ -134,7 +134,7 @@ enum MLXGetterCompatibility {
         switch CommandLine.arguments.dropFirst().first ?? "" {
         case "--missing-reference":
             announceTrapMode("missing-reference")
-            _ = referenceGetter<Int>(nil)
+            _ = referenceGetter(nil as Int?)
             print("MISSING_REFERENCE_RETURNED")
             return
         case "--missing-parameter":

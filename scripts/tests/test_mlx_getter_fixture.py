@@ -229,6 +229,8 @@ class MLXGetterFixtureTests(unittest.TestCase):
         self.assertIn("@inline(never)\nprivate func referenceCast", fixture)
         self.assertIn("value as? Destination", fixture)
         self.assertIn("referenceGetter<T>", fixture)
+        self.assertIn("_ = referenceGetter(nil as Int?)", fixture)
+        self.assertNotIn("referenceGetter<Int>", fixture)
         self.assertIn("REFERENCE_MATRIX:", fixture)
         for case in ("Int?", "Int??", "ReferenceValue?", "ReferenceValue??",
                      "outer nil", "middle nil", "inner nil", "identity"):
