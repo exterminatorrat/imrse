@@ -147,6 +147,9 @@ jobs:
               raise SystemExit("Package.resolved or vendored EventSource changed during validation")
           print("Verified locked root graph and all three ConcreteTransportTests.")
           PY
+      - name: Enable only the two reviewed revision-bound extensions
+        run: |
+          python3 scripts/enable-ci-extensions.py --source-root . --receipt "$IMRSE_CI_CANDIDATE_DIR/extension-enablement.json"
       - name: Build the unsigned CI app with strict serial WMO compilation
         run: |
           set -o pipefail
