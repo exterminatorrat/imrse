@@ -45,6 +45,9 @@ final class AppCoordinator: NSObject, NSMenuItemValidation {
         model.onPresentPill = { [weak panelController] screen in
             panelController?.present(afterCapturingTargetOn: screen)
         }
+        model.onHidePillForFocusHandoff = { [weak panelController] in
+            panelController?.hideForFocusHandoff()
+        }
         guard !model.isPreviewMode else { return }
         applicationResignObserver = NotificationCenter.default.publisher(for: NSApplication.didResignActiveNotification)
             .sink { [weak self] _ in

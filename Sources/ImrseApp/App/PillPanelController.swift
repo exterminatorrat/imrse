@@ -37,6 +37,10 @@ final class PillPanelController {
         installKeyMonitor()
     }
 
+    func hideForFocusHandoff() {
+        hide()
+    }
+
     static func frame(width: CGFloat, visibleFrame: CGRect) -> CGRect {
         let padding = PillTokens.shadowPadding
         let cappedWidth = min(width, max(180, visibleFrame.width - 2 * PillTokens.edgeInset))

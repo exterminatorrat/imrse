@@ -18,12 +18,15 @@ final class AppPillBridge {
     private var captureInProgress = false
     private var captureFallbackScreen: NSScreen?
     private var activeSubmissionID: UUID?
+    private var focusHandoffPending = false
+    private var lastPresentationScreen: NSScreen?
     private var pillLifecycleSubscription: AnyCancellable?
 
     #if DEBUG
     var isPreviewMode = false
     #endif
     var onPresent: (@MainActor (NSScreen?) -> Void)?
+    var onHideForFocusHandoff: (@MainActor () -> Void)?
     var onStateChange: (@MainActor (TransformationState) -> Void)?
     var onUndo: (@MainActor () -> Void)?
 
@@ -48,10 +51,14 @@ final class AppPillBridge {
         pill.onSubmit = { [weak self] submission in self?.submit(submission) }
         pill.onCancel = { [weak self] id in self?.cancel(id) }
         pill.onUndo = { [weak self] in self?.onUndo?() }
+        pill.onClipboardFocusHandoff = { [weak self] in self?.beginClipboardFocusHandoff() }
         engine.onChange = { [weak self] state in self?.handle(state) }
         pillLifecycleSubscription = pill.$lifecycle.sink { [weak self] lifecycle in
-            guard lifecycle.phase == .hidden, self?.engine.state == .ready else { return }
-            self?.engine.dismiss()
+            guard let self, lifecycle.phase == .hidden else { return }
+            self.focusHandoffPending = false
+            self.lastPresentationScreen = nil
+            guard self.engine.state == .ready else { return }
+            self.engine.dismiss()
         }
     }
 
@@ -89,7 +96,9 @@ final class AppPillBridge {
 
         updatePresentationSettings()
         pill.present()
-        onPresent?(screenAfterCapture() ?? captureFallbackScreen)
+        let screen = screenAfterCapture() ?? captureFallbackScreen
+        lastPresentationScreen = screen
+        onPresent?(screen)
         captureFallbackScreen = nil
 
         if let presetID, let index = pill.presets.firstIndex(where: { $0.id == presetID }) {
@@ -166,11 +175,13 @@ final class AppPillBridge {
                 pill.dismiss()
             } else {
                 pill.applied(id, undoAvailable: engine.canUndo)
+                restoreAfterClipboardFocusHandoff()
             }
         case .failed(let error):
             if let id = activeSubmissionID {
                 activeSubmissionID = nil
                 pill.failed(id, message: error.message)
+                restoreAfterClipboardFocusHandoff()
             } else if captureInProgress {
                 captureInProgress = false
                 pill.showCaptureFailure(message: error.message)
@@ -181,6 +192,18 @@ final class AppPillBridge {
             break
         }
         onStateChange?(state)
+    }
+
+    private func beginClipboardFocusHandoff() {
+        guard case .applying = pill.phase, !focusHandoffPending else { return }
+        focusHandoffPending = true
+        onHideForFocusHandoff?()
+    }
+
+    private func restoreAfterClipboardFocusHandoff() {
+        guard focusHandoffPending else { return }
+        focusHandoffPending = false
+        onPresent?(lastPresentationScreen)
     }
 
     private func updatePresentationSettings() {
