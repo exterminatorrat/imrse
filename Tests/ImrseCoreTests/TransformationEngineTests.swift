@@ -4,6 +4,103 @@ import XCTest
 
 @MainActor
 final class TransformationEngineTests: XCTestCase {
+    func testUnconfirmedClipboardReplacementHasExplicitFailureAndNoUndoReceipt() async {
+        let access = StubSelectionAccess(target: snapshot(text: "original"))
+        access.replacementError = .clipboardPending
+        let engine = TransformationEngine(
+            selectionAccess: access,
+            textProvider: ScriptedTextProvider(fragments: ["rewritten"])
+        )
+        engine.invoke()
+        engine.submit(instruction: "", provider: providerConfiguration)
+        await waitForState(engine, .failed(.clipboardPending))
+        XCTAssertEqual(engine.diagnostics.error, .clipboardPending)
+        XCTAssertEqual(engine.diagnostics.replacement, "failed")
+        XCTAssertFalse(engine.canUndo)
+        XCTAssertEqual(access.replacedText, ["rewritten"])
+    }
+
+    func testClipboardPendingReplacementFailureConsumesPreviousReceiptAcrossDismissAndInvoke() async {
+        let firstTarget = snapshot(text: "first source")
+        let access = StubSelectionAccess(target: firstTarget)
+        let engine = TransformationEngine(
+            selectionAccess: access,
+            textProvider: ScriptedTextProvider(fragments: ["rewritten"])
+        )
+        engine.invoke()
+        engine.submit(instruction: "", provider: providerConfiguration)
+        await waitForState(engine, .succeeded(unchanged: false))
+        XCTAssertTrue(engine.canUndo)
+
+        engine.dismiss()
+        let secondTarget = snapshot(text: "second source")
+        access.target = secondTarget
+        access.replacementError = .clipboardPending
+        engine.invoke()
+        engine.submit(instruction: "", provider: providerConfiguration)
+        await waitForState(engine, .failed(.clipboardPending))
+
+        XCTAssertFalse(engine.canUndo)
+        XCTAssertTrue(access.discarded.contains(firstTarget.id))
+        XCTAssertTrue(access.discarded.contains(secondTarget.id))
+
+        engine.dismiss()
+        access.target = snapshot(text: "third source")
+        engine.invoke()
+        XCTAssertEqual(engine.state, .ready)
+        XCTAssertFalse(engine.canUndo)
+        await engine.undo()
+        XCTAssertEqual(engine.state, .failed(.undoUnavailable))
+        XCTAssertEqual(access.undoCount, 0)
+    }
+
+    func testNonPendingReplacementFailurePreservesPreviousUndoReceipt() async {
+        let firstTarget = snapshot(text: "first source")
+        let access = StubSelectionAccess(target: firstTarget)
+        let engine = TransformationEngine(
+            selectionAccess: access,
+            textProvider: ScriptedTextProvider(fragments: ["rewritten"])
+        )
+        engine.invoke()
+        engine.submit(instruction: "", provider: providerConfiguration)
+        await waitForState(engine, .succeeded(unchanged: false))
+
+        engine.dismiss()
+        access.target = snapshot(text: "second source")
+        access.replacementError = .replacementFailed
+        engine.invoke()
+        engine.submit(instruction: "", provider: providerConfiguration)
+        await waitForState(engine, .failed(.replacementFailed))
+        XCTAssertTrue(engine.canUndo)
+        XCTAssertFalse(access.discarded.contains(firstTarget.id))
+
+        engine.dismiss()
+        access.target = snapshot(text: "third source")
+        engine.invoke()
+        XCTAssertTrue(engine.canUndo)
+        await engine.undo()
+
+        XCTAssertEqual(access.undoReceipts.last?.target.id, firstTarget.id)
+        XCTAssertTrue(access.discarded.contains(firstTarget.id))
+    }
+
+    func testUnconfirmedClipboardUndoPreservesRecoveryFailureAndConsumesReceipt() async {
+        let access = StubSelectionAccess(target: snapshot(text: "original"))
+        let engine = TransformationEngine(
+            selectionAccess: access,
+            textProvider: ScriptedTextProvider(fragments: ["rewritten"])
+        )
+        engine.invoke()
+        engine.submit(instruction: "", provider: providerConfiguration)
+        await waitForState(engine, .succeeded(unchanged: false))
+        access.undoError = .clipboardPending
+        await engine.undo()
+        XCTAssertEqual(engine.state, .failed(.clipboardPending))
+        XCTAssertEqual(engine.diagnostics.error, .clipboardPending)
+        XCTAssertFalse(engine.canUndo)
+        XCTAssertEqual(access.undoCount, 1)
+    }
+
     func testFailedNewCaptureDoesNotReportPreviousTargetOrProviderMetadata() async {
         let access = StubSelectionAccess(target: snapshot(text: "original"))
         let engine = TransformationEngine(selectionAccess: access, textProvider: ScriptedTextProvider(callFailure: .timeout))

@@ -383,6 +383,46 @@ final class AppPillBridgeTests: XCTestCase {
         XCTAssertEqual(engine.state, .idle)
         XCTAssertEqual(replies, [.terminateNow])
     }
+    func testUndoClipboardPendingPresentsFailureWithoutRetryOrReceipt() async {
+        let selection = RecordingSelectionAccess(undoError: .clipboardPending)
+        let provider = RecordingTextProvider(output: "updated")
+        let engine = TransformationEngine(selectionAccess: selection, textProvider: provider)
+        let model = AppModel(testEngine: engine)
+        var presentationCount = 0
+        model.onPresentPill = { _ in presentationCount += 1 }
+
+        engine.invoke()
+        engine.submit(
+            instruction: "Replace selected text",
+            provider: providerConfiguration("default", model: "default-model")
+        )
+        await waitUntil { engine.state == .succeeded(unchanged: false) }
+        XCTAssertTrue(engine.canUndo)
+
+        model.undo()
+        await waitUntil {
+            guard engine.state == .failed(.clipboardPending) else { return false }
+            if case .failure = model.pillModel.phase { return true }
+            return false
+        }
+
+        XCTAssertEqual(engine.state, .failed(.clipboardPending))
+        guard case .failure(_, let message) = model.pillModel.phase else {
+            return XCTFail("Expected the clipboard-pending Undo failure to remain visible")
+        }
+        XCTAssertEqual(message, ImrseError.clipboardPending.message)
+        XCTAssertTrue(model.pillModel.phase.isVisible)
+        XCTAssertEqual(presentationCount, 1)
+        XCTAssertFalse(engine.canUndo)
+        XCTAssertEqual(selection.undoCount, 1)
+
+        model.undo()
+
+        XCTAssertEqual(selection.undoCount, 1)
+        XCTAssertEqual(presentationCount, 1)
+        XCTAssertFalse(engine.canUndo)
+        XCTAssertEqual(engine.state, .failed(.clipboardPending))
+    }
     #endif
 
     func testCancellationIgnoresLateProviderCompletionAfterANewInvocation() async {
@@ -685,6 +725,7 @@ private final class RecordingSelectionAccess: SelectionAccess {
     )
     let captureError: ImrseError?
     let replacementError: ImrseError?
+    let undoError: ImrseError?
     var holdReplacement: Bool
     var holdUndo: Bool
     var captureCount = 0
@@ -697,11 +738,13 @@ private final class RecordingSelectionAccess: SelectionAccess {
     init(
         captureError: ImrseError? = nil,
         replacementError: ImrseError? = nil,
+        undoError: ImrseError? = nil,
         holdReplacement: Bool = false,
         holdUndo: Bool = false
     ) {
         self.captureError = captureError
         self.replacementError = replacementError
+        self.undoError = undoError
         self.holdReplacement = holdReplacement
         self.holdUndo = holdUndo
     }
@@ -729,6 +772,7 @@ private final class RecordingSelectionAccess: SelectionAccess {
         if holdUndo {
             await withCheckedContinuation { undoContinuation = $0 }
         }
+        if let undoError { throw undoError }
     }
 
     func discard(_ target: SelectionSnapshot) {}

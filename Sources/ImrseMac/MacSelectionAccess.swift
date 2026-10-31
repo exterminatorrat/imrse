@@ -64,6 +64,15 @@ public final class MacSelectionAccess: SelectionAccess {
         let focusedSelection: NativeSelection
     }
 
+    private struct ClipboardDestination {
+        let target: TargetHandle
+        let application: NSRunningApplication
+        let identity: ClipboardDestinationIdentity
+        let expectedValue: String
+        let replacement: String
+        let replacementRange: TextRange
+    }
+
     public var clipboardFallbackEnabled: Bool
     public private(set) var capturedScreen: NSScreen?
     private let prepareForClipboardPaste: ClipboardPastePreparation?
@@ -73,6 +82,7 @@ public final class MacSelectionAccess: SelectionAccess {
     private var workspaceObserver: NSObjectProtocol?
     private var captureDeadline: ContinuousClock.Instant?
     private var undoTarget: UndoTarget?
+    private let clipboardRecovery = ClipboardPasteRecovery<ClipboardPasteboardTransaction, ClipboardDestination>()
 
     public static var accessibilityPermissionGranted: Bool {
         AXIsProcessTrusted()
@@ -199,6 +209,7 @@ public final class MacSelectionAccess: SelectionAccess {
     }
 
     public func replace(_ target: SelectionSnapshot, with text: String) async throws -> ReplacementReceipt {
+        try recoverPendingClipboard()
         try validate(target)
         guard let captured = capturedTarget, captured.snapshot.id == target.id else {
             throw ImrseError.targetLost
@@ -240,6 +251,7 @@ public final class MacSelectionAccess: SelectionAccess {
     }
 
     public func undo(_ receipt: ReplacementReceipt) async throws {
+        try recoverPendingClipboard()
         guard let undoTarget, sameReceipt(receipt, undoTarget.receipt) else {
             throw ImrseError.undoUnavailable
         }
@@ -943,81 +955,130 @@ public final class MacSelectionAccess: SelectionAccess {
         guard Self.eventPostingPermissionGranted else { throw ImrseError.permissionRequired }
         try requireTargetForeground(target)
         guard clipboardFallbackTargetIsEligible(target) else { throw ImrseError.staleSelection }
-        let pasteboard = NSPasteboard.general
-        var transaction = try ClipboardPasteboardTransaction.capture(from: pasteboard)
-        do {
-            try requireTargetForeground(target)
-            guard clipboardFallbackTargetIsEligible(target) else { throw ImrseError.staleSelection }
-            try transaction.stage(text, on: pasteboard)
-            guard transaction.stillOwns(pasteboard) else { throw ImrseError.clipboardFailed }
-
-            try requireTargetForeground(target)
-            guard clipboardFallbackTargetIsEligible(target) else { throw ImrseError.staleSelection }
-            let current = try currentSelection(target)
-            guard current.range == range,
-                  sameText(current.text, expectedText),
-                  let currentValue = try wholeValue(target.element, failure: .staleSelection),
-                  sameText(currentValue, oldValue),
-                  transaction.stillOwns(pasteboard)
-            else {
-                throw ImrseError.staleSelection
-            }
-
-            guard let keyDown = CGEvent(keyboardEventSource: nil, virtualKey: CGKeyCode(kVK_ANSI_V), keyDown: true),
-                  let keyUp = CGEvent(keyboardEventSource: nil, virtualKey: CGKeyCode(kVK_ANSI_V), keyDown: false)
-            else {
-                throw ImrseError.clipboardFailed
-            }
-            try VerifiedAction.perform(
-                verify: {
-                    try self.requireTargetForeground(target)
-                    guard self.clipboardFallbackTargetIsEligible(target) else {
-                        throw ImrseError.staleSelection
-                    }
-                    let beforePost = try self.currentSelection(target)
-                    guard beforePost.range == range,
-                          self.sameText(beforePost.text, expectedText),
-                          let valueBeforePost = try self.wholeValue(target.element, failure: .staleSelection),
-                          self.sameText(valueBeforePost, oldValue)
-                    else {
-                        throw ImrseError.staleSelection
-                    }
-                    guard transaction.stillOwns(pasteboard) else { throw ImrseError.clipboardFailed }
-                },
-                action: {
-                    keyDown.flags = .maskCommand
-                    keyUp.flags = .maskCommand
-                    keyDown.postToPid(target.processID)
-                    keyUp.postToPid(target.processID)
-                }
-            )
-
-            guard try await waitForValue(expectedValue, in: target.element) else {
-                throw ImrseError.replacementFailed
-            }
-            let after = try currentSelection(target, allowingEmpty: true)
-            _ = try transaction.restoreIfOwned(on: pasteboard)
-            return after
-        } catch {
-            do {
-                _ = try transaction.restoreIfOwned(on: pasteboard)
-            } catch {
-                invalidateAfterUnverifiedWrite(target.id)
-                throw ImrseError.clipboardFailed
-            }
-            throw error
+        guard let application = NSRunningApplication(processIdentifier: target.processID),
+              !application.isTerminated,
+              let identity = clipboardIdentity(application),
+              identity.applicationID == target.applicationID,
+              let replacementRange = validatedRange(at: range.location, length: text.utf16.count),
+              let keyDown = CGEvent(keyboardEventSource: nil, virtualKey: CGKeyCode(kVK_ANSI_V), keyDown: true),
+              let keyUp = CGEvent(keyboardEventSource: nil, virtualKey: CGKeyCode(kVK_ANSI_V), keyDown: false)
+        else {
+            throw ImrseError.clipboardFailed
         }
+        let destination = ClipboardDestination(
+            target: target,
+            application: application,
+            identity: identity,
+            expectedValue: expectedValue,
+            replacement: text,
+            replacementRange: replacementRange
+        )
+        let pasteboard = NSPasteboard.general
+        return try await clipboardRecovery.perform(
+            destination: destination,
+            capture: { try ClipboardPasteboardTransaction.capture(from: pasteboard) },
+            stage: { transaction in
+                try self.requireTargetForeground(target)
+                let current = try self.currentSelection(target)
+                guard self.sameSelection(current, expectedSelection),
+                      let value = try self.wholeValue(target.element, failure: .staleSelection),
+                      self.sameText(value, oldValue),
+                      self.clipboardFallbackTargetIsEligible(target)
+                else { throw ImrseError.staleSelection }
+                try transaction.stage(text, on: pasteboard)
+            },
+            verify: { transaction in
+                try self.requireCurrentClipboardDestination(destination)
+                try self.requireTargetForeground(target)
+                guard self.clipboardFallbackTargetIsEligible(target) else { throw ImrseError.staleSelection }
+                let beforePost = try self.currentSelection(target)
+                guard beforePost.range == range,
+                      self.sameText(beforePost.text, expectedText),
+                      self.sameSelection(beforePost, expectedSelection),
+                      let valueBeforePost = try self.wholeValue(target.element, failure: .staleSelection),
+                      self.sameText(valueBeforePost, oldValue)
+                else { throw ImrseError.staleSelection }
+                guard transaction.stillOwns(pasteboard) else { throw ImrseError.clipboardFailed }
+            },
+            post: {
+                keyDown.flags = .maskCommand
+                keyUp.flags = .maskCommand
+                keyDown.postToPid(target.processID)
+                keyUp.postToPid(target.processID)
+            },
+            confirm: {
+                guard let after = try await self.waitForClipboardWrite(destination) else {
+                    throw ImrseError.replacementFailed
+                }
+                return after
+            },
+            hasMutated: { $0.hasMutatedPasteboard },
+            restore: { try $0.restoreIfOwned(on: pasteboard) }
+        )
     }
 
-    private func waitForValue(_ expectedValue: String, in element: AXUIElement) async throws -> Bool {
+    private func recoverPendingClipboard() throws {
+        try clipboardRecovery.recover(
+            terminationConfirmed: { destination in
+                destination.identity.confirmsTermination(
+                    observed: self.clipboardIdentity(destination.application),
+                    isTerminated: destination.application.isTerminated
+                )
+            },
+            writeConfirmed: { try self.confirmedClipboardSelection($0) != nil },
+            restore: { try $0.restoreIfOwned(on: NSPasteboard.general) }
+        )
+    }
+
+    private func clipboardIdentity(_ application: NSRunningApplication) -> ClipboardDestinationIdentity? {
+        guard let launchDate = application.launchDate,
+              let executableURL = application.executableURL
+        else { return nil }
+        return ClipboardDestinationIdentity(
+            processID: application.processIdentifier,
+            launchDate: launchDate,
+            executableURL: executableURL,
+            applicationID: application.bundleIdentifier ?? "pid:\(application.processIdentifier)"
+        )
+    }
+
+    private func requireCurrentClipboardDestination(_ destination: ClipboardDestination) throws {
+        guard !destination.application.isTerminated,
+              clipboardIdentity(destination.application) == destination.identity,
+              let current = NSRunningApplication(processIdentifier: destination.identity.processID),
+              !current.isTerminated,
+              clipboardIdentity(current) == destination.identity
+        else { throw ImrseError.staleSelection }
+    }
+
+    private func confirmedClipboardSelection(_ destination: ClipboardDestination) throws -> NativeSelection? {
+        try requireCurrentClipboardDestination(destination)
+        let target = destination.target
+        try requireTargetForeground(target)
+        let selection = try currentSelection(target, allowingEmpty: true)
+        guard (selection.range == destination.replacementRange && sameText(selection.text, destination.replacement))
+                || UTF16SelectionRange.isCollapsedCaret(
+                    selection.range,
+                    selectedText: selection.text,
+                    atEndOf: destination.replacementRange
+                ),
+              let value = try wholeValue(target.element, failure: .replacementFailed),
+              sameText(value, destination.expectedValue)
+        else { return nil }
+        let rechecked = try currentSelection(target, allowingEmpty: true)
+        guard sameSelection(selection, rechecked) else { throw ImrseError.staleSelection }
+        return rechecked
+    }
+
+    private func waitForClipboardWrite(_ destination: ClipboardDestination) async throws -> NativeSelection? {
         let clock = ContinuousClock()
         let deadline = clock.now.advanced(by: .milliseconds(500))
         while true {
-            guard let current = try wholeValue(element, failure: .replacementFailed) else {
-                throw ImrseError.replacementFailed
+            try Task.checkCancellation()
+            if let selection = try confirmedClipboardSelection(destination) {
+                return selection
             }
-            if sameText(current, expectedValue) { return true }
-            guard clock.now < deadline else { return false }
+            guard clock.now < deadline else { return nil }
             await waitForNativeUpdateTurn()
         }
     }

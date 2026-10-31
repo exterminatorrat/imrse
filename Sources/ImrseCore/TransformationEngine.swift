@@ -280,6 +280,12 @@ public final class TransformationEngine {
         guard activeOperationID == operationID else { return }
         invalidateGeneration(cancelTask: false)
         pendingResponseMetadata = nil
+        if replacementFailed && failure == .clipboardPending {
+            if let previousReceipt = undoReceipt {
+                selectionAccess.discard(previousReceipt.target)
+            }
+            undoReceipt = nil
+        }
         discardTarget()
         diagnostics.error = failure
         diagnostics.generation = failure == .cancelled ? "cancelled" : "failed"
@@ -360,7 +366,7 @@ public final class TransformationEngine {
     private static func replacementFailure(_ error: any Error) -> ImrseError {
         guard let error = error as? ImrseError else { return .replacementFailed }
         return switch error {
-        case .targetLost, .staleSelection, .clipboardFailed, .permissionRequired: error
+        case .targetLost, .staleSelection, .clipboardFailed, .clipboardPending, .permissionRequired: error
         default: .replacementFailed
         }
     }
@@ -368,6 +374,7 @@ public final class TransformationEngine {
     private static func undoFailure(_ error: any Error) -> ImrseError {
         guard let error = error as? ImrseError else { return .undoUnavailable }
         return switch error {
+        case .clipboardPending: .clipboardPending
         case .staleSelection, .targetLost, .replacementFailed, .clipboardFailed: .undoUnavailable
         default: error
         }
