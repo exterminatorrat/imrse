@@ -20,6 +20,7 @@ public final class TransformationEngine {
     public private(set) var diagnostics = DiagnosticMetadata()
     public private(set) var responseMetadata: ResponseMetadata?
     public var onChange: (@MainActor (TransformationState) -> Void)?
+    public var onPrepareReplacement: (@MainActor () -> Void)?
     public var canUndo: Bool {
         undoReceipt != nil && state != .generating && state != .replacing && state != .undoing
     }
@@ -51,7 +52,8 @@ public final class TransformationEngine {
         do {
             snapshot = try selectionAccess.capture()
         } catch {
-            fail(Self.captureFailure(error))
+            let selectionFailureReason = selectionAccess.lastFailureReason
+            fail(Self.captureFailure(error), selectionFailureReason: selectionFailureReason)
             return
         }
 
@@ -175,13 +177,16 @@ public final class TransformationEngine {
             selectionAccess.discard(receipt.target)
             diagnostics.strategy = receipt.strategy
             diagnostics.error = nil
+            diagnostics.selectionFailureReason = nil
             diagnostics.generation = "idle"
             diagnostics.replacement = "undone"
             transition(to: .succeeded(unchanged: false))
         } catch {
+            let selectionFailureReason = selectionAccess.lastFailureReason
             selectionAccess.discard(receipt.target)
             let failure = Self.undoFailure(error)
             diagnostics.error = failure
+            diagnostics.selectionFailureReason = selectionFailureReason
             diagnostics.targetValid = false
             diagnostics.replacement = "failed"
             transition(to: .failed(failure))
@@ -221,12 +226,19 @@ public final class TransformationEngine {
                 return
             }
 
+            onPrepareReplacement?()
+            guard isGenerating(operationID) else { return }
             do {
                 try selectionAccess.validate(target)
                 diagnostics.targetValid = true
             } catch {
+                let selectionFailureReason = selectionAccess.lastFailureReason
                 diagnostics.targetValid = false
-                finish(operationID, failure: Self.validationFailure(error))
+                finish(
+                    operationID,
+                    failure: Self.validationFailure(error),
+                    selectionFailureReason: selectionFailureReason
+                )
                 return
             }
             guard isGenerating(operationID) else { return }
@@ -249,15 +261,22 @@ public final class TransformationEngine {
                 activeOperationID = nil
                 generationTask = nil
                 diagnostics.error = nil
+                diagnostics.selectionFailureReason = nil
                 diagnostics.strategy = receipt.strategy
                 diagnostics.generation = "complete"
                 diagnostics.replacement = "replaced"
                 transition(to: .succeeded(unchanged: false))
             } catch {
                 guard activeOperationID == operationID, state == .replacing else { return }
+                let selectionFailureReason = selectionAccess.lastFailureReason
                 let failure = Self.replacementFailure(error)
                 if failure == .targetLost || failure == .staleSelection { diagnostics.targetValid = false }
-                finish(operationID, failure: failure, replacementFailed: true)
+                finish(
+                    operationID,
+                    failure: failure,
+                    replacementFailed: true,
+                    selectionFailureReason: selectionFailureReason
+                )
             }
         } catch {
             guard activeOperationID == operationID else { return }
@@ -271,12 +290,18 @@ public final class TransformationEngine {
         generationTask = nil
         discardTarget()
         diagnostics.error = nil
+        diagnostics.selectionFailureReason = nil
         diagnostics.generation = "complete"
         diagnostics.replacement = unchanged ? "unchanged" : "replaced"
         transition(to: .succeeded(unchanged: unchanged))
     }
 
-    private func finish(_ operationID: UUID, failure: ImrseError, replacementFailed: Bool = false) {
+    private func finish(
+        _ operationID: UUID,
+        failure: ImrseError,
+        replacementFailed: Bool = false,
+        selectionFailureReason: SelectionFailureReason? = nil
+    ) {
         guard activeOperationID == operationID else { return }
         invalidateGeneration(cancelTask: false)
         pendingResponseMetadata = nil
@@ -288,16 +313,18 @@ public final class TransformationEngine {
         }
         discardTarget()
         diagnostics.error = failure
+        diagnostics.selectionFailureReason = selectionFailureReason
         diagnostics.generation = failure == .cancelled ? "cancelled" : "failed"
         diagnostics.replacement = replacementFailed ? "failed" : "idle"
         transition(to: .failed(failure))
     }
 
-    private func fail(_ failure: ImrseError) {
+    private func fail(_ failure: ImrseError, selectionFailureReason: SelectionFailureReason? = nil) {
         responseMetadata = nil
         pendingResponseMetadata = nil
         discardTarget()
         diagnostics.error = failure
+        diagnostics.selectionFailureReason = selectionFailureReason
         diagnostics.generation = failure == .cancelled ? "cancelled" : "idle"
         diagnostics.replacement = "idle"
         transition(to: .failed(failure))

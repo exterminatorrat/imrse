@@ -118,6 +118,86 @@ final class TransformationEngineTests: XCTestCase {
         XCTAssertNil(engine.diagnostics.model)
     }
 
+    func testCaptureFailureReasonIsRecordedAndClearedByNewInvocation() async {
+        let access = StubSelectionAccess(target: snapshot(text: "original"))
+        let engine = TransformationEngine(
+            selectionAccess: access,
+            textProvider: ScriptedTextProvider(fragments: ["rewritten"])
+        )
+        access.captureError = .noSelection
+        access.captureFailureReason = .focusedElementUnavailable
+
+        engine.invoke()
+
+        XCTAssertEqual(engine.state, .failed(.noSelection))
+        XCTAssertEqual(engine.diagnostics.selectionFailureReason, .focusedElementUnavailable)
+
+        engine.dismiss()
+        XCTAssertEqual(engine.diagnostics.selectionFailureReason, .focusedElementUnavailable)
+        access.captureError = nil
+        engine.invoke()
+
+        XCTAssertEqual(engine.state, .ready)
+        XCTAssertNil(engine.diagnostics.selectionFailureReason)
+
+        engine.submit(instruction: "", provider: providerConfiguration)
+        await waitForState(engine, .succeeded(unchanged: false))
+        XCTAssertNil(engine.diagnostics.selectionFailureReason)
+    }
+
+    func testValidationFailurePreservesOriginalReasonAfterDiscardingInvalidatedTarget() async {
+        let access = StubSelectionAccess(target: snapshot(text: "original"))
+        access.validationError = .targetLost
+        access.validationFailureReason = .captureInvalidated
+        let engine = TransformationEngine(
+            selectionAccess: access,
+            textProvider: ScriptedTextProvider(fragments: ["rewritten"])
+        )
+        engine.invoke()
+        engine.submit(instruction: "", provider: providerConfiguration)
+
+        await waitForState(engine, .failed(.targetLost))
+
+        XCTAssertNil(access.lastFailureReason)
+        XCTAssertEqual(engine.diagnostics.selectionFailureReason, .captureInvalidated)
+    }
+
+    func testReplacementFailureRecordsAdapterReasonWithoutChangingError() async {
+        let access = StubSelectionAccess(target: snapshot(text: "original"))
+        access.replacementError = .clipboardPending
+        access.replacementFailureReason = .replacementVerificationFailed
+        let engine = TransformationEngine(
+            selectionAccess: access,
+            textProvider: ScriptedTextProvider(fragments: ["rewritten"])
+        )
+        engine.invoke()
+        engine.submit(instruction: "", provider: providerConfiguration)
+
+        await waitForState(engine, .failed(.clipboardPending))
+
+        XCTAssertEqual(engine.diagnostics.error, .clipboardPending)
+        XCTAssertEqual(engine.diagnostics.selectionFailureReason, .replacementVerificationFailed)
+    }
+
+    func testUndoFailureRecordsAdapterReasonWithoutChangingError() async {
+        let access = StubSelectionAccess(target: snapshot(text: "original"))
+        let engine = TransformationEngine(
+            selectionAccess: access,
+            textProvider: ScriptedTextProvider(fragments: ["rewritten"])
+        )
+        engine.invoke()
+        engine.submit(instruction: "", provider: providerConfiguration)
+        await waitForState(engine, .succeeded(unchanged: false))
+        access.undoError = .staleSelection
+        access.undoFailureReason = .snapshotMismatch
+
+        await engine.undo()
+
+        XCTAssertEqual(engine.state, .failed(.undoUnavailable))
+        XCTAssertEqual(engine.diagnostics.error, .undoUnavailable)
+        XCTAssertEqual(engine.diagnostics.selectionFailureReason, .snapshotMismatch)
+    }
+
     func testRejectedSubmissionReleasesTargetAndRecordsRoutingFailure() async {
         let access = StubSelectionAccess(target: snapshot(text: "original"))
         let provider = ScriptedTextProvider()
@@ -897,11 +977,16 @@ private actor DeferredTextProvider: TextProvider {
 private final class StubSelectionAccess: SelectionAccess {
     var target: SelectionSnapshot
     var captureError: ImrseError?
+    var captureFailureReason: SelectionFailureReason?
     var validationError: ImrseError?
+    var validationFailureReason: SelectionFailureReason?
     var replacementError: ImrseError?
+    var replacementFailureReason: SelectionFailureReason?
     var undoError: ImrseError?
+    var undoFailureReason: SelectionFailureReason?
     var holdReplacement = false
     private var replacementContinuation: CheckedContinuation<ReplacementReceipt, any Error>?
+    private(set) var lastFailureReason: SelectionFailureReason?
     private(set) var captureCount = 0
     private(set) var replacedText: [String] = []
     private(set) var discarded: [UUID] = []
@@ -914,18 +999,30 @@ private final class StubSelectionAccess: SelectionAccess {
 
     func capture() throws -> SelectionSnapshot {
         captureCount += 1
-        if let captureError { throw captureError }
+        if let captureError {
+            lastFailureReason = captureFailureReason
+            throw captureError
+        }
+        lastFailureReason = nil
         return target
     }
 
     func validate(_ target: SelectionSnapshot) throws {
-        if let validationError { throw validationError }
+        if let validationError {
+            lastFailureReason = validationFailureReason
+            throw validationError
+        }
+        lastFailureReason = nil
         guard target.id == self.target.id else { throw ImrseError.targetLost }
     }
 
     func replace(_ target: SelectionSnapshot, with text: String) async throws -> ReplacementReceipt {
         replacedText.append(text)
-        if let replacementError { throw replacementError }
+        if let replacementError {
+            lastFailureReason = replacementFailureReason
+            throw replacementError
+        }
+        lastFailureReason = nil
         let receipt = ReplacementReceipt(target: target, replacement: text, strategy: .selectedText)
         guard holdReplacement else { return receipt }
         return try await withCheckedThrowingContinuation { replacementContinuation = $0 }
@@ -934,11 +1031,16 @@ private final class StubSelectionAccess: SelectionAccess {
     func undo(_ receipt: ReplacementReceipt) async throws {
         undoCount += 1
         undoReceipts.append(receipt)
-        if let undoError { throw undoError }
+        if let undoError {
+            lastFailureReason = undoFailureReason
+            throw undoError
+        }
+        lastFailureReason = nil
     }
 
     func discard(_ target: SelectionSnapshot) {
         discarded.append(target.id)
+        lastFailureReason = nil
     }
 
     func completeReplacement() {

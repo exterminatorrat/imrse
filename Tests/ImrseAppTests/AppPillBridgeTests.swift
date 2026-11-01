@@ -181,6 +181,66 @@ final class AppPillBridgeTests: XCTestCase {
         XCTAssertEqual(presentationCount, 2)
     }
 
+    func testFocusHandoffPrecedesValidationAndRestoresSuccessWithUndo() async {
+        let selection = RecordingSelectionAccess()
+        let (bridge, pill) = makeBridge(selection: selection, provider: RecordingTextProvider(output: "updated"))
+        var handoffCount = 0
+        var presentationCount = 0
+        bridge.onPresent = { _ in presentationCount += 1 }
+        bridge.onHideForFocusHandoff = { handoffCount += 1 }
+        selection.onValidate = {
+            XCTAssertEqual(handoffCount, 1)
+            guard case .applying = pill.phase else { return XCTFail("Expected applying before validation") }
+        }
+
+        bridge.invoke()
+        pill.submit()
+        await waitUntil { bridge.engine.state == .succeeded(unchanged: false) }
+
+        XCTAssertEqual(selection.replaceCount, 1)
+        XCTAssertEqual(handoffCount, 1)
+        XCTAssertEqual(presentationCount, 2)
+        XCTAssertTrue(pill.canUndo)
+    }
+
+    func testFocusHandoffDoesNotBypassChangedTargetAndRestoresFailure() async {
+        let selection = RecordingSelectionAccess()
+        let (bridge, pill) = makeBridge(selection: selection, provider: RecordingTextProvider(output: "updated"))
+        var handoffCount = 0
+        var presentationCount = 0
+        bridge.onPresent = { _ in presentationCount += 1 }
+        bridge.onHideForFocusHandoff = { handoffCount += 1 }
+        selection.onValidate = {
+            XCTAssertEqual(handoffCount, 1)
+            throw ImrseError.staleSelection
+        }
+
+        bridge.invoke()
+        pill.submit()
+        await waitUntil { bridge.engine.state == .failed(.staleSelection) }
+
+        XCTAssertEqual(selection.replaceCount, 0)
+        XCTAssertEqual(handoffCount, 1)
+        XCTAssertEqual(presentationCount, 2)
+        guard case .failure(_, ImrseError.staleSelection.message) = pill.phase else {
+            return XCTFail("Expected the original validation failure")
+        }
+    }
+
+    func testCancelDuringFocusHandoffPreventsValidationAndReplacement() async {
+        let selection = RecordingSelectionAccess()
+        let (bridge, pill) = makeBridge(selection: selection, provider: RecordingTextProvider(output: "updated"))
+        bridge.onHideForFocusHandoff = { pill.dismiss() }
+        selection.onValidate = { XCTFail("Cancelled generation must not validate or apply") }
+
+        bridge.invoke()
+        pill.submit()
+        await waitUntil { bridge.engine.state == .failed(.cancelled) }
+
+        XCTAssertEqual(selection.replaceCount, 0)
+        XCTAssertEqual(pill.phase, .hidden)
+    }
+
     func testClipboardFocusHandoffRestoresReplacementFailurePresentation() async {
         let selection = RecordingSelectionAccess(
             replacementError: .replacementFailed,
@@ -795,6 +855,7 @@ private final class RecordingSelectionAccess: SelectionAccess {
     var replaceCount = 0
     var undoCount = 0
     var events: [String] = []
+    var onValidate: (() throws -> Void)?
     private var replacementContinuation: CheckedContinuation<Void, Never>?
     private var undoContinuation: CheckedContinuation<Void, Never>?
 
@@ -819,7 +880,7 @@ private final class RecordingSelectionAccess: SelectionAccess {
         return snapshot
     }
 
-    func validate(_ target: SelectionSnapshot) throws {}
+    func validate(_ target: SelectionSnapshot) throws { try onValidate?() }
 
     func replace(_ target: SelectionSnapshot, with text: String) async throws -> ReplacementReceipt {
         replaceCount += 1
