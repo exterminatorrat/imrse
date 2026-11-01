@@ -7,6 +7,7 @@ import plistlib
 import subprocess
 import sys
 import tempfile
+import textwrap
 import unittest
 import zipfile
 from pathlib import Path
@@ -248,6 +249,9 @@ class PackageLocalCandidateTests(unittest.TestCase):
             "exit 97\n"
         )
         swift.chmod(0o755)
+        xcodebuild = stub_directory / "xcodebuild"
+        xcodebuild.write_bytes(swift.read_bytes())
+        xcodebuild.chmod(0o755)
         capture = Path(base) / "swift-argv"
         output = Path(base) / "ci-output"
         environment = os.environ.copy()
@@ -1754,13 +1758,24 @@ class PackageLocalCandidateTests(unittest.TestCase):
                 self.assertEqual(result.returncode, 97, result.stdout)
                 self.assertIsNotNone(argv)
                 self.assertEqual(argv[0], b"build")
-                self.assertEqual(argv[argv.index(b"--configuration") + 1], b"release")
-                architecture_options = [index for index, argument in enumerate(argv) if argument == b"--arch"]
+                self.assertEqual(argv[argv.index(b"-configuration") + 1], b"Release")
+                architecture_options = [index for index, argument in enumerate(argv) if argument == b"-destination"]
                 self.assertEqual(len(architecture_options), 1)
-                self.assertEqual(argv[architecture_options[0] + 1].decode(), expected_architecture)
+                self.assertEqual(argv[architecture_options[0] + 1].decode(), f"platform=macOS,arch={expected_architecture}")
                 self.assertNotIn(b"--triple", argv)
-                self.assertIn(b"--only-use-versions-from-resolved-file", argv)
-                self.assertEqual(argv[-2:], [b"--product", b"imrse"])
+                self.assertIn(b"-onlyUsePackageVersionsFromResolvedFile", argv)
+                self.assertIn(b"-disableAutomaticPackageResolution", argv)
+                self.assertIn(b"-skipPackageUpdates", argv)
+                self.assertEqual(argv[argv.index(b"-resultBundlePath") + 1].decode(), str(output.resolve() / "CI-BUILD.xcresult"))
+                self.assertEqual(argv[argv.index(b"-jobs") + 1], b"1")
+                self.assertIn(b"OTHER_SWIFT_FLAGS=$(inherited) -warnings-as-errors -j1 -num-threads 1", argv)
+                self.assertIn(b"SWIFT_COMPILATION_MODE=wholemodule", argv)
+                self.assertIn(b"SWIFT_SUPPRESS_WARNINGS=NO", argv)
+                self.assertIn(b"SWIFT_TREAT_WARNINGS_AS_ERRORS=YES", argv)
+                self.assertIn(b"SWIFT_USE_PARALLEL_WHOLE_MODULE_OPTIMIZATION=NO", argv)
+                self.assertNotIn(b"-skipPackagePluginValidation", argv)
+                self.assertNotIn(b"-skipMacroValidation", argv)
+                self.assertEqual(argv[argv.index(b"-scheme") + 1], b"imrse")
                 self.assertTrue(output.is_dir())
 
     def test_ci_build_rejects_unsupported_host_before_invoking_swift(self):
@@ -1776,18 +1791,65 @@ class PackageLocalCandidateTests(unittest.TestCase):
         workflow = (ROOT / ".github/workflows/verify.yml").read_text()
         package_job = workflow.partition("  package:\n")[2].partition("\n  design:\n")[0]
         self.assertIn('IMRSE_CI_PACKAGE_VALIDATION: "1"', package_job)
+        self.assertIn("IMRSE_EXPECTED_SOURCE_COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}", package_job)
+        self.assertIn("ref: ${{ github.event.pull_request.head.sha || github.sha }}", package_job)
         self.assertIn('PYTHONDONTWRITEBYTECODE: "1"', package_job)
-        self.assertIn("IMRSE_DIST_DIR: ${{ runner.temp }}/imrse-ci-package-validation", package_job)
+        self.assertIn('IMRSE_CI_CANDIDATE_DIR="$RUNNER_TEMP/imrse-ci-candidate"', package_job)
+        self.assertIn('IMRSE_DIST_DIR="$RUNNER_TEMP/imrse-ci-package-validation"', package_job)
         self.assertNotIn("IMRSE_SIGNING_CERTIFICATE_SHA1", package_job)
         self.assertNotIn("IMRSE_SIGNING_KEYCHAIN_PATH", package_job)
         self.assertNotIn("IMRSE_SIGNING_CODESIGN_EXECUTABLE", package_job)
         self.assertNotIn("IMRSE_SIGNING_CODESIGN_SHA256", package_job)
         self.assertIn("bash -n scripts/build-app.sh", package_job)
         self.assertIn("plutil -lint Resources/Info.plist", package_job)
-        self.assertIn("python3 -m unittest discover -s scripts/tests -p 'test_package_local_candidate.py' -v", package_job)
+        self.assertIn("python3 -m unittest discover -s scripts/tests -p 'test_*.py' -v", package_job)
+        vendor_test = "swift test --package-path Vendor/EventSource --jobs 1 -Xswiftc -warnings-as-errors"
+        self.assertIn(vendor_test, package_job)
+        self.assertIn("swift package resolve --only-use-versions-from-resolved-file", package_job)
+        self.assertIn("swift package show-dependencies --only-use-versions-from-resolved-file --format json", package_job)
+        self.assertIn("checkout revision differs from Package.resolved", package_job)
+        self.assertIn("EventSource must resolve to Vendor/EventSource", package_job)
+        self.assertIn("root graph activates optional EventSource AsyncHTTPClient/NIO dependencies", package_job)
+        self.assertIn("all three ConcreteTransportTests", package_job)
         self.assertIn("./scripts/build-app.sh", package_job)
-        self.assertNotIn("upload-artifact", package_job)
+        self.assertIn("grep -E 'swiftc|swift-frontend'", package_job)
+        self.assertIn("-whole-module-optimization", package_job)
+        self.assertIn("scripts/export-ci-candidate.py", package_job)
+        self.assertIn("actions/upload-artifact@v4", package_job)
+        self.assertIn("name: imrse-ci-arm64-unsigned-${{ github.run_id }}-${{ github.run_attempt }}", package_job)
+        self.assertIn("path: ${{ runner.temp }}/imrse-ci-candidate", package_job)
+        self.assertIn("if-no-files-found: error", package_job)
+        self.assertNotIn("actions/create-release", package_job)
+        self.assertNotIn("gh release", package_job)
         self.assertNotIn("continue-on-error", package_job)
+
+    def test_ci_realmodule_output_contract_checks_actual_objects(self):
+        workflow = (ROOT / ".github/workflows/verify.yml").read_text()
+        step = workflow.partition("      - name: Retain and check the RealModule output contract\n")[2]
+        script = step.partition("          python3 - <<'PY'\n")[2].partition("          PY\n")[0]
+        script = textwrap.dedent(script)
+        self.assertIn("AlgebraicField.o", script)
+        with tempfile.TemporaryDirectory() as temp:
+            base = Path(temp)
+            objects = base / ".build/ci-derived-data/Build/Intermediates.noindex/swift-numerics.build/Release/RealModule.build/Objects-normal/arm64"
+            objects.mkdir(parents=True)
+            output = base / "evidence"
+            output.mkdir()
+            object_file = objects / "AlgebraicField.o"
+            (objects / "RealModule.LinkFileList").write_text(str(object_file) + "\n")
+            (objects / "RealModule-OutputFileMap.json").write_text("{}")
+            environment = {**os.environ, "IMRSE_CI_CANDIDATE_DIR": str(output), "IMRSE_CI_BUILD_OUTCOME": "success"}
+            def invoke():
+                return subprocess.run([sys.executable, "-c", script], cwd=base, env=environment, capture_output=True, text=True)
+            result = invoke()
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("object contract is incomplete", result.stderr)
+            object_file.write_bytes(b"fixture-object")
+            self.assertEqual(invoke().returncode, 0)
+            self.assertTrue(all(json.loads((output / "RealModule-object-inventory.json").read_text()).values()))
+            object_file.unlink()
+            environment["IMRSE_CI_BUILD_OUTCOME"] = "failure"
+            self.assertEqual(invoke().returncode, 0)
 
     def test_ci_python_bytecode_suppression_keeps_fresh_source_clone_clean(self):
         self.assertEqual(
