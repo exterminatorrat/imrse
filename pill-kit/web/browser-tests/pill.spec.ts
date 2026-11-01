@@ -2,7 +2,13 @@ import {test,expect,type Page} from "@playwright/test";
 test.beforeEach(async({page})=>{await page.goto("/");});
 async function expectPillGeometry(page:Page,width:number){
  const pill=page.locator(".imrse-pill");
- expect(await pill.boundingBox()).toMatchObject({width,height:52});
+ await expect(pill).toBeVisible();
+ await expect.poll(()=>pill.evaluate(element=>element.getAnimations().every(animation=>animation.playState==="finished"))).toBe(true);
+ await expect(pill).toHaveCSS("height","52px");
+ const bounds=await pill.boundingBox();
+ if(!bounds) throw new Error("Pill must remain visible while measuring geometry");
+ expect(bounds.width).toBe(width);
+ expect(bounds.height).toBeCloseTo(52,3);
  await expect(pill).toHaveCSS("border-radius","26px");
 }
 test("hidden until invoked; Escape removes surface",async({page})=>{

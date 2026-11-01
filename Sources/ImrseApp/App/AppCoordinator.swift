@@ -42,8 +42,8 @@ final class AppCoordinator: NSObject, NSMenuItemValidation {
 
     private func connectModel() {
         let panelController = self.panelController
-        model.onPresentPill = { [weak panelController] screen in
-            panelController?.present(afterCapturingTargetOn: screen)
+        model.onPresentPill = { [weak panelController] screen, bounds in
+            panelController?.present(afterCapturingTargetOn: screen, selectionBounds: bounds)
         }
         model.onHidePillForFocusHandoff = { [weak panelController] in
             panelController?.hideForFocusHandoff()

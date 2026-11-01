@@ -145,7 +145,7 @@ final class AppModel: ObservableObject {
     @Published private(set) var managedLocalModelIssue: String?
     @Published private(set) var isChangingManagedLocalModel = false
 
-    var onPresentPill: (@MainActor (NSScreen?) -> Void)?
+    var onPresentPill: (@MainActor (NSScreen?, CGRect?) -> Void)?
     var onHidePillForFocusHandoff: (@MainActor () -> Void)?
     #if DEBUG
     private(set) var previewState: AppPreviewState?
@@ -274,7 +274,7 @@ final class AppModel: ObservableObject {
         if previewState == .generating || previewState == .replacing { return true }
         #endif
         return switch state {
-        case .generating, .replacing, .undoing: true
+        case .generating, .proposal, .replacing, .undoing: true
         default: false
         }
     }
@@ -444,7 +444,18 @@ final class AppModel: ObservableObject {
             defaultInstruction: defaultInstruction,
             presets: presets,
             screenAfterCapture: { selectionAccess.capturedScreen },
-            fallbackScreen: Self.screenUnderPointer
+            fallbackScreen: Self.screenUnderPointer,
+            selectionBoundsAfterCapture: {
+                guard let rect = selectionAccess.capturedSelectionBounds,
+                      let screen = selectionAccess.capturedScreen,
+                      let number = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber
+                else { return nil }
+                return NSScreenCoordinateConversion.cocoaRect(
+                    from: rect,
+                    displayBounds: CGDisplayBounds(CGDirectDisplayID(number.uint32Value)),
+                    screenFrame: screen.frame
+                )
+            }
         )
 
         self.configurationStore = store
@@ -473,7 +484,7 @@ final class AppModel: ObservableObject {
         #if DEBUG
         pillBridge.isPreviewMode = isPreviewMode
         #endif
-        pillBridge.onPresent = { [weak self] screen in self?.onPresentPill?(screen) }
+        pillBridge.onPresent = { [weak self] screen, bounds in self?.onPresentPill?(screen, bounds) }
         pillBridge.onHideForFocusHandoff = { [weak self] in self?.onHidePillForFocusHandoff?() }
         pillBridge.onUndo = { [weak self] in self?.undo() }
         pillBridge.onStateChange = { [weak self] state in self?.handleEngineState(state) }
@@ -570,8 +581,8 @@ final class AppModel: ObservableObject {
                 self.finishTerminationIfSettled()
             } else {
                 if case .failed(.clipboardPending) = self.engine.state {
-                    self.pillModel.showCaptureFailure(message: ImrseError.clipboardPending.message)
-                    self.onPresentPill?(Self.screenUnderPointer())
+                    self.pillModel.showCaptureFailure(message: ImrseError.clipboardPending.message, kind: .clipboardPending)
+                    self.onPresentPill?(Self.screenUnderPointer(), nil)
                 }
                 self.applyPendingRuntimeSettingsIfSafe()
             }
@@ -591,16 +602,16 @@ final class AppModel: ObservableObject {
         switch previewState {
         case .ready:
             pillModel.present()
-            onPresentPill?(Self.screenUnderPointer())
+            onPresentPill?(Self.screenUnderPointer(), nil)
         case .generating:
             pillModel.present()
             pillModel.submit()
-            onPresentPill?(Self.screenUnderPointer())
+            onPresentPill?(Self.screenUnderPointer(), nil)
         case .replacing:
             pillModel.present()
             pillModel.submit()
             if case .processing(let id) = pillModel.phase { pillModel.generated(id) }
-            onPresentPill?(Self.screenUnderPointer())
+            onPresentPill?(Self.screenUnderPointer(), nil)
         case .success:
             pillModel.present()
             pillModel.submit()
@@ -608,10 +619,10 @@ final class AppModel: ObservableObject {
                 pillModel.generated(id)
                 pillModel.applied(id, undoAvailable: false)
             }
-            onPresentPill?(Self.screenUnderPointer())
+            onPresentPill?(Self.screenUnderPointer(), nil)
         case .error:
             pillModel.showCaptureFailure(message: ImrseError.network.message)
-            onPresentPill?(Self.screenUnderPointer())
+            onPresentPill?(Self.screenUnderPointer(), nil)
         case .hidden:
             break
         case .settings:
@@ -650,7 +661,7 @@ final class AppModel: ObservableObject {
         case .replacing, .undoing:
             terminationReplies.append(reply)
             return .terminateLater
-        case .generating, .ready:
+        case .generating, .proposal, .ready:
             engine.cancel()
             engine.dismiss()
         case .idle, .succeeded, .failed:
@@ -1725,7 +1736,7 @@ final class AppModel: ObservableObject {
             if self.state != .undoing {
                 latestResponseMetadata = engine.responseMetadata
             }
-        case .idle, .replacing, .undoing:
+        case .idle, .proposal, .replacing, .undoing:
             break
         }
         if self.state != state { logLifecycleChange(state) }
@@ -1777,6 +1788,7 @@ final class AppModel: ObservableObject {
         case .idle: "idle"
         case .ready: "ready"
         case .generating: "generating"
+        case .proposal: "proposal"
         case .replacing: "replacing"
         case .undoing: "undoing"
         case .succeeded(let unchanged): unchanged ? "succeeded-unchanged" : "succeeded-replaced"

@@ -75,6 +75,7 @@ public final class MacSelectionAccess: SelectionAccess {
 
     public var clipboardFallbackEnabled: Bool
     public private(set) var capturedScreen: NSScreen?
+    package private(set) var capturedSelectionBounds: CGRect?
     private let prepareForClipboardPaste: ClipboardPastePreparation?
     private let clock = ContinuousClock()
     private var capturedTarget: CapturedTarget?
@@ -178,6 +179,7 @@ public final class MacSelectionAccess: SelectionAccess {
                 throw ImrseError.noSelection
             }
             capturedScreen = sourceScreen(for: element)
+            capturedSelectionBounds = selectionBounds(for: element, range: range)
         } catch {
             invalidateCapture(snapshot.id)
             throw error
@@ -493,6 +495,7 @@ public final class MacSelectionAccess: SelectionAccess {
         removeWorkspaceObserver()
         capturedTarget = nil
         capturedScreen = nil
+        capturedSelectionBounds = nil
     }
 
     private func stopObservingCapturedTarget(_ targetID: UUID) {
@@ -599,6 +602,29 @@ public final class MacSelectionAccess: SelectionAccess {
             throw ImrseError.staleSelection
         }
         return NativeSelection(text: selected.text, range: selected.range)
+    }
+
+    private func selectionBounds(for element: AXUIElement, range: TextRange) -> CGRect? {
+        guard let parameter = try? axRangeValue(range, failure: .targetLost),
+              (try? configureAXMessaging(element)) != nil
+        else { return nil }
+        var value: CFTypeRef?
+        guard AXUIElementCopyParameterizedAttributeValue(
+            element,
+            kAXBoundsForRangeParameterizedAttribute as CFString,
+            parameter,
+            &value
+        ) == .success,
+              let value, CFGetTypeID(value) == AXValueGetTypeID()
+        else { return nil }
+        let axValue = unsafeDowncast(value, to: AXValue.self)
+        var rect = CGRect.zero
+        guard AXValueGetValue(axValue, .cgRect, &rect),
+              rect.minX.isFinite, rect.minY.isFinite,
+              rect.maxX.isFinite, rect.maxY.isFinite,
+              rect.width > 0, rect.height > 0
+        else { return nil }
+        return rect
     }
 
     private func sourceScreen(for focusedElement: AXUIElement) -> NSScreen? {

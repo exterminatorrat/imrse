@@ -1,18 +1,18 @@
 import Foundation
 
 public enum PillPhase: Equatable, Sendable {
-    case hidden, input, processing(UUID), applying(UUID), success(UUID), failure(UUID, String)
+    case hidden, input, processing(UUID), proposal(UUID), applying(UUID), success(UUID), failure(UUID, String)
     public var isVisible: Bool { self != .hidden }
     public var activeRequestID: UUID? {
         switch self {
-        case .processing(let id), .applying(let id): return id
+        case .processing(let id), .proposal(let id), .applying(let id): return id
         default: return nil
         }
     }
 }
 
 public enum PillEvent: Sendable {
-    case invoke, submit(UUID), generated(UUID), applied(UUID), failed(UUID, String), captureFailed(String), dismiss
+    case invoke, submit(UUID), proposed(UUID), replace(UUID), generated(UUID), applied(UUID), failed(UUID, String), captureFailed(String), dismiss
 }
 
 /// Presentation state, not a text replacement engine. Only the host can confirm a write.
@@ -31,6 +31,10 @@ public struct PillLifecycle: Sendable {
             }
         case .submit(let id):
             if phase == .input { phase = .processing(id) }
+        case .proposed(let id):
+            if phase == .processing(id) { phase = .proposal(id) }
+        case .replace(let id):
+            if phase == .proposal(id) { phase = .applying(id) }
         case .generated(let id):
             if phase == .processing(id) { phase = .applying(id) }
         case .applied(let id):

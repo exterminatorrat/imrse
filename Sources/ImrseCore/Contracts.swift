@@ -73,6 +73,20 @@ public struct SelectionSnapshot: Equatable, Sendable {
     }
 }
 
+public struct TransformationProposal: Equatable, Sendable {
+    public let id: UUID
+    public let requestID: UUID
+    public let targetID: UUID
+    public let text: String
+
+    public init(id: UUID, requestID: UUID, targetID: UUID, text: String) {
+        self.id = id
+        self.requestID = requestID
+        self.targetID = targetID
+        self.text = text
+    }
+}
+
 public struct ReplacementReceipt: Equatable, Sendable {
     public let target: SelectionSnapshot
     public let replacement: String

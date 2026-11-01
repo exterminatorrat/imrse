@@ -99,6 +99,8 @@ final class ShortcutMonitorRecoveryTests: XCTestCase {
         XCTAssertFalse(monitor.isMonitoring)
 
         provider.finish(with: "updated text")
+        await waitUntil { model.pillModel.proposal != nil }
+        model.pillModel.replaceProposal()
         await waitUntil { model.engine.state == .succeeded(unchanged: false) && monitor.startCount == 2 }
 
         XCTAssertTrue(monitor.isMonitoring)
@@ -113,6 +115,8 @@ final class ShortcutMonitorRecoveryTests: XCTestCase {
         model.pillModel.submit()
         await waitUntil { model.engine.state == .generating && provider.hasPendingStream }
         provider.finish(with: "updated text")
+        await waitUntil { model.pillModel.proposal != nil }
+        model.pillModel.replaceProposal()
         await waitUntil { model.engine.state == .succeeded(unchanged: false) }
         XCTAssertTrue(model.engine.canUndo)
 

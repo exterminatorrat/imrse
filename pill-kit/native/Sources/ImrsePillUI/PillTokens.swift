@@ -4,6 +4,8 @@ import SwiftUI
 public enum PillTokens {
     public static let width: CGFloat = 360
     public static let height: CGFloat = 52
+    public static let proposalWidth: CGFloat = 360
+    public static let proposalHeight: CGFloat = 216
     public static let horizontalPadding: CGFloat = 20
     public static let radius: CGFloat = 26
     public static let loaderSize: CGFloat = 24
@@ -18,10 +20,18 @@ public enum PillTokens {
         switch phase {
         case .hidden: return 0
         case .input: return Self.width
+        case .proposal: return Self.proposalWidth
         case .processing: return 240
         case .applying: return 220
         case .success: return 180
         case .failure: return 300
+        }
+    }
+
+    public static func height(for phase: PillPhase) -> CGFloat {
+        switch phase {
+        case .proposal: return Self.proposalHeight
+        default: return Self.height
         }
     }
 }
