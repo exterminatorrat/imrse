@@ -1,0 +1,51 @@
+name: Private CI Test App
+on:
+  push:
+    branches:
+      - capy/heh-1-test-build-20261101
+permissions:
+  contents: read
+jobs:
+  retain-ci-test-app:
+    runs-on: macos-26
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
+      IMRSE_CI_PACKAGE_VALIDATION: "1"
+      IMRSE_EXPECTED_SOURCE_COMMIT: ${{ github.sha }}
+      PYTHONDONTWRITEBYTECODE: "1"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - run: xcodebuild -version && swift --version
+      - run: bash -n scripts/build-app.sh
+      - run: plutil -lint Resources/Info.plist
+      - run: python3 -m unittest discover -s scripts/tests -p 'test_package_local_candidate.py' -v
+      - run: python3 -m unittest discover -s scripts/tests -p 'test_retain_ci_test_app.py' -v
+      - name: Ensure Metal compiler is available
+        run: |
+          if ! xcrun --sdk macosx metal --version; then
+            xcodebuild -downloadComponent MetalToolchain
+          fi
+          xcrun --sdk macosx metal --version
+      - run: ./scripts/build-app.sh
+        env:
+          IMRSE_DIST_DIR: ${{ runner.temp }}/imrse-ci-package-validation
+      - name: Retain unsigned CI app for private testing
+        env:
+          CI_RUN_ID: ${{ github.run_id }}
+          CI_RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: |
+          python3 scripts/retain_ci_test_app.py \
+            --source-root . \
+            --expected-commit "$IMRSE_EXPECTED_SOURCE_COMMIT" \
+            --app "$RUNNER_TEMP/imrse-ci-package-validation/imrse.app" \
+            --output-dir "$RUNNER_TEMP/imrse-ci-test-app" \
+            --run-id "$CI_RUN_ID" \
+            --run-attempt "$CI_RUN_ATTEMPT"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: imrse-ci-test-app-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/imrse-ci-test-app
+          if-no-files-found: error

@@ -14,6 +14,7 @@ from scripts import retain_ci_test_app as retention
 
 SOURCE_COMMIT = "a" * 40
 SOURCE_TREE = "b" * 40
+ROOT = Path(__file__).resolve().parents[2]
 
 
 class RetainCITestAppTests(unittest.TestCase):
@@ -186,6 +187,39 @@ class RetainCITestAppTests(unittest.TestCase):
         with self.assertRaises(retention.RetentionError):
             self.retain()
         self.assertEqual(marker.read_text(encoding="utf-8"), "unchanged")
+
+    def test_private_workflow_is_branch_pinned_unsigned_and_fail_closed(self):
+        workflow = (ROOT / ".github/workflows/private-test-app.yml").read_text(encoding="utf-8")
+        events = workflow.partition("on:\n")[2].partition("\npermissions:\n")[0]
+        self.assertEqual(events, "  push:\n    branches:\n      - capy/heh-1-test-build-20261101")
+        self.assertIn("runs-on: macos-26", workflow)
+        self.assertIn("DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer", workflow)
+        self.assertIn('IMRSE_CI_PACKAGE_VALIDATION: "1"', workflow)
+        self.assertIn("IMRSE_EXPECTED_SOURCE_COMMIT: ${{ github.sha }}", workflow)
+        self.assertIn("ref: ${{ github.sha }}", workflow)
+        self.assertIn("xcodebuild -version && swift --version", workflow)
+        self.assertIn("bash -n scripts/build-app.sh", workflow)
+        self.assertIn("plutil -lint Resources/Info.plist", workflow)
+        self.assertIn("Ensure Metal compiler is available", workflow)
+        self.assertIn("./scripts/build-app.sh", workflow)
+        self.assertIn("Retain unsigned CI app for private testing", workflow)
+        self.assertIn("--expected-commit \"$IMRSE_EXPECTED_SOURCE_COMMIT\"", workflow)
+        self.assertIn("IMRSE_DIST_DIR: ${{ runner.temp }}/imrse-ci-package-validation", workflow)
+        self.assertNotIn("IMRSE_SIGNING_", workflow)
+        self.assertNotIn("IMRSE_RELEASE", workflow)
+        self.assertNotIn("codesign", workflow)
+        self.assertNotIn("sign-app", workflow)
+        self.assertNotIn("release", workflow.lower())
+        self.assertNotIn("continue-on-error:", workflow)
+        self.assertNotIn("if: always()", workflow)
+        self.assertIn("actions/upload-artifact@v4", workflow)
+        self.assertIn("if-no-files-found: error", workflow)
+        self.assertIn(
+            "name: imrse-ci-test-app-${{ github.run_id }}-${{ github.run_attempt }}",
+            workflow,
+        )
+        self.assertIn("CI_RUN_ID: ${{ github.run_id }}", workflow)
+        self.assertIn("CI_RUN_ATTEMPT: ${{ github.run_attempt }}", workflow)
 
 
 if __name__ == "__main__":
