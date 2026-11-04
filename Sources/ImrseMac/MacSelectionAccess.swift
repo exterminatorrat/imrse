@@ -786,7 +786,7 @@ public final class MacSelectionAccess: SelectionAccess {
                 }
             )
             guard status == .success else {
-                invalidateAfterUnverifiedWrite(target.id)
+                invalidateAfterUnverifiedWrite(target.id, reason: .replacementWriteRejected)
                 throw ImrseError.replacementFailed
             }
             let after: NativeSelection
@@ -801,7 +801,7 @@ public final class MacSelectionAccess: SelectionAccess {
                     afterValue = nil
                 }
             } catch {
-                invalidateAfterUnverifiedWrite(target.id)
+                invalidateAfterUnverifiedWrite(target.id, reason: .replacementReadbackFailed)
                 throw ImrseError.replacementFailed
             }
             if SelectedTextReplacementValidation.confirms(
@@ -819,21 +819,28 @@ public final class MacSelectionAccess: SelectionAccess {
                 selectedText: after.text,
                 atEndOf: replacementRange
             ) {
+                var failureReason = SelectionFailureReason.replacementReadbackFailed
                 do {
                     guard let rangeText = try stringForRange(
                         target.element,
                         range: replacementRange,
                         failure: .replacementFailed
-                    ), sameText(rangeText, replacement) else {
+                    ) else {
                         throw ImrseError.replacementFailed
                     }
+                    failureReason = .replacementEvidenceMismatch
+                    guard sameText(rangeText, replacement) else {
+                        throw ImrseError.replacementFailed
+                    }
+                    failureReason = .replacementReadbackFailed
                     let verifiedSelection = try currentSelection(target, allowingEmpty: true)
+                    failureReason = .replacementEvidenceMismatch
                     guard sameSelection(verifiedSelection, after) else {
                         throw ImrseError.replacementFailed
                     }
                     return AppliedReplacement(strategy: .selectedText, focusedSelection: verifiedSelection)
                 } catch {
-                    invalidateAfterUnverifiedWrite(target.id)
+                    invalidateAfterUnverifiedWrite(target.id, reason: failureReason)
                     throw ImrseError.replacementFailed
                 }
             }
@@ -866,7 +873,7 @@ public final class MacSelectionAccess: SelectionAccess {
                     throw ImrseError.replacementFailed
                 }
             } else {
-                invalidateAfterUnverifiedWrite(target.id)
+                invalidateAfterUnverifiedWrite(target.id, reason: .replacementEvidenceMismatch)
                 throw ImrseError.replacementFailed
             }
         }
@@ -891,7 +898,7 @@ public final class MacSelectionAccess: SelectionAccess {
                 }
             )
             guard status == .success else {
-                invalidateAfterUnverifiedWrite(target.id)
+                invalidateAfterUnverifiedWrite(target.id, reason: .replacementWriteRejected)
                 throw ImrseError.replacementFailed
             }
             let afterValue: String
@@ -901,7 +908,7 @@ public final class MacSelectionAccess: SelectionAccess {
                 }
                 afterValue = value
             } catch {
-                invalidateAfterUnverifiedWrite(target.id)
+                invalidateAfterUnverifiedWrite(target.id, reason: .replacementReadbackFailed)
                 throw ImrseError.replacementFailed
             }
             if sameText(afterValue, expectedValue) {
@@ -909,12 +916,12 @@ public final class MacSelectionAccess: SelectionAccess {
                 do {
                     after = try currentSelection(target, allowingEmpty: true)
                 } catch {
-                    invalidateAfterUnverifiedWrite(target.id)
+                    invalidateAfterUnverifiedWrite(target.id, reason: .replacementReadbackFailed)
                     throw ImrseError.replacementFailed
                 }
                 return AppliedReplacement(strategy: .valueRange, focusedSelection: after)
             }
-            invalidateAfterUnverifiedWrite(target.id)
+            invalidateAfterUnverifiedWrite(target.id, reason: .replacementEvidenceMismatch)
             throw ImrseError.replacementFailed
         }
 
@@ -962,8 +969,11 @@ public final class MacSelectionAccess: SelectionAccess {
         return AppliedReplacement(strategy: .clipboard, focusedSelection: afterPaste)
     }
 
-    private func invalidateAfterUnverifiedWrite(_ targetID: UUID) {
-        lastFailureReason = .replacementVerificationFailed
+    private func invalidateAfterUnverifiedWrite(
+        _ targetID: UUID,
+        reason: SelectionFailureReason = .replacementVerificationFailed
+    ) {
+        lastFailureReason = reason
         invalidateCapture(targetID)
         if undoTarget?.receipt.target.id == targetID { undoTarget = nil }
     }

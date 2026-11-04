@@ -179,6 +179,30 @@ final class TransformationEngineTests: XCTestCase {
         XCTAssertEqual(engine.diagnostics.selectionFailureReason, .replacementVerificationFailed)
     }
 
+    func testReplacementFailureStagesSurviveTargetCleanupWithoutChangingError() async {
+        for reason in [
+            SelectionFailureReason.replacementWriteRejected,
+            .replacementReadbackFailed,
+            .replacementEvidenceMismatch
+        ] {
+            let access = StubSelectionAccess(target: snapshot(text: "original"))
+            access.replacementError = .replacementFailed
+            access.replacementFailureReason = reason
+            let engine = TransformationEngine(
+                selectionAccess: access,
+                textProvider: ScriptedTextProvider(fragments: ["rewritten"])
+            )
+            engine.invoke()
+            engine.submit(instruction: "", provider: providerConfiguration)
+
+            await waitForState(engine, .failed(.replacementFailed))
+
+            XCTAssertNil(access.lastFailureReason)
+            XCTAssertEqual(engine.diagnostics.error, .replacementFailed)
+            XCTAssertEqual(engine.diagnostics.selectionFailureReason, reason)
+        }
+    }
+
     func testUndoFailureRecordsAdapterReasonWithoutChangingError() async {
         let access = StubSelectionAccess(target: snapshot(text: "original"))
         let engine = TransformationEngine(
