@@ -3,6 +3,27 @@ import XCTest
 @testable import ImrseCore
 
 final class DiagnosticReportTests: XCTestCase {
+    func testReplacementFailureStagesRenderAsContentFreeReasons() throws {
+        for reason in [
+            SelectionFailureReason.replacementWriteRejected,
+            .replacementReadbackFailed,
+            .replacementEvidenceMismatch
+        ] {
+            var metadata = DiagnosticMetadata()
+            metadata.selectionFailureReason = reason
+            metadata.error = .replacementFailed
+            let report = DiagnosticReport.render(metadata)
+            let fields = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(report.utf8)) as? [String: Any])
+
+            XCTAssertEqual(fields["selectionFailureReason"] as? String, reason.rawValue)
+            XCTAssertEqual(fields["error"] as? String, ImrseError.replacementFailed.rawValue)
+            XCTAssertEqual(Set(fields.keys), Set([
+                "accessibilityGranted", "eventMonitoringActive", "generation", "replacement",
+                "selectionFailureReason", "error"
+            ]))
+        }
+    }
+
     func testReportRendersOnlySafeAllowlistedMetadata() throws {
         var metadata = DiagnosticMetadata()
         metadata.accessibilityGranted = true
