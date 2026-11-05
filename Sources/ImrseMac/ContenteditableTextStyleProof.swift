@@ -179,7 +179,7 @@ struct ContenteditableTextStyleProof {
 
     private static func immutableColor(_ value: Any) -> CGColor? {
         let cfValue = value as CFTypeRef
-        guard CFGetTypeID(cfValue) == CGColorGetTypeID()
+        guard CFGetTypeID(cfValue) == CGColor.typeID
         else {
             return nil
         }
@@ -198,7 +198,7 @@ struct ContenteditableTextStyleProof {
                 let rhsColor = immutableColor(other)
                 if lhsColor != nil || rhsColor != nil {
                     guard let lhsColor, let rhsColor else { return false }
-                    return CGColorEqualToColor(lhsColor, rhsColor)
+                    return lhsColor == rhsColor
                 }
             }
             guard let lhsObject = value as? NSObject,
