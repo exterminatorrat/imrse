@@ -14,6 +14,9 @@ public enum SelectionFailureReason: String, Equatable, Sendable {
     case focusedElementUnavailable
     case roleUnavailable
     case selectedRangeUnavailable
+    case caretProofUnavailable
+    case markedTextActive
+    case compositionStateUnavailable
     case invalidSelectedRange
     case emptySelection
     case selectedTextUnavailable
@@ -92,6 +95,11 @@ public struct TextRange: Codable, Equatable, Sendable {
     public init(location: Int, length: Int) { self.location = location; self.length = length }
 }
 
+public enum SelectionEditIntent: Equatable, Sendable {
+    case replaceSelection
+    case insertAtCaret
+}
+
 public struct SelectionSnapshot: Equatable, Sendable {
     public let id: UUID
     public let applicationID: String
@@ -100,9 +108,20 @@ public struct SelectionSnapshot: Equatable, Sendable {
     public let text: String
     public let range: TextRange?
     public let isSecure: Bool
-    public init(id: UUID = UUID(), applicationID: String, processID: Int32, role: String, text: String, range: TextRange? = nil, isSecure: Bool = false) {
+    public let intent: SelectionEditIntent
+    public init(
+        id: UUID = UUID(),
+        applicationID: String,
+        processID: Int32,
+        role: String,
+        text: String,
+        range: TextRange? = nil,
+        isSecure: Bool = false,
+        intent: SelectionEditIntent = .replaceSelection
+    ) {
         self.id = id; self.applicationID = applicationID; self.processID = processID
         self.role = role; self.text = text; self.range = range; self.isSecure = isSecure
+        self.intent = intent
     }
 }
 
@@ -118,6 +137,7 @@ public struct ReplacementReceipt: Equatable, Sendable {
 @MainActor public protocol SelectionAccess: AnyObject {
     var lastFailureReason: SelectionFailureReason? { get }
     func capture() throws -> SelectionSnapshot
+    func capture(intent: SelectionEditIntent) throws -> SelectionSnapshot
     func validate(_ target: SelectionSnapshot) throws
     func replace(_ target: SelectionSnapshot, with text: String) async throws -> ReplacementReceipt
     func undo(_ receipt: ReplacementReceipt) async throws
@@ -127,6 +147,11 @@ public struct ReplacementReceipt: Equatable, Sendable {
 @MainActor
 public extension SelectionAccess {
     var lastFailureReason: SelectionFailureReason? { nil }
+
+    func capture(intent: SelectionEditIntent) throws -> SelectionSnapshot {
+        guard intent == .replaceSelection else { throw ImrseError.insertionUnavailable }
+        return try capture()
+    }
 }
 
 public struct ProviderConfiguration: Codable, Equatable, Identifiable, Sendable {
@@ -203,6 +228,8 @@ public struct ShortcutBinding: Codable, Equatable, Sendable {
 }
 
 public struct InvocationConfiguration: Codable, Equatable, Sendable {
+    public static let defaultInsertAtCaretShortcut = ShortcutBinding(keyCode: 34, command: true, control: true, shift: true)
+
     public var doubleControlEnabled: Bool
     public var doubleControlInterval: Double
     public var shortcut: ShortcutBinding?
@@ -296,7 +323,7 @@ public protocol CredentialStore: Sendable {
 }
 
 public enum ImrseError: String, Error, Codable, CaseIterable, Sendable {
-    case noSelection, secureInput, selectionTooLarge, instructionTooLarge
+    case noSelection, insertionUnavailable, secureInput, selectionTooLarge, instructionTooLarge, missingInstruction
     case targetLost, staleSelection, replacementFailed, clipboardFailed, undoUnavailable
     case providerUnavailable, localModelUnavailable, authentication, missingCredentials
     case accountNotConnected, accountAuthentication
@@ -310,9 +337,11 @@ public enum ImrseError: String, Error, Codable, CaseIterable, Sendable {
     public var message: String {
         switch self {
         case .noSelection: "Select some text first"
+        case .insertionUnavailable: "A safe insertion point isn't available in this field"
         case .secureInput: "Secure fields stay private"
         case .selectionTooLarge: "The selection is too long"
         case .instructionTooLarge: "The instruction is too long"
+        case .missingInstruction: "Enter an instruction before inserting text"
         case .targetLost: "The original text field is unavailable"
         case .staleSelection: "The selection changed. Nothing was replaced"
         case .replacementFailed: "Couldn't replace the selection"

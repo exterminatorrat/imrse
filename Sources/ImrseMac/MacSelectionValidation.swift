@@ -103,6 +103,62 @@ enum UTF16SelectionRange {
     }
 }
 
+enum CaretCompositionState: Equatable {
+    case unmarked
+    case marked
+    case unavailable
+
+    static func read(advertised: Bool, status: AXError, hasValue: Bool) -> Self {
+        guard advertised else { return .unavailable }
+        guard status == .success || status == .noValue else { return .unavailable }
+        return hasValue ? .marked : .unmarked
+    }
+}
+
+struct CaretInsertionProof {
+    static let maximumWholeValueUTF16Length = 65_536
+
+    let value: String
+    let range: ImrseCore.TextRange
+
+    init?(
+        value: String?,
+        range: ImrseCore.TextRange,
+        selectedText: String?,
+        permitsPlainTextValueWrite: Bool,
+        composition: CaretCompositionState
+    ) {
+        guard permitsPlainTextValueWrite,
+              composition == .unmarked,
+              let value,
+              value.utf16.count <= Self.maximumWholeValueUTF16Length,
+              selectedText?.isEmpty == true,
+              range.length == 0,
+              UTF16SelectionRange.substring(value, range: range) != nil
+        else { return nil }
+        self.value = value
+        self.range = range
+    }
+
+    func matches(value: String?, range: ImrseCore.TextRange, selectedText: String) -> Bool {
+        guard let value else { return false }
+        return self.range == range && selectedText.isEmpty && self.value.utf16.elementsEqual(value.utf16)
+    }
+
+    func inserting(_ text: String) -> String? {
+        guard !text.isEmpty,
+              let result = UTF16SelectionRange.replacing(value, range: range, with: text),
+              result.utf16.count <= Self.maximumWholeValueUTF16Length
+        else { return nil }
+        return result
+    }
+
+    func confirmsApplied(value: String?, inserting text: String) -> Bool {
+        guard let value, let expected = inserting(text) else { return false }
+        return expected.utf16.elementsEqual(value.utf16)
+    }
+}
+
 enum SelectionReadValidation {
     static func rangeFailure(_ range: ImrseCore.TextRange?, allowingEmpty: Bool) -> SelectionFailureReason? {
         guard let range else { return .selectedRangeUnavailable }
