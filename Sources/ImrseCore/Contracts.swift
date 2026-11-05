@@ -20,6 +20,10 @@ public enum SelectionFailureReason: String, Equatable, Sendable {
     case selectedTextLengthMismatch
     case captureChangedDuringSetup
     case captureInvalidated
+    case captureObservedFocusChange
+    case captureObservedSelectionChange
+    case captureObservedValueChange
+    case captureDiscarded
     case snapshotMismatch
     case targetApplicationUnavailable
     case foregroundApplicationChanged

@@ -146,20 +146,28 @@ final class TransformationEngineTests: XCTestCase {
     }
 
     func testValidationFailurePreservesOriginalReasonAfterDiscardingInvalidatedTarget() async {
-        let access = StubSelectionAccess(target: snapshot(text: "original"))
-        access.validationError = .targetLost
-        access.validationFailureReason = .captureInvalidated
-        let engine = TransformationEngine(
-            selectionAccess: access,
-            textProvider: ScriptedTextProvider(fragments: ["rewritten"])
-        )
-        engine.invoke()
-        engine.submit(instruction: "", provider: providerConfiguration)
+        for reason in [
+            SelectionFailureReason.captureInvalidated,
+            .captureObservedFocusChange,
+            .captureObservedSelectionChange,
+            .captureObservedValueChange,
+            .captureDiscarded
+        ] {
+            let access = StubSelectionAccess(target: snapshot(text: "original"))
+            access.validationError = .targetLost
+            access.validationFailureReason = reason
+            let engine = TransformationEngine(
+                selectionAccess: access,
+                textProvider: ScriptedTextProvider(fragments: ["rewritten"])
+            )
+            engine.invoke()
+            engine.submit(instruction: "", provider: providerConfiguration)
 
-        await waitForState(engine, .failed(.targetLost))
+            await waitForState(engine, .failed(.targetLost))
 
-        XCTAssertNil(access.lastFailureReason)
-        XCTAssertEqual(engine.diagnostics.selectionFailureReason, .captureInvalidated)
+            XCTAssertNil(access.lastFailureReason)
+            XCTAssertEqual(engine.diagnostics.selectionFailureReason, reason)
+        }
     }
 
     func testReplacementFailureRecordsAdapterReasonWithoutChangingError() async {

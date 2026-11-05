@@ -26,6 +26,28 @@ final class DiagnosticReportTests: XCTestCase {
         }
     }
 
+    func testCaptureInvalidationReasonsRenderAsContentFreeValues() throws {
+        for reason in [
+            SelectionFailureReason.captureObservedFocusChange,
+            .captureObservedSelectionChange,
+            .captureObservedValueChange,
+            .captureDiscarded
+        ] {
+            var metadata = DiagnosticMetadata()
+            metadata.selectionFailureReason = reason
+            metadata.error = .targetLost
+            let report = DiagnosticReport.render(metadata)
+            let fields = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(report.utf8)) as? [String: Any])
+
+            XCTAssertEqual(fields["selectionFailureReason"] as? String, reason.rawValue)
+            XCTAssertEqual(fields["error"] as? String, ImrseError.targetLost.rawValue)
+            XCTAssertEqual(Set(fields.keys), Set([
+                "accessibilityGranted", "eventMonitoringActive", "generation", "replacement",
+                "selectionFailureReason", "error"
+            ]))
+        }
+    }
+
     func testReportRendersOnlySafeAllowlistedMetadata() throws {
         var metadata = DiagnosticMetadata()
         metadata.accessibilityGranted = true

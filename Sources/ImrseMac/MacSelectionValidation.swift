@@ -1,6 +1,23 @@
 #if os(macOS)
+import ApplicationServices
+import CoreFoundation
 import Foundation
 import ImrseCore
+
+enum ObservedCaptureNotification {
+    static func failureReason(for notification: CFString) -> SelectionFailureReason {
+        if CFEqual(notification, kAXFocusedUIElementChangedNotification as CFString) {
+            return .captureObservedFocusChange
+        }
+        if CFEqual(notification, kAXSelectedTextChangedNotification as CFString) {
+            return .captureObservedSelectionChange
+        }
+        if CFEqual(notification, kAXValueChangedNotification as CFString) {
+            return .captureObservedValueChange
+        }
+        return .captureInvalidated
+    }
+}
 
 enum UTF16SelectionRange {
     static func isValid(_ range: ImrseCore.TextRange) -> Bool {
