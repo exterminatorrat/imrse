@@ -344,7 +344,7 @@ final class SelectionEditIntentTests: XCTestCase {
 
     private func snapshot(
         text: String,
-        range: TextRange? = nil,
+        range: ImrseCore.TextRange? = nil,
         isSecure: Bool = false,
         intent: SelectionEditIntent = .replaceSelection
     ) -> SelectionSnapshot {
