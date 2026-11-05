@@ -39,6 +39,10 @@ public final class TransformationEngine {
     }
 
     public func invoke() {
+        invoke(intent: .replaceSelection)
+    }
+
+    public func invoke(intent: SelectionEditIntent) {
         if state == .generating {
             cancel()
             return
@@ -50,7 +54,7 @@ public final class TransformationEngine {
 
         let snapshot: SelectionSnapshot
         do {
-            snapshot = try selectionAccess.capture()
+            snapshot = try selectionAccess.capture(intent: intent)
         } catch {
             let selectionFailureReason = selectionAccess.lastFailureReason
             fail(Self.captureFailure(error), selectionFailureReason: selectionFailureReason)
@@ -62,6 +66,12 @@ public final class TransformationEngine {
         diagnostics.selectionLength = snapshot.isSecure ? nil : snapshot.text.utf16.count
         diagnostics.targetValid = nil
         diagnostics.strategy = nil
+
+        guard snapshot.intent == intent else {
+            selectionAccess.discard(snapshot)
+            fail(.insertionUnavailable)
+            return
+        }
 
         if let error = Self.snapshotFailure(snapshot) {
             selectionAccess.discard(snapshot)
@@ -85,6 +95,11 @@ public final class TransformationEngine {
         guard state == .ready, let target else { return }
         responseMetadata = nil
         pendingResponseMetadata = nil
+        if target.intent == .insertAtCaret,
+           instruction.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            fail(.missingInstruction)
+            return
+        }
         guard instruction.utf8.count <= Self.maximumInstructionUTF8Bytes else {
             fail(.instructionTooLarge)
             return
@@ -248,7 +263,10 @@ public final class TransformationEngine {
             do {
                 let receipt = try await selectionAccess.replace(target, with: output)
                 guard activeOperationID == operationID, state == .replacing else { return }
-                guard receipt.target.id == target.id, receipt.replacement == output else {
+                guard receipt.target == target,
+                      receipt.target.text.utf16.elementsEqual(target.text.utf16),
+                      receipt.replacement.utf16.elementsEqual(output.utf16)
+                else {
                     diagnostics.replacement = "failed"
                     finish(operationID, failure: .replacementFailed, replacementFailed: true)
                     return
@@ -355,14 +373,23 @@ public final class TransformationEngine {
 
     private static func snapshotFailure(_ snapshot: SelectionSnapshot) -> ImrseError? {
         if snapshot.isSecure { return .secureInput }
-        let length = snapshot.text.utf16.count
-        guard length > 0 else { return .noSelection }
-        guard !snapshot.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return .noSelection }
-        guard snapshot.text.utf8.count <= maximumSelectionUTF8Bytes else { return .selectionTooLarge }
-        if let range = snapshot.range {
-            guard range.location >= 0, range.length == length else { return .noSelection }
-            let (_, overflow) = range.location.addingReportingOverflow(range.length)
-            guard !overflow else { return .noSelection }
+        switch snapshot.intent {
+        case .replaceSelection:
+            let length = snapshot.text.utf16.count
+            guard length > 0 else { return .noSelection }
+            guard !snapshot.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return .noSelection }
+            guard snapshot.text.utf8.count <= maximumSelectionUTF8Bytes else { return .selectionTooLarge }
+            if let range = snapshot.range {
+                guard range.location >= 0, range.length == length else { return .noSelection }
+                let (_, overflow) = range.location.addingReportingOverflow(range.length)
+                guard !overflow else { return .noSelection }
+            }
+        case .insertAtCaret:
+            guard snapshot.text.isEmpty,
+                  let range = snapshot.range,
+                  range.location >= 0,
+                  range.length == 0
+            else { return .insertionUnavailable }
         }
         return nil
     }

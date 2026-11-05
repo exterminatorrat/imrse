@@ -37,6 +37,7 @@ public struct ShortcutEvent: Equatable, Sendable {
 
 public enum ShortcutAction: Equatable, Sendable {
     case invoke
+    case insertAtCaret
     case preset(id: String)
 }
 
@@ -212,7 +213,11 @@ public struct ShortcutRecognizer: Sendable {
                   ShortcutValidator.isValidBinding(binding), Self.matches(binding, event) else { continue }
             return .preset(id: preset.id)
         }
-        return nil
+        let insertionBinding = InvocationConfiguration.defaultInsertAtCaretShortcut
+        guard configuration.shortcut != insertionBinding,
+              !presets.contains(where: { $0.shortcut == insertionBinding }),
+              Self.matches(insertionBinding, event) else { return nil }
+        return .insertAtCaret
     }
 
     private mutating func resetSequence() {

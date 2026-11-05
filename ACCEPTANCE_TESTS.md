@@ -48,4 +48,21 @@ Models must list actual configured providers by their existing IDs and open nati
 
 ## Shipping claim
 
+### Explicit caret insertion
+
+These are required checks, not completed native results. Use only owned synthetic fields under a fresh finite Mini interval. Bind each result to the exact source/tree, composed artifact (including landed PR25), stable signer, installed copy path and runtime executable. Preserve the protected original and existing clipboard privacy/ownership rules.
+
+| Case | Required result |
+| --- | --- |
+| Separate activation | Command+Control+Shift+I requests `.insertAtCaret` through the existing instruction pill/direct Apply. Double-Control, the replacement shortcut and preset/menu replacement remain unchanged; failed replacement capture never starts insertion. A configured replacement/preset collision retains its existing action and disables insertion for that chord. Record the actual binding and any observed external shortcut conflict. |
+| Instruction | Empty/whitespace-only input does not invoke a provider or fall back to the replacement default instruction. An explicit instruction produces one context-free request. |
+| Caret proof | Empty, start, middle and end positions preserve exact UTF-16 context, including emoji, combining marks and CJK. A noncollapsed/missing/invalid range, unavailable document proof, active marked text or unavailable marked-text capability refuses without a write. |
+| Identity and drift | A changed caret/value, same-text neighbor, destroyed/recreated element or changed field/document/app refuses without rebinding or writing to another target. |
+| Mutation outcome | A verified edit issues one exact intent-bound receipt. A no-op or ambiguous/rejected write issues no success receipt; no second transport follows an indeterminate result. The existing selected-replacement clipboard no-op gate is not weakened for collapsed ranges. |
+| Inverse | Product Undo restores the exact original document and caret once. Any later document edit or receipt/selection mismatch preserves that later content by refusing. |
+| Cancellation | Cancel before commit, including delayed completion, leaves the field unchanged. An already-issued write settles with its verified outcome instead of reporting false cancellation success. |
+| Closure | Restore clipboard fallback off in UI/config, prove generation idle and no pill/own Settings window, preserve original/rollback inventories and signatures, and prove actual predeadline release plus independent exact-lock reacquisition. |
+
+Classify each source-specific row as supported, safely refused, unsupported, paused or untested. Pure guards and hosted tests do not establish that a real field advertises usable composition evidence or that the shortcut reaches it.
+
 A source implementation may be ready for first physical compatibility validation while still failing the distribution gate. Do not advertise the compatibility matrix as supported until those physical tests have passed. Do not call a source/ad-hoc build a signed production release.

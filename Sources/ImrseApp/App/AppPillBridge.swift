@@ -18,6 +18,7 @@ final class AppPillBridge {
     private var captureInProgress = false
     private var captureFallbackScreen: NSScreen?
     private var activeSubmissionID: UUID?
+    private var activeIntent: SelectionEditIntent = .replaceSelection
     private var focusHandoffPending = false
     private var lastPresentationScreen: NSScreen?
     private var pillLifecycleSubscription: AnyCancellable?
@@ -75,6 +76,10 @@ final class AppPillBridge {
     }
 
     func invoke(presetID: String? = nil) {
+        invoke(intent: .replaceSelection, presetID: presetID)
+    }
+
+    func invoke(intent: SelectionEditIntent, presetID: String? = nil) {
         guard acceptsActions else { return }
         if pill.phase == .input { return }
         if engine.state == .generating {
@@ -90,8 +95,9 @@ final class AppPillBridge {
 
         captureFallbackScreen = fallbackScreen()
         captureInProgress = true
+        activeIntent = intent
         if engine.state != .idle { engine.dismiss() }
-        engine.invoke()
+        engine.invoke(intent: intent)
         captureInProgress = false
 
         guard engine.state == .ready else {
@@ -148,11 +154,23 @@ final class AppPillBridge {
         }
 
         do {
+            let instruction: String
+            if activeIntent == .insertAtCaret {
+                guard let explicitInstruction = submission.instruction,
+                      !explicitInstruction.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                else {
+                    engine.rejectSubmission(.missingInstruction)
+                    return
+                }
+                instruction = explicitInstruction
+            } else {
+                instruction = submission.instruction ?? defaultInstruction
+            }
+
             let route = try ProviderRouter(configuration: configuration).resolve(
                 preset: preset,
                 localOnly: preset?.localOnly ?? false
             )
-            let instruction = submission.instruction ?? defaultInstruction
             engine.submit(
                 instruction: instruction,
                 provider: route.primary,
