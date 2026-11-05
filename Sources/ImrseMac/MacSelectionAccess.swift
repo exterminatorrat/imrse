@@ -15,6 +15,8 @@ public final class MacSelectionAccess: SelectionAccess {
     private static let focusRetryDelayMilliseconds: Int64 = 10
     private static let manualAccessibilityAttribute = "AXManualAccessibility"
     private static let protectedContentAttribute = "AXProtectedContent"
+    private static let editableAncestorAttribute = "AXEditableAncestor"
+    private static let highestEditableAncestorAttribute = "AXHighestEditableAncestor"
 
     private struct TargetHandle {
         let id: UUID
@@ -40,6 +42,7 @@ public final class MacSelectionAccess: SelectionAccess {
         let handle: TargetHandle
         let replacementRange: TextRange
         let focusedSelection: NativeSelection
+        let styleProof: ContenteditableTextStyleProof?
     }
 
     private final class ObserverContext: @unchecked Sendable {
@@ -62,6 +65,7 @@ public final class MacSelectionAccess: SelectionAccess {
     private struct AppliedReplacement {
         let strategy: ReplacementStrategy
         let focusedSelection: NativeSelection
+        let styleProof: ContenteditableTextStyleProof?
     }
 
     private struct ClipboardDestination {
@@ -255,7 +259,8 @@ public final class MacSelectionAccess: SelectionAccess {
             receipt: receipt,
             handle: captured.handle,
             replacementRange: replacementRange,
-            focusedSelection: applied.focusedSelection
+            focusedSelection: applied.focusedSelection,
+            styleProof: applied.styleProof
         )
         lastFailureReason = nil
         return receipt
@@ -272,7 +277,14 @@ public final class MacSelectionAccess: SelectionAccess {
             guard sameSelection(current, undoTarget.focusedSelection) else {
                 throw failure(current.range == undoTarget.focusedSelection.range ? .textChanged : .rangeChanged, .undoUnavailable)
             }
-            if supportsPlainTextValueReplacement(undoTarget.handle.element, role: undoTarget.handle.role) {
+            if let styleProof = undoTarget.styleProof {
+                try await undoContenteditable(
+                    undoTarget,
+                    receipt: receipt,
+                    currentSelection: current,
+                    styleProof: styleProof
+                )
+            } else if supportsPlainTextValueReplacement(undoTarget.handle.element, role: undoTarget.handle.role) {
                 try undoPlainTextField(undoTarget, receipt: receipt, currentSelection: current)
             } else {
                 let target = undoTarget.handle
@@ -408,6 +420,111 @@ public final class MacSelectionAccess: SelectionAccess {
                 throw ImrseError.undoUnavailable
             }
             _ = try self.currentSelection(target, allowingEmpty: true)
+        } catch {
+            invalidateAfterUnverifiedWrite(target.id)
+            throw ImrseError.undoUnavailable
+        }
+    }
+
+    private func undoContenteditable(
+        _ undoTarget: UndoTarget,
+        receipt: ReplacementReceipt,
+        currentSelection: NativeSelection,
+        styleProof: ContenteditableTextStyleProof
+    ) async throws {
+        let target = undoTarget.handle
+        guard let inverseProof = ContenteditableTextStyleProof(
+            originalValue: styleProof.expectedValue,
+            selectionRange: undoTarget.replacementRange,
+            selectedText: receipt.replacement,
+            replacement: receipt.target.text
+        ),
+        inverseProof.confirmsApplied(styleProof.originalValue),
+        try requireContenteditableStyleState(
+            target,
+            proof: styleProof,
+            confirmsApplied: true
+        ) else {
+            throw ImrseError.undoUnavailable
+        }
+        guard let prepareForClipboardPaste else { throw ImrseError.clipboardFailed }
+        try requireTargetForeground(target)
+        let replacementSelection: NativeSelection
+        if currentSelection.range == undoTarget.replacementRange,
+           sameText(currentSelection.text, receipt.replacement) {
+            replacementSelection = currentSelection
+        } else {
+            guard UTF16SelectionRange.isCollapsedCaret(
+                currentSelection.range,
+                selectedText: currentSelection.text,
+                atEndOf: undoTarget.replacementRange
+            ),
+            let replacementText = try stringForRange(
+                target.element,
+                range: undoTarget.replacementRange,
+                failure: .undoUnavailable
+            ),
+            sameText(replacementText, receipt.replacement),
+            (try? attributeIsSettable(target.element, kAXSelectedTextRangeAttribute)) == true
+            else {
+                throw ImrseError.undoUnavailable
+            }
+            let beforeSelectionChange = try self.currentSelection(target, allowingEmpty: true)
+            guard sameSelection(beforeSelectionChange, currentSelection) else {
+                throw ImrseError.undoUnavailable
+            }
+            let selectedRange = try axRangeValue(undoTarget.replacementRange, failure: .undoUnavailable)
+            guard try setAttribute(target.element, kAXSelectedTextRangeAttribute, value: selectedRange) == .success else {
+                throw ImrseError.undoUnavailable
+            }
+            replacementSelection = try await selection(
+                afterSetting: undoTarget.replacementRange,
+                text: receipt.replacement,
+                on: target
+            )
+        }
+        let beforePreparation = try self.currentSelection(target, allowingEmpty: true)
+        guard sameSelection(beforePreparation, replacementSelection) else { throw ImrseError.undoUnavailable }
+        do {
+            try await prepareForClipboardPaste()
+        } catch {
+            throw ImrseError.clipboardFailed
+        }
+
+        let beforePaste = try self.currentSelection(target, allowingEmpty: true)
+        guard sameSelection(beforePaste, replacementSelection),
+              try requireContenteditableStyleState(
+                target,
+                proof: inverseProof,
+                confirmsApplied: false
+              )
+        else {
+            throw ImrseError.undoUnavailable
+        }
+
+        let afterPaste = try await paste(
+            receipt.target.text,
+            to: target,
+            replacing: receipt.replacement,
+            at: undoTarget.replacementRange,
+            expectedSelection: replacementSelection,
+            oldValue: styleProof.expectedValue.string,
+            expectedValue: styleProof.originalValue.string,
+            styleProof: inverseProof
+        )
+
+        do {
+            guard let actual = try attributedWholeValue(
+                target.element,
+                matching: styleProof.originalValue.string,
+                failure: .undoUnavailable
+            ),
+            styleProof.confirmsOriginal(actual),
+            inverseProof.confirmsApplied(actual),
+            sameSelection(try self.currentSelection(target, allowingEmpty: true), afterPaste)
+            else {
+                throw ImrseError.undoUnavailable
+            }
         } catch {
             invalidateAfterUnverifiedWrite(target.id)
             throw ImrseError.undoUnavailable
@@ -842,7 +959,7 @@ public final class MacSelectionAccess: SelectionAccess {
                         replacement: replacement
                     ) {
                         selectedTextOutcome = .confirmedApplied(
-                            AppliedReplacement(strategy: .selectedText, focusedSelection: after)
+                            AppliedReplacement(strategy: .selectedText, focusedSelection: after, styleProof: nil)
                         )
                     } else if UTF16SelectionRange.isCollapsedCaret(
                         after.range,
@@ -867,7 +984,11 @@ public final class MacSelectionAccess: SelectionAccess {
                             throw ImrseError.replacementFailed
                         }
                         selectedTextOutcome = .confirmedApplied(
-                            AppliedReplacement(strategy: .selectedText, focusedSelection: verifiedSelection)
+                            AppliedReplacement(
+                                strategy: .selectedText,
+                                focusedSelection: verifiedSelection,
+                                styleProof: nil
+                            )
                         )
                     } else if self.clipboardFallbackEnabled,
                               let selectedTextFallbackBaseline,
@@ -955,7 +1076,7 @@ public final class MacSelectionAccess: SelectionAccess {
                     invalidateAfterUnverifiedWrite(target.id, reason: .replacementReadbackFailed)
                     throw ImrseError.replacementFailed
                 }
-                return AppliedReplacement(strategy: .valueRange, focusedSelection: after)
+                return AppliedReplacement(strategy: .valueRange, focusedSelection: after, styleProof: nil)
             }
             invalidateAfterUnverifiedWrite(target.id, reason: .replacementEvidenceMismatch)
             throw ImrseError.replacementFailed
@@ -967,7 +1088,16 @@ public final class MacSelectionAccess: SelectionAccess {
         }
         guard let prepareForClipboardPaste else { throw ImrseError.clipboardFailed }
         try requireTargetForeground(target)
-        guard clipboardFallbackTargetIsEligible(target) else { throw ImrseError.replacementFailed }
+        let styleProof = try preflightClipboardStyleProof(
+            target,
+            replacing: expectedText,
+            at: range,
+            with: replacement,
+            expectedValue: selectedTextFallbackBaseline ?? oldValue
+        )
+        guard clipboardFallbackTargetIsEligible(target, styleProof: styleProof) else {
+            throw ImrseError.replacementFailed
+        }
         do {
             try await prepareForClipboardPaste()
         } catch {
@@ -976,7 +1106,9 @@ public final class MacSelectionAccess: SelectionAccess {
         let clipboardValue: String
         do {
             try requireTargetForeground(target)
-            guard clipboardFallbackTargetIsEligible(target) else { throw ImrseError.staleSelection }
+            guard clipboardFallbackTargetIsEligible(target, styleProof: styleProof) else {
+                throw ImrseError.staleSelection
+            }
             let afterPreparation = try currentSelection(target, allowingEmpty: true)
             guard sameSelection(afterPreparation, before),
                   let value = try wholeValue(target.element, failure: .staleSelection),
@@ -1001,9 +1133,10 @@ public final class MacSelectionAccess: SelectionAccess {
             at: range,
             expectedSelection: before,
             oldValue: clipboardValue,
-            expectedValue: clipboardExpectedValue
+            expectedValue: clipboardExpectedValue,
+            styleProof: styleProof
         )
-        return AppliedReplacement(strategy: .clipboard, focusedSelection: afterPaste)
+        return AppliedReplacement(strategy: .clipboard, focusedSelection: afterPaste, styleProof: styleProof)
     }
 
     private func invalidateAfterUnverifiedWrite(
@@ -1023,11 +1156,14 @@ public final class MacSelectionAccess: SelectionAccess {
         at range: TextRange,
         expectedSelection: NativeSelection,
         oldValue: String,
-        expectedValue: String
+        expectedValue: String,
+        styleProof: ContenteditableTextStyleProof? = nil
     ) async throws -> NativeSelection {
         guard Self.eventPostingPermissionGranted else { throw ImrseError.permissionRequired }
         try requireTargetForeground(target)
-        guard clipboardFallbackTargetIsEligible(target) else { throw ImrseError.staleSelection }
+        guard clipboardFallbackTargetIsEligible(target, styleProof: styleProof) else {
+            throw ImrseError.staleSelection
+        }
         guard let application = NSRunningApplication(processIdentifier: target.processID), !application.isTerminated else {
             throw failure(.targetApplicationUnavailable, .clipboardFailed)
         }
@@ -1048,7 +1184,7 @@ public final class MacSelectionAccess: SelectionAccess {
             replacementRange: replacementRange
         )
         let pasteboard = NSPasteboard.general
-        return try await clipboardRecovery.perform(
+        let afterPaste = try await clipboardRecovery.perform(
             destination: destination,
             capture: { try ClipboardPasteboardTransaction.capture(from: pasteboard) },
             stage: { transaction in
@@ -1057,14 +1193,16 @@ public final class MacSelectionAccess: SelectionAccess {
                 guard self.sameSelection(current, expectedSelection),
                       let value = try self.wholeValue(target.element, failure: .staleSelection),
                       self.sameText(value, oldValue),
-                      self.clipboardFallbackTargetIsEligible(target)
+                      self.clipboardFallbackTargetIsEligible(target, styleProof: styleProof)
                 else { throw ImrseError.staleSelection }
                 try transaction.stage(text, on: pasteboard)
             },
             verify: { transaction in
                 try self.requireCurrentClipboardDestination(destination)
                 try self.requireTargetForeground(target)
-                guard self.clipboardFallbackTargetIsEligible(target) else { throw ImrseError.staleSelection }
+                guard self.clipboardFallbackTargetIsEligible(target, styleProof: styleProof) else {
+                    throw ImrseError.staleSelection
+                }
                 let beforePost = try self.currentSelection(target)
                 guard beforePost.range == range,
                       self.sameText(beforePost.text, expectedText),
@@ -1089,6 +1227,23 @@ public final class MacSelectionAccess: SelectionAccess {
             hasMutated: { $0.hasMutatedPasteboard },
             restore: { try $0.restoreIfOwned(on: pasteboard) }
         )
+        if let styleProof {
+            do {
+                guard try requireContenteditableStyleState(
+                    target,
+                    proof: styleProof,
+                    confirmsApplied: true
+                ),
+                sameSelection(try currentSelection(target, allowingEmpty: true), afterPaste)
+                else {
+                    throw ImrseError.replacementFailed
+                }
+            } catch {
+                invalidateAfterUnverifiedWrite(target.id)
+                throw ImrseError.replacementFailed
+            }
+        }
+        return afterPaste
     }
 
     private func recoverPendingClipboard() throws {
@@ -1165,24 +1320,148 @@ public final class MacSelectionAccess: SelectionAccess {
         }
     }
 
-    private func clipboardFallbackTargetIsEligible(_ target: TargetHandle) -> Bool {
-        let eligible = ClipboardTargetStructureValidation.permits(
-            root: target.element,
-            readRole: { element in
-                guard let role = try self.stringAttribute(element, kAXRoleAttribute, failure: .staleSelection) else {
-                    throw ImrseError.staleSelection
-                }
-                return role
-            },
-            readChildren: { element in
-                try self.elementChildren(element, failure: .staleSelection)
-            },
-            sameElement: { self.sameElement($0, $1) }
-        )
+    private func clipboardFallbackTargetIsEligible(
+        _ target: TargetHandle,
+        styleProof: ContenteditableTextStyleProof? = nil
+    ) -> Bool {
+        let eligible: Bool
+        if let styleProof {
+            do {
+                eligible = try requireContenteditableStyleState(
+                    target,
+                    proof: styleProof,
+                    confirmsApplied: false
+                )
+            } catch {
+                if lastFailureReason == nil { lastFailureReason = .clipboardTargetIneligible }
+                return false
+            }
+        } else {
+            eligible = ClipboardTargetStructureValidation.permits(
+                root: target.element,
+                readRole: { element in
+                    guard let role = try self.stringAttribute(element, kAXRoleAttribute, failure: .staleSelection) else {
+                        throw ImrseError.staleSelection
+                    }
+                    return role
+                },
+                readChildren: { element in
+                    try self.elementChildren(element, failure: .staleSelection)
+                },
+                sameElement: { self.sameElement($0, $1) }
+            )
+        }
         if !eligible, lastFailureReason == nil {
             lastFailureReason = .clipboardTargetIneligible
         }
         return eligible
+    }
+
+    private func preflightClipboardStyleProof(
+        _ target: TargetHandle,
+        replacing selectedText: String,
+        at range: TextRange,
+        with replacement: String,
+        expectedValue: String?
+    ) throws -> ContenteditableTextStyleProof? {
+        if clipboardFallbackTargetIsEligible(target) { return nil }
+        guard let styleProof = try contenteditableClipboardStyleProof(
+            target,
+            replacing: selectedText,
+            at: range,
+            with: replacement,
+            expectedValue: expectedValue
+        ) else {
+            if lastFailureReason == nil { lastFailureReason = .clipboardTargetIneligible }
+            throw ImrseError.replacementFailed
+        }
+        lastFailureReason = nil
+        return styleProof
+    }
+
+    private func contenteditableClipboardStyleProof(
+        _ target: TargetHandle,
+        replacing selectedText: String,
+        at range: TextRange,
+        with replacement: String,
+        expectedValue: String?
+    ) throws -> ContenteditableTextStyleProof? {
+        guard try contenteditableClipboardTargetIsEligible(target),
+              let value = try wholeValue(target.element, failure: .replacementFailed),
+              expectedValue.map({ sameText(value, $0) }) ?? true,
+              let attributedValue = try attributedWholeValue(
+                target.element,
+                matching: value,
+                failure: .replacementFailed
+              )
+        else {
+            return nil
+        }
+        return ContenteditableTextStyleProof(
+            originalValue: attributedValue,
+            selectionRange: range,
+            selectedText: selectedText,
+            replacement: replacement
+        )
+    }
+
+    private func requireContenteditableStyleState(
+        _ target: TargetHandle,
+        proof: ContenteditableTextStyleProof,
+        confirmsApplied: Bool
+    ) throws -> Bool {
+        guard try contenteditableClipboardTargetIsEligible(target) else { return false }
+        let expectedValue = confirmsApplied ? proof.expectedValue.string : proof.originalValue.string
+        guard let actual = try attributedWholeValue(
+            target.element,
+            matching: expectedValue,
+            failure: .staleSelection
+        ) else {
+            return false
+        }
+        return confirmsApplied ? proof.confirmsApplied(actual) : proof.confirmsOriginal(actual)
+    }
+
+    private func contenteditableClipboardTargetIsEligible(_ target: TargetHandle) throws -> Bool {
+        guard target.role == "AXTextArea",
+              ClipboardDirectStaticTextValidation.permits(
+                root: target.element,
+                readRole: { element in
+                    guard let role = try self.stringAttribute(element, kAXRoleAttribute, failure: .staleSelection) else {
+                        throw ImrseError.staleSelection
+                    }
+                    return role
+                },
+                readChildren: { element in
+                    try self.elementChildren(element, failure: .staleSelection)
+                },
+                sameElement: { self.sameElement($0, $1) }
+              ),
+              try booleanAttribute(target.element, kAXEnabledAttribute as String, failure: .staleSelection) == true,
+              let editableAncestor = try elementAttribute(
+                target.element,
+                Self.editableAncestorAttribute,
+                failure: .staleSelection
+              ),
+              let highestEditableAncestor = try elementAttribute(
+                target.element,
+                Self.highestEditableAncestorAttribute,
+                failure: .staleSelection
+              ),
+              sameElement(editableAncestor, target.element),
+              sameElement(highestEditableAncestor, target.element),
+              hasProcessID(target.element, equalTo: target.processID),
+              hasProcessID(editableAncestor, equalTo: target.processID),
+              hasProcessID(highestEditableAncestor, equalTo: target.processID)
+        else {
+            return false
+        }
+        return true
+    }
+
+    private func hasProcessID(_ element: AXUIElement, equalTo expected: Int32) -> Bool {
+        var processID: pid_t = 0
+        return AXUIElementGetPid(element, &processID) == .success && Int32(processID) == expected
     }
 
     private func elementChildren(_ element: AXUIElement, failure: ImrseError) throws -> [AXUIElement] {
@@ -1270,6 +1549,54 @@ public final class MacSelectionAccess: SelectionAccess {
         guard let value = try stringAttribute(element, kAXValueAttribute, failure: failure) else { return nil }
         guard value.utf16.count <= PlainTextUndoValidation.maximumWholeValueUTF16Length else { throw failure }
         return value
+    }
+
+    private func attributedWholeValue(
+        _ element: AXUIElement,
+        matching value: String,
+        failure: ImrseError
+    ) throws -> NSAttributedString? {
+        let length = value.utf16.count
+        guard length > 0,
+              length <= ContenteditableTextStyleProof.maximumWholeValueUTF16Length,
+              let range = validatedRange(at: 0, length: length),
+              let attributedValue = try attributedStringForRange(element, range: range, failure: failure),
+              attributedValue.length == length,
+              sameText(attributedValue.string, value)
+        else {
+            return nil
+        }
+        return NSAttributedString(attributedString: attributedValue)
+    }
+
+    private func attributedStringForRange(
+        _ element: AXUIElement,
+        range: TextRange,
+        failure: ImrseError
+    ) throws -> NSAttributedString? {
+        guard isWithinSupportedRange(range) else { throw failure }
+        let parameter = try axRangeValue(range, failure: failure)
+        try configureAXMessaging(element)
+        var value: CFTypeRef?
+        let status = AXUIElementCopyParameterizedAttributeValue(
+            element,
+            kAXAttributedStringForRangeParameterizedAttribute as CFString,
+            parameter,
+            &value
+        )
+        if status == .attributeUnsupported
+            || status == .parameterizedAttributeUnsupported
+            || status == .noValue
+            || status == .notImplemented {
+            return nil
+        }
+        guard status == .success, let value else { throw self.failure(.axReadFailure, failure) }
+        guard CFGetTypeID(value) == CFAttributedStringGetTypeID(),
+              let attributedValue = value as? NSAttributedString
+        else {
+            throw self.failure(.axValueTypeMismatch, failure)
+        }
+        return NSAttributedString(attributedString: attributedValue)
     }
 
     private func stringForRange(

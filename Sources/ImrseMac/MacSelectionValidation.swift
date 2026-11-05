@@ -337,6 +337,31 @@ enum ClipboardTargetStructureValidation {
     }
 }
 
+enum ClipboardDirectStaticTextValidation {
+    static func permits<Element>(
+        root: Element,
+        readRole: (Element) throws -> String,
+        readChildren: (Element) throws -> [Element],
+        sameElement: (Element, Element) -> Bool
+    ) -> Bool {
+        do {
+            let children = try readChildren(root)
+            guard try readRole(root) == "AXTextArea",
+                  children.count == 1,
+                  let leaf = children.first,
+                  !sameElement(root, leaf),
+                  try readRole(leaf) == "AXStaticText",
+                  try readChildren(leaf).isEmpty
+            else {
+                return false
+            }
+            return true
+        } catch {
+            return false
+        }
+    }
+}
+
 @MainActor
 enum VerifiedAction {
     static func perform<Output>(
