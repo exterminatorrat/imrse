@@ -127,7 +127,7 @@ final class ShortcutRecognizerTests: XCTestCase {
         XCTAssertNil(commandOption.consume(ShortcutEvent(kind: .keyDown, keyCode: 34, timestamp: 1, command: true, option: true)))
 
         var controlOption = ShortcutRecognizer(configuration: .init(doubleControlEnabled: false), presets: [])
-        XCTAssertNil(controlOption.consume(ShortcutEvent(kind: .keyDown, keyCode: 34, timestamp: 1, control: true, option: true)))
+        XCTAssertNil(controlOption.consume(ShortcutEvent(kind: .keyDown, keyCode: 34, timestamp: 1, option: true, control: true)))
 
         var replacementRecognizer = ShortcutRecognizer(
             configuration: InvocationConfiguration(doubleControlEnabled: false, shortcut: replacement),
