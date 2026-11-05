@@ -183,7 +183,9 @@ final class TransformationEngineTests: XCTestCase {
         for reason in [
             SelectionFailureReason.replacementWriteRejected,
             .replacementReadbackFailed,
-            .replacementEvidenceMismatch
+            .replacementEvidenceMismatch,
+            .clipboardTargetIneligible,
+            .axReadFailure
         ] {
             let access = StubSelectionAccess(target: snapshot(text: "original"))
             access.replacementError = .replacementFailed

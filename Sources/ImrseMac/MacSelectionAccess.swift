@@ -1129,7 +1129,7 @@ public final class MacSelectionAccess: SelectionAccess {
     }
 
     private func clipboardFallbackTargetIsEligible(_ target: TargetHandle) -> Bool {
-        ClipboardTargetStructureValidation.permits(
+        let eligible = ClipboardTargetStructureValidation.permits(
             root: target.element,
             readRole: { element in
                 guard let role = try self.stringAttribute(element, kAXRoleAttribute, failure: .staleSelection) else {
@@ -1142,6 +1142,10 @@ public final class MacSelectionAccess: SelectionAccess {
             },
             sameElement: { self.sameElement($0, $1) }
         )
+        if !eligible, lastFailureReason == nil {
+            lastFailureReason = .clipboardTargetIneligible
+        }
+        return eligible
     }
 
     private func elementChildren(_ element: AXUIElement, failure: ImrseError) throws -> [AXUIElement] {
@@ -1164,7 +1168,7 @@ public final class MacSelectionAccess: SelectionAccess {
         var settable = DarwinBoolean(false)
         let status = AXUIElementIsAttributeSettable(element, attribute as CFString, &settable)
         if status == .attributeUnsupported || status == .noValue || status == .notImplemented { return false }
-        guard status == .success else { throw ImrseError.replacementFailed }
+        guard status == .success else { throw failure(.axReadFailure, .replacementFailed) }
         return settable.boolValue
     }
 
