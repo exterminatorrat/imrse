@@ -19,6 +19,25 @@ enum ObservedCaptureNotification {
     }
 }
 
+@MainActor
+enum ObservedFocusValidation {
+    static func preservesCapture<Element>(
+        observedTargetID: UUID,
+        currentTargetID: UUID,
+        capturedElement: Element,
+        readFocusedElement: () throws -> Element?,
+        sameElement: (Element, Element) -> Bool
+    ) -> Bool {
+        guard observedTargetID == currentTargetID else { return false }
+        do {
+            guard let focusedElement = try readFocusedElement() else { return false }
+            return sameElement(focusedElement, capturedElement)
+        } catch {
+            return false
+        }
+    }
+}
+
 enum UTF16SelectionRange {
     static func isValid(_ range: ImrseCore.TextRange) -> Bool {
         guard range.location >= 0, range.length >= 0 else { return false }

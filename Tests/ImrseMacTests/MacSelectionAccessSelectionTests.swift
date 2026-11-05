@@ -22,6 +22,55 @@ final class MacSelectionAccessSelectionTests: XCTestCase {
         XCTAssertEqual(ObservedCaptureNotification.failureReason(for: "unrecognized" as CFString), .captureInvalidated)
     }
 
+    @MainActor
+    func testObservedFocusPreservesCaptureOnlyForSameCurrentElement() {
+        let targetID = UUID()
+
+        XCTAssertTrue(ObservedFocusValidation.preservesCapture(
+            observedTargetID: targetID,
+            currentTargetID: targetID,
+            capturedElement: 7,
+            readFocusedElement: { 7 },
+            sameElement: { $0 == $1 }
+        ))
+        XCTAssertFalse(ObservedFocusValidation.preservesCapture(
+            observedTargetID: targetID,
+            currentTargetID: targetID,
+            capturedElement: 7,
+            readFocusedElement: { 8 },
+            sameElement: { $0 == $1 }
+        ))
+    }
+
+    @MainActor
+    func testObservedFocusFailsClosedOnMissingOrUnreadableFocusAndSkipsStaleTarget() {
+        let targetID = UUID()
+        XCTAssertFalse(ObservedFocusValidation.preservesCapture(
+            observedTargetID: targetID,
+            currentTargetID: targetID,
+            capturedElement: 7,
+            readFocusedElement: { nil },
+            sameElement: { $0 == $1 }
+        ))
+        XCTAssertFalse(ObservedFocusValidation.preservesCapture(
+            observedTargetID: targetID,
+            currentTargetID: targetID,
+            capturedElement: 7,
+            readFocusedElement: { throw ImrseError.noSelection },
+            sameElement: { $0 == $1 }
+        ))
+
+        var focusReads = 0
+        XCTAssertFalse(ObservedFocusValidation.preservesCapture(
+            observedTargetID: UUID(),
+            currentTargetID: targetID,
+            capturedElement: 7,
+            readFocusedElement: { focusReads += 1; return 7 },
+            sameElement: { $0 == $1 }
+        ))
+        XCTAssertEqual(focusReads, 0)
+    }
+
     func testSelectionReadReasonsDistinguishMissingInvalidAndEmptyRanges() {
         XCTAssertEqual(SelectionReadValidation.rangeFailure(nil, allowingEmpty: false), .selectedRangeUnavailable)
         XCTAssertEqual(SelectionReadValidation.rangeFailure(.init(location: -1, length: 1), allowingEmpty: false), .invalidSelectedRange)

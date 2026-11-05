@@ -502,6 +502,25 @@ public final class MacSelectionAccess: SelectionAccess {
     }
 
     private func observedChange(for targetID: UUID, reason: SelectionFailureReason) {
+        if reason == .captureObservedFocusChange,
+           let captured = capturedTarget {
+            let previousFailureReason = lastFailureReason
+            let preservesCapture = ObservedFocusValidation.preservesCapture(
+                observedTargetID: targetID,
+                currentTargetID: captured.snapshot.id,
+                capturedElement: captured.handle.element,
+                readFocusedElement: {
+                    defer { self.lastFailureReason = previousFailureReason }
+                    return try self.elementAttribute(
+                        captured.handle.application,
+                        kAXFocusedUIElementAttribute,
+                        failure: .targetLost
+                    )
+                },
+                sameElement: { self.sameElement($0, $1) }
+            )
+            if preservesCapture { return }
+        }
         invalidateCapture(targetID, reason: reason)
     }
 
