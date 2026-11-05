@@ -779,130 +779,152 @@ public final class MacSelectionAccess: SelectionAccess {
             return result
         }
 
+        let selectedTextSettable: Bool
+        if before.range == range, sameText(before.text, expectedText) {
+            selectedTextSettable = try attributeIsSettable(target.element, kAXSelectedTextAttribute)
+        } else {
+            selectedTextSettable = false
+        }
+        let capabilities = SelectionWriteCapabilities(
+            selectedTextSettable: selectedTextSettable,
+            permitsWholeValueWrite: allowsWholeValueWrite,
+            clipboardFallbackEnabled: clipboardFallbackEnabled
+        )
         var selectedTextFallbackBaseline: String?
-        var selectedTextNoOpValidated = false
+        var selectedTextOutcome: SelectionMutationOutcome<AppliedReplacement>?
         if before.range == range, sameText(before.text, expectedText),
-           try attributeIsSettable(target.element, kAXSelectedTextAttribute) {
-            let status = try VerifiedAction.perform(
-                verify: {
-                    let current = try self.currentSelection(target, allowingEmpty: true)
-                    guard self.sameSelection(current, before) else {
-                        throw ImrseError.staleSelection
-                    }
-                    if let oldValue {
-                        guard let currentValue = try self.wholeValue(target.element, failure: .replacementFailed),
-                              self.sameText(currentValue, oldValue)
-                        else {
+           capabilities.canConsider(.selectedText) {
+            func attemptSelectedText() throws -> SelectionMutationOutcome<AppliedReplacement> {
+                let status = try VerifiedAction.perform(
+                    verify: {
+                        let current = try self.currentSelection(target, allowingEmpty: true)
+                        guard self.sameSelection(current, before) else {
                             throw ImrseError.staleSelection
                         }
+                        if let oldValue {
+                            guard let currentValue = try self.wholeValue(target.element, failure: .replacementFailed),
+                                  self.sameText(currentValue, oldValue)
+                            else {
+                                throw ImrseError.staleSelection
+                            }
+                        }
+                        if self.clipboardFallbackEnabled {
+                            selectedTextFallbackBaseline = ClipboardFallbackNoOpValidation.baseline(
+                                value: oldValue ?? (try? self.wholeValue(target.element, failure: .replacementFailed)),
+                                range: range,
+                                selectedText: expectedText
+                            )
+                        }
+                    },
+                    action: {
+                        try self.setAttribute(target.element, kAXSelectedTextAttribute, value: replacement as CFString)
                     }
-                    if self.clipboardFallbackEnabled {
-                        selectedTextFallbackBaseline = ClipboardFallbackNoOpValidation.baseline(
-                            value: oldValue ?? (try? self.wholeValue(target.element, failure: .replacementFailed)),
-                            range: range,
-                            selectedText: expectedText
+                )
+                guard status == .success else { return .indeterminate(.replacementWriteRejected) }
+
+                let after: NativeSelection
+                let afterValue: String?
+                do {
+                    after = try self.currentSelection(target, allowingEmpty: true)
+                    if self.clipboardFallbackEnabled, selectedTextFallbackBaseline != nil {
+                        afterValue = try? self.wholeValue(target.element, failure: .replacementFailed)
+                    } else if !self.clipboardFallbackEnabled, allowsWholeValueWrite {
+                        afterValue = try self.wholeValue(target.element, failure: .replacementFailed)
+                    } else {
+                        afterValue = nil
+                    }
+                } catch {
+                    return .indeterminate(.replacementReadbackFailed)
+                }
+                if SelectedTextReplacementValidation.confirms(
+                    afterValue: afterValue,
+                    expectedValue: expectedValue,
+                    afterRange: after.range,
+                    afterText: after.text,
+                    replacementRange: replacementRange,
+                    replacement: replacement
+                ) {
+                    return .confirmedApplied(AppliedReplacement(strategy: .selectedText, focusedSelection: after))
+                }
+                if UTF16SelectionRange.isCollapsedCaret(
+                    after.range,
+                    selectedText: after.text,
+                    atEndOf: replacementRange
+                ) {
+                    var failureReason = SelectionFailureReason.replacementReadbackFailed
+                    do {
+                        guard let rangeText = try self.stringForRange(
+                            target.element,
+                            range: replacementRange,
+                            failure: .replacementFailed
+                        ) else {
+                            throw ImrseError.replacementFailed
+                        }
+                        failureReason = .replacementEvidenceMismatch
+                        guard self.sameText(rangeText, replacement) else {
+                            throw ImrseError.replacementFailed
+                        }
+                        failureReason = .replacementReadbackFailed
+                        let verifiedSelection = try self.currentSelection(target, allowingEmpty: true)
+                        failureReason = .replacementEvidenceMismatch
+                        guard self.sameSelection(verifiedSelection, after) else {
+                            throw ImrseError.replacementFailed
+                        }
+                        return .confirmedApplied(
+                            AppliedReplacement(strategy: .selectedText, focusedSelection: verifiedSelection)
                         )
+                    } catch {
+                        return .indeterminate(failureReason)
                     }
-                },
-                action: {
-                    try self.setAttribute(target.element, kAXSelectedTextAttribute, value: replacement as CFString)
                 }
-            )
-            guard status == .success else {
-                invalidateAfterUnverifiedWrite(target.id, reason: .replacementWriteRejected)
-                throw ImrseError.replacementFailed
-            }
-            let after: NativeSelection
-            let afterValue: String?
-            do {
-                after = try currentSelection(target, allowingEmpty: true)
-                if clipboardFallbackEnabled, selectedTextFallbackBaseline != nil {
-                    afterValue = try? wholeValue(target.element, failure: .replacementFailed)
-                } else if !clipboardFallbackEnabled, allowsWholeValueWrite {
-                    afterValue = try wholeValue(target.element, failure: .replacementFailed)
-                } else {
-                    afterValue = nil
+                if self.clipboardFallbackEnabled,
+                   let selectedTextFallbackBaseline,
+                   let afterValue,
+                   after.range == before.range,
+                   self.sameText(after.text, before.text),
+                   self.sameText(afterValue, selectedTextFallbackBaseline) {
+                    do {
+                        try self.requireTargetForeground(target)
+                        let recheckedSelection = try self.currentSelection(target, allowingEmpty: true)
+                        guard let recheckedValue = try self.wholeValue(target.element, failure: .replacementFailed),
+                              ClipboardFallbackNoOpValidation.permits(
+                                enabled: self.clipboardFallbackEnabled,
+                                targetIsSafeAndFocused: true,
+                                range: range,
+                                beforeText: before.text,
+                                afterRange: recheckedSelection.range,
+                                afterText: recheckedSelection.text,
+                                beforeValue: selectedTextFallbackBaseline,
+                                afterValue: recheckedValue
+                              )
+                        else {
+                            throw ImrseError.replacementFailed
+                        }
+                        return .provedNotApplied
+                    } catch {
+                        return .indeterminate(.replacementVerificationFailed)
+                    }
                 }
-            } catch {
-                invalidateAfterUnverifiedWrite(target.id, reason: .replacementReadbackFailed)
-                throw ImrseError.replacementFailed
+                return .indeterminate(.replacementEvidenceMismatch)
             }
-            if SelectedTextReplacementValidation.confirms(
-                afterValue: afterValue,
-                expectedValue: expectedValue,
-                afterRange: after.range,
-                afterText: after.text,
-                replacementRange: replacementRange,
-                replacement: replacement
-            ) {
-                return AppliedReplacement(strategy: .selectedText, focusedSelection: after)
-            }
-            if UTF16SelectionRange.isCollapsedCaret(
-                after.range,
-                selectedText: after.text,
-                atEndOf: replacementRange
-            ) {
-                var failureReason = SelectionFailureReason.replacementReadbackFailed
-                do {
-                    guard let rangeText = try stringForRange(
-                        target.element,
-                        range: replacementRange,
-                        failure: .replacementFailed
-                    ) else {
-                        throw ImrseError.replacementFailed
-                    }
-                    failureReason = .replacementEvidenceMismatch
-                    guard sameText(rangeText, replacement) else {
-                        throw ImrseError.replacementFailed
-                    }
-                    failureReason = .replacementReadbackFailed
-                    let verifiedSelection = try currentSelection(target, allowingEmpty: true)
-                    failureReason = .replacementEvidenceMismatch
-                    guard sameSelection(verifiedSelection, after) else {
-                        throw ImrseError.replacementFailed
-                    }
-                    return AppliedReplacement(strategy: .selectedText, focusedSelection: verifiedSelection)
-                } catch {
-                    invalidateAfterUnverifiedWrite(target.id, reason: failureReason)
-                    throw ImrseError.replacementFailed
-                }
-            }
-            if clipboardFallbackEnabled,
-               let selectedTextFallbackBaseline,
-               let afterValue,
-               after.range == before.range,
-               sameText(after.text, before.text),
-               sameText(afterValue, selectedTextFallbackBaseline) {
-                do {
-                    try requireTargetForeground(target)
-                    let recheckedSelection = try currentSelection(target, allowingEmpty: true)
-                    guard let recheckedValue = try wholeValue(target.element, failure: .replacementFailed),
-                          ClipboardFallbackNoOpValidation.permits(
-                            enabled: clipboardFallbackEnabled,
-                            targetIsSafeAndFocused: true,
-                            range: range,
-                            beforeText: before.text,
-                            afterRange: recheckedSelection.range,
-                            afterText: recheckedSelection.text,
-                            beforeValue: selectedTextFallbackBaseline,
-                            afterValue: recheckedValue
-                          )
-                    else {
-                        throw ImrseError.replacementFailed
-                    }
-                    selectedTextNoOpValidated = true
-                } catch {
-                    invalidateAfterUnverifiedWrite(target.id)
-                    throw ImrseError.replacementFailed
-                }
-            } else {
-                invalidateAfterUnverifiedWrite(target.id, reason: .replacementEvidenceMismatch)
+
+            selectedTextOutcome = try attemptSelectedText()
+        }
+        if let selectedTextOutcome {
+            switch selectedTextOutcome {
+            case .confirmedApplied(let applied):
+                return applied
+            case .provedNotApplied:
+                break
+            case .indeterminate(let reason):
+                invalidateAfterUnverifiedWrite(target.id, reason: reason)
                 throw ImrseError.replacementFailed
             }
         }
+        let selectedTextNoOpValidated = selectedTextOutcome?.allowsFallback ?? false
 
         if !selectedTextNoOpValidated,
-           allowsWholeValueWrite,
+           capabilities.canConsider(.valueRange),
            let oldValue,
            let expectedValue,
            try attributeIsSettable(target.element, kAXValueAttribute) {
@@ -948,7 +970,8 @@ public final class MacSelectionAccess: SelectionAccess {
             throw ImrseError.replacementFailed
         }
 
-        guard clipboardFallbackEnabled, before.range == range, sameText(before.text, expectedText) else {
+        guard (selectedTextOutcome?.allowsFallback ?? true),
+              capabilities.canConsider(.clipboard), before.range == range, sameText(before.text, expectedText) else {
             throw ImrseError.replacementFailed
         }
         guard let prepareForClipboardPaste else { throw ImrseError.clipboardFailed }
