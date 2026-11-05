@@ -415,15 +415,15 @@ public final class MacSelectionAccess: SelectionAccess {
     }
 
     public func discard(_ target: SelectionSnapshot) {
-        invalidateCapture(target.id)
+        invalidateCapture(target.id, reason: .captureDiscarded)
         if undoTarget?.receipt.target.id == target.id { undoTarget = nil }
     }
 
-    private static let observerCallback: AXObserverCallback = { _, _, _, refcon in
+    private static let observerCallback: AXObserverCallback = { _, _, notification, refcon in
         guard let refcon else { return }
         let context = Unmanaged<ObserverContext>.fromOpaque(refcon).takeUnretainedValue()
         MainActor.assumeIsolated {
-            context.owner?.observedChange(for: context.targetID)
+            context.owner?.observedChange(for: context.targetID, notification: notification)
         }
     }
 
@@ -500,8 +500,8 @@ public final class MacSelectionAccess: SelectionAccess {
         self.workspaceObserver = nil
     }
 
-    private func observedChange(for targetID: UUID) {
-        invalidateCapture(targetID)
+    private func observedChange(for targetID: UUID, notification: CFString) {
+        invalidateCapture(targetID, reason: ObservedCaptureNotification.failureReason(for: notification))
     }
 
     private func clearCapture() {
@@ -530,9 +530,12 @@ public final class MacSelectionAccess: SelectionAccess {
         clearCapture()
     }
 
-    private func invalidateCapture(_ targetID: UUID) {
+    private func invalidateCapture(
+        _ targetID: UUID,
+        reason: SelectionFailureReason = .captureInvalidated
+    ) {
         if capturedTarget?.snapshot.id == targetID, lastFailureReason == nil {
-            lastFailureReason = .captureInvalidated
+            lastFailureReason = reason
         }
         clearCapture(for: targetID)
         if undoTarget?.receipt.target.id == targetID { undoTarget = nil }

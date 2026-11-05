@@ -1,9 +1,26 @@
+import ApplicationServices
 import ImrseCore
 import XCTest
 @testable import ImrseMac
 
 final class MacSelectionAccessSelectionTests: XCTestCase {
     private typealias SelectionRange = ImrseCore.TextRange
+
+    func testObservedCaptureNotificationsMapOnlyToClosedReasons() {
+        XCTAssertEqual(
+            ObservedCaptureNotification.failureReason(for: kAXFocusedUIElementChangedNotification as CFString),
+            .captureObservedFocusChange
+        )
+        XCTAssertEqual(
+            ObservedCaptureNotification.failureReason(for: kAXSelectedTextChangedNotification as CFString),
+            .captureObservedSelectionChange
+        )
+        XCTAssertEqual(
+            ObservedCaptureNotification.failureReason(for: kAXValueChangedNotification as CFString),
+            .captureObservedValueChange
+        )
+        XCTAssertEqual(ObservedCaptureNotification.failureReason(for: "unrecognized" as CFString), .captureInvalidated)
+    }
 
     func testSelectionReadReasonsDistinguishMissingInvalidAndEmptyRanges() {
         XCTAssertEqual(SelectionReadValidation.rangeFailure(nil, allowingEmpty: false), .selectedRangeUnavailable)
