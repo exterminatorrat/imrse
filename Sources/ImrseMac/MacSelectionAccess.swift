@@ -794,6 +794,7 @@ public final class MacSelectionAccess: SelectionAccess {
         var selectedTextOutcome: SelectionMutationOutcome<AppliedReplacement>?
         if before.range == range, sameText(before.text, expectedText),
            capabilities.canConsider(.selectedText) {
+            @MainActor
             func attemptSelectedText() throws -> SelectionMutationOutcome<AppliedReplacement> {
                 let status = try VerifiedAction.perform(
                     verify: {
