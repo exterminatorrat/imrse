@@ -90,7 +90,8 @@ protocol ShortcutMonitoring: AnyObject {
     func start(
         configuration: InvocationConfiguration,
         presets: [Preset],
-        onInvoke: @escaping @MainActor (String?) -> Void
+        onInvoke: @escaping @MainActor (String?) -> Void,
+        onInsertAtCaret: @escaping @MainActor () -> Void
     ) throws
     func stop()
 }
@@ -238,22 +239,33 @@ final class AppModel: ObservableObject {
         if isPreviewMode { return "Keyboard monitoring isn't queried in preview mode." }
         if isTerminating || terminationRequested { return "Monitoring stops while imrse is quitting." }
         if isRecordingShortcut { return "Paused while recording a keyboard shortcut." }
+        let statusDetail: String
         if permissionStatusSnapshot.inputMonitoring == .notAuthorized {
-            return "Input Monitoring isn't authorized. Enable it in System Settings, then retry."
+            statusDetail = "Input Monitoring isn't authorized. Enable it in System Settings, then retry."
+        } else if permissionStatusSnapshot.keyboardMonitoring == .unavailable {
+            statusDetail = shortcutIssue ?? "Keyboard monitoring isn't available in this app context."
+        } else {
+            statusDetail = switch permissionStatusSnapshot.keyboardMonitoring {
+            case .active: "Listening for configured shortcuts while imrse is in the background."
+            case .pausedWhileRecording: "Paused while recording a keyboard shortcut."
+            case .inactive: "Keyboard monitoring is inactive. Retry after checking Input Monitoring."
+            case .unavailable: shortcutIssue ?? "Keyboard monitoring isn't available in this app context."
+            case .notQueried: "Keyboard monitoring isn't queried in preview mode."
+            }
         }
-        if permissionStatusSnapshot.keyboardMonitoring == .unavailable {
-            return shortcutIssue ?? "Keyboard monitoring isn't available in this app context."
+        guard let insertionShortcutConflictReason else { return statusDetail }
+        return "\(insertionShortcutConflictReason) \(statusDetail)"
+    }
+
+    private var insertionShortcutConflictReason: String? {
+        let insertionShortcut = InvocationConfiguration.defaultInsertAtCaretShortcut
+        if configuration.invocation.shortcut == insertionShortcut {
+            return "Insert at Caret is disabled because its shortcut conflicts with the configured replacement shortcut."
         }
-        if !hasKeyboardActivation {
-            return "No keyboard activation is enabled. Turn on Double Control or assign a shortcut in General."
+        if let preset = presets.first(where: { $0.shortcut == insertionShortcut }) {
+            return "Insert at Caret is disabled because its shortcut conflicts with the \(preset.name) preset shortcut."
         }
-        return switch permissionStatusSnapshot.keyboardMonitoring {
-        case .active: "Listening for configured shortcuts while imrse is in the background."
-        case .pausedWhileRecording: "Paused while recording a keyboard shortcut."
-        case .inactive: "Keyboard monitoring is inactive. Retry after checking Input Monitoring."
-        case .unavailable: shortcutIssue ?? "Keyboard monitoring isn't available in this app context."
-        case .notQueried: "Keyboard monitoring isn't queried in preview mode."
-        }
+        return nil
     }
 
     var isPermissionStatusRefreshing: Bool {
@@ -489,13 +501,17 @@ final class AppModel: ObservableObject {
     }
 
     func invoke(presetID: String? = nil) {
+        invoke(intent: .replaceSelection, presetID: presetID)
+    }
+
+    private func invoke(intent: SelectionEditIntent, presetID: String? = nil) {
         guard !isPreviewMode,
               !terminationRequested,
               !isRecordingShortcut,
               !isChangingManagedLocalModel,
               undoTask == nil
         else { return }
-        pillBridge.invoke(presetID: presetID)
+        pillBridge.invoke(intent: intent, presetID: presetID)
     }
 
     func beginShortcutRecording() -> UUID? {
@@ -545,10 +561,20 @@ final class AppModel: ObservableObject {
     }
 
     func handleShortcutMonitorCallback(presetID: String?, activationEpoch: UInt64) {
-        guard activationEpoch == shortcutMonitorActivationEpoch,
-              !isRecordingShortcut, !terminationRequested, !isPreviewMode
-        else { return }
+        guard canHandleShortcutCallback(activationEpoch: activationEpoch) else { return }
         invoke(presetID: presetID)
+    }
+
+    func handleInsertAtCaretShortcutMonitorCallback(activationEpoch: UInt64) {
+        guard canHandleShortcutCallback(activationEpoch: activationEpoch) else { return }
+        invoke(intent: .insertAtCaret)
+    }
+
+    private func canHandleShortcutCallback(activationEpoch: UInt64) -> Bool {
+        activationEpoch == shortcutMonitorActivationEpoch
+            && !isRecordingShortcut
+            && !terminationRequested
+            && !isPreviewMode
     }
 
     func dismiss() {
@@ -1806,6 +1832,8 @@ final class AppModel: ObservableObject {
         do {
             try shortcutMonitor.start(configuration: configuration.invocation, presets: presets) { [weak self] presetID in
                 self?.handleShortcutMonitorCallback(presetID: presetID, activationEpoch: activationEpoch)
+            } onInsertAtCaret: { [weak self] in
+                self?.handleInsertAtCaretShortcutMonitorCallback(activationEpoch: activationEpoch)
             }
             shortcutIssue = nil
         } catch let error as ShortcutMonitorError {
@@ -1885,12 +1913,6 @@ final class AppModel: ObservableObject {
             keyboardMonitoring: keyboardMonitoring
         )
         if permissionStatusSnapshot != snapshot { permissionStatusSnapshot = snapshot }
-    }
-
-    private var hasKeyboardActivation: Bool {
-        configuration.invocation.doubleControlEnabled
-            || configuration.invocation.shortcut != nil
-            || presets.contains { $0.shortcut != nil }
     }
 
     private func updatePermissionStatusRefreshTask() {

@@ -17,12 +17,15 @@ public final class MacSelectionAccess: SelectionAccess {
     private static let protectedContentAttribute = "AXProtectedContent"
     private static let editableAncestorAttribute = "AXEditableAncestor"
     private static let highestEditableAncestorAttribute = "AXHighestEditableAncestor"
+    private static let markedTextRangeAttribute = "AXTextInputMarkedTextMarkerRange"
 
     private struct TargetHandle {
         let id: UUID
         let applicationID: String
         let processID: Int32
         let role: String
+        let intent: SelectionEditIntent
+        let insertionWindow: AXUIElement?
         let application: AXUIElement
         let element: AXUIElement
     }
@@ -30,6 +33,7 @@ public final class MacSelectionAccess: SelectionAccess {
     private struct CapturedTarget {
         let snapshot: SelectionSnapshot
         let handle: TargetHandle
+        let insertionProof: CaretInsertionProof?
     }
 
     private struct NativeSelection {
@@ -43,6 +47,7 @@ public final class MacSelectionAccess: SelectionAccess {
         let replacementRange: TextRange
         let focusedSelection: NativeSelection
         let styleProof: ContenteditableTextStyleProof?
+        let insertionProof: CaretInsertionProof?
     }
 
     private final class ObserverContext: @unchecked Sendable {
@@ -106,6 +111,10 @@ public final class MacSelectionAccess: SelectionAccess {
     }
 
     public func capture() throws -> SelectionSnapshot {
+        try capture(intent: .replaceSelection)
+    }
+
+    public func capture(intent: SelectionEditIntent) throws -> SelectionSnapshot {
         clearCapture()
         lastFailureReason = nil
         captureDeadline = clock.now.advanced(by: Self.captureBudget)
@@ -146,16 +155,52 @@ public final class MacSelectionAccess: SelectionAccess {
             throw failure(.roleUnavailable, .noSelection)
         }
         let canReadValue = supportsPlainTextValueReplacement(element, role: role)
+        let inserting = intent == .insertAtCaret
         let selectedRange = try rangeAttribute(element, kAXSelectedTextRangeAttribute, failure: .noSelection)
-        if let reason = SelectionReadValidation.rangeFailure(selectedRange, allowingEmpty: false) {
+        if let reason = SelectionReadValidation.rangeFailure(selectedRange, allowingEmpty: inserting) {
             throw failure(reason, .noSelection)
         }
         guard let range = selectedRange else { throw failure(.selectedRangeUnavailable, .noSelection) }
-        let selected = try selectedText(element, range: range, failure: .noSelection, allowValueFallback: canReadValue)
-        if let reason = SelectionReadValidation.textFailure(selected, range: range, allowingEmpty: false) {
+        let selected: String?
+        if inserting {
+            selected = try stringAttribute(element, kAXSelectedTextAttribute, failure: .insertionUnavailable)
+        } else {
+            selected = try selectedText(element, range: range, failure: .noSelection, allowValueFallback: canReadValue)
+        }
+        if let reason = SelectionReadValidation.textFailure(selected, range: range, allowingEmpty: inserting) {
             throw failure(reason, .noSelection)
         }
         guard let text = selected else { throw failure(.selectedTextUnavailable, .noSelection) }
+        let insertionProof: CaretInsertionProof?
+        let insertionWindow: AXUIElement?
+        if inserting {
+            guard canReadValue, range.length == 0, text.isEmpty else {
+                throw failure(.caretProofUnavailable, .insertionUnavailable)
+            }
+            let composition = try caretCompositionState(element)
+            guard composition == .unmarked else {
+                throw failure(
+                    composition == .marked ? .markedTextActive : .compositionStateUnavailable,
+                    .insertionUnavailable
+                )
+            }
+            guard let proof = CaretInsertionProof(
+                value: try wholeValue(element, failure: .insertionUnavailable),
+                range: range,
+                selectedText: selected,
+                permitsPlainTextValueWrite: canReadValue,
+                composition: composition
+            ) else { throw failure(.caretProofUnavailable, .insertionUnavailable) }
+            insertionProof = proof
+            guard let window = try elementAttribute(element, kAXWindowAttribute, failure: .insertionUnavailable),
+                  hasProcessID(window, equalTo: processID),
+                  try stringAttribute(window, kAXRoleAttribute, failure: .insertionUnavailable) == (kAXWindowRole as String)
+            else { throw failure(.caretProofUnavailable, .insertionUnavailable) }
+            insertionWindow = window
+        } else {
+            insertionProof = nil
+            insertionWindow = nil
+        }
 
         let applicationID = runningApplication.bundleIdentifier ?? "pid:\(processID)"
         let snapshot = SelectionSnapshot(
@@ -164,18 +209,21 @@ public final class MacSelectionAccess: SelectionAccess {
             role: role,
             text: text,
             range: range,
-            isSecure: false
+            isSecure: false,
+            intent: intent
         )
         let handle = TargetHandle(
             id: snapshot.id,
             applicationID: applicationID,
             processID: processID,
             role: role,
+            intent: intent,
+            insertionWindow: insertionWindow,
             application: application,
             element: element
         )
         try requireTargetForeground(handle)
-        capturedTarget = CapturedTarget(snapshot: snapshot, handle: handle)
+        capturedTarget = CapturedTarget(snapshot: snapshot, handle: handle, insertionProof: insertionProof)
         observerRegistration = makeObserver(for: handle)
         installWorkspaceObserver(for: handle)
         do {
@@ -186,6 +234,7 @@ public final class MacSelectionAccess: SelectionAccess {
             ) else {
                 throw failure(.captureChangedDuringSetup, .noSelection)
             }
+            try validateInsertionProof(insertionProof, on: handle)
             capturedScreen = sourceScreen(for: element)
         } catch {
             invalidateCapture(snapshot.id)
@@ -215,6 +264,7 @@ public final class MacSelectionAccess: SelectionAccess {
             guard sameText(selection.text, target.text) else {
                 throw failure(.textChanged, .staleSelection)
             }
+            try validateInsertionProof(captured.insertionProof, on: captured.handle)
             lastFailureReason = nil
         } catch {
             invalidateCapture(target.id)
@@ -229,6 +279,14 @@ public final class MacSelectionAccess: SelectionAccess {
             throw ImrseError.targetLost
         }
         guard let range = target.range else { throw ImrseError.staleSelection }
+        let insertionValue: String?
+        if let proof = captured.insertionProof {
+            guard !text.isEmpty else { throw ImrseError.emptyOutput }
+            guard let value = proof.inserting(text) else { throw ImrseError.outputTooLarge }
+            insertionValue = value
+        } else {
+            insertionValue = nil
+        }
         if sameText(target.text, text) {
             return ReplacementReceipt(target: target, replacement: text, strategy: .selectedText)
         }
@@ -246,8 +304,18 @@ public final class MacSelectionAccess: SelectionAccess {
                 replacing: target.text,
                 at: range,
                 with: text,
-                focusedSelection: before
+                focusedSelection: before,
+                requiredOriginalValue: captured.insertionProof?.value
             )
+            if let insertionValue {
+                guard let value = try wholeValue(captured.handle.element, failure: .replacementFailed),
+                      sameText(value, insertionValue),
+                      sameSelection(try currentSelection(captured.handle, allowingEmpty: true), applied.focusedSelection)
+                else {
+                    invalidateAfterUnverifiedWrite(target.id)
+                    throw ImrseError.replacementFailed
+                }
+            }
         } catch {
             invalidateCapture(target.id)
             throw error
@@ -260,7 +328,8 @@ public final class MacSelectionAccess: SelectionAccess {
             handle: captured.handle,
             replacementRange: replacementRange,
             focusedSelection: applied.focusedSelection,
-            styleProof: applied.styleProof
+            styleProof: applied.styleProof,
+            insertionProof: captured.insertionProof
         )
         lastFailureReason = nil
         return receipt
@@ -277,6 +346,13 @@ public final class MacSelectionAccess: SelectionAccess {
             guard sameSelection(current, undoTarget.focusedSelection) else {
                 throw failure(current.range == undoTarget.focusedSelection.range ? .textChanged : .rangeChanged, .undoUnavailable)
             }
+            if let proof = undoTarget.insertionProof {
+                guard proof.confirmsApplied(
+                    value: try wholeValue(undoTarget.handle.element, failure: .undoUnavailable),
+                    inserting: receipt.replacement
+                )
+                else { throw ImrseError.undoUnavailable }
+            }
             if let styleProof = undoTarget.styleProof {
                 try await undoContenteditable(
                     undoTarget,
@@ -285,7 +361,7 @@ public final class MacSelectionAccess: SelectionAccess {
                     styleProof: styleProof
                 )
             } else if supportsPlainTextValueReplacement(undoTarget.handle.element, role: undoTarget.handle.role) {
-                try undoPlainTextField(undoTarget, receipt: receipt, currentSelection: current)
+                try await undoPlainTextField(undoTarget, receipt: receipt, currentSelection: current)
             } else {
                 let target = undoTarget.handle
                 let replacementSelection: NativeSelection
@@ -346,7 +422,7 @@ public final class MacSelectionAccess: SelectionAccess {
         _ undoTarget: UndoTarget,
         receipt: ReplacementReceipt,
         currentSelection: NativeSelection
-    ) throws {
+    ) async throws {
         let target = undoTarget.handle
         guard let currentValue = try wholeValue(target.element, failure: .undoUnavailable),
               let restoredValue = PlainTextUndoValidation.restoredValue(
@@ -361,6 +437,11 @@ public final class MacSelectionAccess: SelectionAccess {
               )
         else {
             throw ImrseError.undoUnavailable
+        }
+        if let proof = undoTarget.insertionProof {
+            guard proof.confirmsApplied(value: currentValue, inserting: receipt.replacement) else {
+                throw ImrseError.undoUnavailable
+            }
         }
 
         let selectedReplacement = currentSelection.range == undoTarget.replacementRange
@@ -419,7 +500,28 @@ public final class MacSelectionAccess: SelectionAccess {
             else {
                 throw ImrseError.undoUnavailable
             }
-            _ = try self.currentSelection(target, allowingEmpty: true)
+            let after = try self.currentSelection(target, allowingEmpty: true)
+            if let proof = undoTarget.insertionProof {
+                guard sameText(restoredValue, proof.value) else { throw ImrseError.undoUnavailable }
+                if after.range != proof.range || !after.text.isEmpty {
+                    guard try attributeIsSettable(target.element, kAXSelectedTextRangeAttribute) else {
+                        throw ImrseError.undoUnavailable
+                    }
+                    let caret = try axRangeValue(proof.range, failure: .undoUnavailable)
+                    let status = try VerifiedAction.perform(
+                        verify: {
+                            guard self.sameSelection(try self.currentSelection(target), after),
+                                  let value = try self.wholeValue(target.element, failure: .undoUnavailable),
+                                  self.sameText(value, proof.value)
+                            else { throw ImrseError.undoUnavailable }
+                        },
+                        action: { try self.setAttribute(target.element, kAXSelectedTextRangeAttribute, value: caret) }
+                    )
+                    guard status == .success else { throw ImrseError.undoUnavailable }
+                    _ = try await selection(afterSetting: proof.range, text: "", on: target)
+                }
+                try validateInsertionProof(proof, on: target)
+            }
         } catch {
             invalidateAfterUnverifiedWrite(target.id)
             throw ImrseError.undoUnavailable
@@ -719,22 +821,45 @@ public final class MacSelectionAccess: SelectionAccess {
         guard try stringAttribute(target.element, kAXRoleAttribute, failure: .targetLost) == target.role else {
             throw failure(.roleChanged, .staleSelection)
         }
+        if target.intent == .insertAtCaret {
+            guard let boundWindow = target.insertionWindow,
+                  let currentWindow = try elementAttribute(target.element, kAXWindowAttribute, failure: .staleSelection),
+                  hasProcessID(currentWindow, equalTo: target.processID),
+                  sameElement(boundWindow, currentWindow)
+            else { throw failure(.caretProofUnavailable, .staleSelection) }
+            guard supportsPlainTextValueReplacement(target.element, role: target.role) else {
+                throw failure(.caretProofUnavailable, .insertionUnavailable)
+            }
+            let composition = try caretCompositionState(target.element)
+            guard composition == .unmarked else {
+                throw failure(
+                    composition == .marked ? .markedTextActive : .compositionStateUnavailable,
+                    .insertionUnavailable
+                )
+            }
+        }
     }
 
     private func readSelection(_ target: TargetHandle, allowingEmpty: Bool) throws -> NativeSelection? {
+        let allowingEmpty = allowingEmpty || target.intent == .insertAtCaret
         let selectedRange = try rangeAttribute(target.element, kAXSelectedTextRangeAttribute, failure: .targetLost)
         if let reason = SelectionReadValidation.rangeFailure(selectedRange, allowingEmpty: allowingEmpty) {
             lastFailureReason = reason
             return nil
         }
         guard let range = selectedRange else { return nil }
-        let selected = try selectedText(
-            target.element,
-            range: range,
-            failure: .targetLost,
-            allowingEmpty: allowingEmpty,
-            allowValueFallback: supportsPlainTextValueReplacement(target.element, role: target.role)
-        )
+        let selected: String?
+        if target.intent == .insertAtCaret && range.length == 0 {
+            selected = try stringAttribute(target.element, kAXSelectedTextAttribute, failure: .targetLost)
+        } else {
+            selected = try selectedText(
+                target.element,
+                range: range,
+                failure: .targetLost,
+                allowingEmpty: allowingEmpty,
+                allowValueFallback: supportsPlainTextValueReplacement(target.element, role: target.role)
+            )
+        }
         if let reason = SelectionReadValidation.textFailure(selected, range: range, allowingEmpty: allowingEmpty) {
             lastFailureReason = reason
             return nil
@@ -742,6 +867,30 @@ public final class MacSelectionAccess: SelectionAccess {
         guard let text = selected else { return nil }
         lastFailureReason = nil
         return NativeSelection(text: text, range: range)
+    }
+
+    private func caretCompositionState(_ element: AXUIElement) throws -> CaretCompositionState {
+        try configureAXMessaging(element)
+        var names: CFArray?
+        guard AXUIElementCopyAttributeNames(element, &names) == .success,
+              let names = names as? [String],
+              names.contains(Self.markedTextRangeAttribute)
+        else { return .unavailable }
+        var value: CFTypeRef?
+        let status = AXUIElementCopyAttributeValue(element, Self.markedTextRangeAttribute as CFString, &value)
+        return CaretCompositionState.read(advertised: true, status: status, hasValue: value != nil)
+    }
+
+    private func validateInsertionProof(_ proof: CaretInsertionProof?, on target: TargetHandle) throws {
+        guard target.intent == .insertAtCaret else { return }
+        let selection = try currentSelection(target)
+        guard let proof,
+              proof.matches(
+                value: try wholeValue(target.element, failure: .staleSelection),
+                range: selection.range,
+                selectedText: selection.text
+              )
+        else { throw ImrseError.staleSelection }
     }
 
     private func selection(
@@ -859,7 +1008,8 @@ public final class MacSelectionAccess: SelectionAccess {
         replacing expectedText: String,
         at range: TextRange,
         with replacement: String,
-        focusedSelection: NativeSelection
+        focusedSelection: NativeSelection,
+        requiredOriginalValue: String? = nil
     ) async throws -> AppliedReplacement {
         guard !replacement.isEmpty else { throw ImrseError.emptyOutput }
         let before = try currentSelection(target, allowingEmpty: true)
@@ -879,6 +1029,11 @@ public final class MacSelectionAccess: SelectionAccess {
             oldValue = try wholeValue(target.element, failure: .replacementFailed)
         } else {
             oldValue = nil
+        }
+        if let requiredOriginalValue {
+            guard let oldValue, sameText(oldValue, requiredOriginalValue) else {
+                throw ImrseError.staleSelection
+            }
         }
         if let oldValue {
             guard let selectedValue = substring(oldValue, range: range),
@@ -1783,6 +1938,7 @@ public final class MacSelectionAccess: SelectionAccess {
             && sameText(lhs.text, rhs.text)
             && lhs.range == rhs.range
             && lhs.isSecure == rhs.isSecure
+            && lhs.intent == rhs.intent
     }
 
     private func sameReceipt(_ lhs: ReplacementReceipt, _ rhs: ReplacementReceipt) -> Bool {

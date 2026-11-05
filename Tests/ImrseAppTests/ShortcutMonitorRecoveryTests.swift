@@ -2,7 +2,7 @@
 import AppKit
 import Foundation
 import ImrseCore
-import ImrseMac
+@testable import ImrseMac
 import ImrseServices
 import XCTest
 @testable import ImrseApp
@@ -160,6 +160,58 @@ final class ShortcutMonitorRecoveryTests: XCTestCase {
         XCTAssertEqual(testModel.eventMonitoringStatus, "Inactive")
     }
 
+    func testReplacementAndInsertionCallbacksRouteDifferentEditIntents() {
+        let monitor = TestShortcutMonitor()
+        let selection = TestSelectionAccess()
+        let model = makeModel(monitor: monitor, selectionAccess: selection)
+
+        monitor.fireReplacementShortcut()
+
+        XCTAssertEqual(model.engine.state, .ready)
+        XCTAssertEqual(selection.captureIntents, [.replaceSelection])
+
+        model.dismiss()
+        monitor.fireInsertionShortcut()
+
+        XCTAssertEqual(model.engine.state, .ready)
+        XCTAssertEqual(selection.captureIntents, [.replaceSelection, .insertAtCaret])
+        XCTAssertEqual(model.pillModel.phase, .input)
+    }
+
+    func testInsertionShortcutConflictsWithReplacementAndPresetBindings() {
+        let shortcut = InvocationConfiguration.defaultInsertAtCaretShortcut
+        let configuration = InvocationConfiguration(doubleControlEnabled: false, shortcut: shortcut)
+        XCTAssertNoThrow(try ShortcutMonitor.validateBindings(configuration: configuration, presets: []))
+
+        let preset = Preset(id: "collision", name: "Collision", instruction: "Use a different tone", shortcut: shortcut)
+        XCTAssertNoThrow(try ShortcutMonitor.validateBindings(configuration: .init(), presets: [preset]))
+
+        let malformed = InvocationConfiguration(doubleControlEnabled: false, shortcut: ShortcutBinding(keyCode: 12))
+        XCTAssertThrowsError(try ShortcutMonitor.validateBindings(configuration: malformed, presets: []))
+
+        let duplicatePreset = Preset(
+            id: "duplicate",
+            name: "Duplicate",
+            instruction: "Use a different tone",
+            shortcut: ShortcutBinding(keyCode: 0, command: true)
+        )
+        let duplicateConfiguration = InvocationConfiguration(
+            doubleControlEnabled: false,
+            shortcut: ShortcutBinding(keyCode: 0, command: true)
+        )
+        XCTAssertThrowsError(try ShortcutMonitor.validateBindings(configuration: duplicateConfiguration, presets: [duplicatePreset]))
+
+        let distinctConfiguration = InvocationConfiguration(
+            doubleControlEnabled: false,
+            shortcut: ShortcutBinding(keyCode: 0, command: true)
+        )
+        let distinctPreset = Preset(
+            id: "distinct", name: "Distinct", instruction: "Use a different tone",
+            shortcut: ShortcutBinding(keyCode: 12, option: true)
+        )
+        XCTAssertNoThrow(try ShortcutMonitor.validateBindings(configuration: distinctConfiguration, presets: [distinctPreset]))
+    }
+
     private func makeModel(
         monitor: TestShortcutMonitor,
         textProvider: any TextProvider = EmptyTextProvider(),
@@ -202,6 +254,8 @@ private final class TestShortcutMonitor: ShortcutMonitoring {
     private(set) var isMonitoring = false
     private(set) var startCount = 0
     private var startFailures: [ShortcutMonitorError]
+    private var onInvoke: (@MainActor (String?) -> Void)?
+    private var onInsertAtCaret: (@MainActor () -> Void)?
 
     init(startFailures: [ShortcutMonitorError] = []) {
         self.startFailures = startFailures
@@ -210,15 +264,28 @@ private final class TestShortcutMonitor: ShortcutMonitoring {
     func start(
         configuration: InvocationConfiguration,
         presets: [Preset],
-        onInvoke: @escaping @MainActor (String?) -> Void
+        onInvoke: @escaping @MainActor (String?) -> Void,
+        onInsertAtCaret: @escaping @MainActor () -> Void
     ) throws {
         startCount += 1
         if !startFailures.isEmpty { throw startFailures.removeFirst() }
         isMonitoring = true
+        self.onInvoke = onInvoke
+        self.onInsertAtCaret = onInsertAtCaret
     }
 
     func stop() {
         isMonitoring = false
+        onInvoke = nil
+        onInsertAtCaret = nil
+    }
+
+    func fireReplacementShortcut() {
+        onInvoke?(nil)
+    }
+
+    func fireInsertionShortcut() {
+        onInsertAtCaret?()
     }
 }
 
@@ -238,7 +305,22 @@ private final class TestSelectionAccess: SelectionAccess {
         self.holdUndo = holdUndo
     }
 
-    func capture() throws -> SelectionSnapshot { snapshot }
+    private(set) var captureIntents: [SelectionEditIntent] = []
+
+    func capture() throws -> SelectionSnapshot { try capture(intent: .replaceSelection) }
+
+    func capture(intent: SelectionEditIntent) throws -> SelectionSnapshot {
+        captureIntents.append(intent)
+        guard intent == .insertAtCaret else { return snapshot }
+        return SelectionSnapshot(
+            applicationID: "test.application",
+            processID: 1,
+            role: "textField",
+            text: "",
+            range: TextRange(location: 0, length: 0),
+            intent: .insertAtCaret
+        )
+    }
 
     func validate(_ target: SelectionSnapshot) throws {}
 
