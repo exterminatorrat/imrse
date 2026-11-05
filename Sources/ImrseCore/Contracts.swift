@@ -35,6 +35,7 @@ public enum SelectionFailureReason: String, Equatable, Sendable {
     case replacementWriteRejected
     case replacementReadbackFailed
     case replacementEvidenceMismatch
+    case clipboardTargetIneligible
 }
 public enum ReasoningEffortRequestFormat: String, Codable, Sendable {
     case chatCompletionsField

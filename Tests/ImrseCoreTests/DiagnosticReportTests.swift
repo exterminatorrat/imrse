@@ -7,7 +7,9 @@ final class DiagnosticReportTests: XCTestCase {
         for reason in [
             SelectionFailureReason.replacementWriteRejected,
             .replacementReadbackFailed,
-            .replacementEvidenceMismatch
+            .replacementEvidenceMismatch,
+            .clipboardTargetIneligible,
+            .axReadFailure
         ] {
             var metadata = DiagnosticMetadata()
             metadata.selectionFailureReason = reason
