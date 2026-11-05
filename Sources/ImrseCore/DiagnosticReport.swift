@@ -20,6 +20,9 @@ public enum DiagnosticReport {
         if let selectionLength = metadata.selectionLength, selectionLength >= 0 {
             fields["selectionLength"] = selectionLength
         }
+        if let selectionFailureReason = metadata.selectionFailureReason {
+            fields["selectionFailureReason"] = selectionFailureReason.rawValue
+        }
         if let targetValid = metadata.targetValid { fields["targetValid"] = targetValid }
         if let strategy = metadata.strategy { fields["strategy"] = strategy.rawValue }
         if let providerName = metadata.providerName {

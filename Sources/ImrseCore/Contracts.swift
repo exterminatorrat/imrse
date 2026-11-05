@@ -8,6 +8,39 @@ public enum ProviderKind: String, Codable, CaseIterable, Sendable {
     case anthropic, openRouterAccount, huggingFaceAccount, githubCopilot
 }
 public enum ReplacementStrategy: String, Codable, Sendable { case selectedText, valueRange, clipboard }
+public enum SelectionFailureReason: String, Equatable, Sendable {
+    case frontmostApplicationUnavailable
+    case ownApplicationFocused
+    case focusedElementUnavailable
+    case roleUnavailable
+    case selectedRangeUnavailable
+    case invalidSelectedRange
+    case emptySelection
+    case selectedTextUnavailable
+    case selectedTextLengthMismatch
+    case captureChangedDuringSetup
+    case captureInvalidated
+    case captureObservedFocusChange
+    case captureObservedSelectionChange
+    case captureObservedValueChange
+    case captureDiscarded
+    case snapshotMismatch
+    case targetApplicationUnavailable
+    case foregroundApplicationChanged
+    case focusedElementChanged
+    case roleChanged
+    case rangeChanged
+    case textChanged
+    case axMessagingFailure
+    case axReadFailure
+    case axValueTypeMismatch
+    case protectedTarget
+    case replacementVerificationFailed
+    case replacementWriteRejected
+    case replacementReadbackFailed
+    case replacementEvidenceMismatch
+    case clipboardTargetIneligible
+}
 public enum ReasoningEffortRequestFormat: String, Codable, Sendable {
     case chatCompletionsField
     case chatCompletionsObject
@@ -83,11 +116,17 @@ public struct ReplacementReceipt: Equatable, Sendable {
 }
 
 @MainActor public protocol SelectionAccess: AnyObject {
+    var lastFailureReason: SelectionFailureReason? { get }
     func capture() throws -> SelectionSnapshot
     func validate(_ target: SelectionSnapshot) throws
     func replace(_ target: SelectionSnapshot, with text: String) async throws -> ReplacementReceipt
     func undo(_ receipt: ReplacementReceipt) async throws
     func discard(_ target: SelectionSnapshot)
+}
+
+@MainActor
+public extension SelectionAccess {
+    var lastFailureReason: SelectionFailureReason? { nil }
 }
 
 public struct ProviderConfiguration: Codable, Equatable, Identifiable, Sendable {
@@ -315,6 +354,7 @@ public struct DiagnosticMetadata: Equatable, Sendable {
     public var applicationID: String?
     public var role: String?
     public var selectionLength: Int?
+    public var selectionFailureReason: SelectionFailureReason?
     public var targetValid: Bool?
     public var strategy: ReplacementStrategy?
     public var providerName: String?

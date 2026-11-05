@@ -75,6 +75,7 @@ public final class MacSelectionAccess: SelectionAccess {
 
     public var clipboardFallbackEnabled: Bool
     public private(set) var capturedScreen: NSScreen?
+    public private(set) var lastFailureReason: SelectionFailureReason?
     private let prepareForClipboardPaste: ClipboardPastePreparation?
     private let clock = ContinuousClock()
     private var capturedTarget: CapturedTarget?
@@ -102,51 +103,55 @@ public final class MacSelectionAccess: SelectionAccess {
 
     public func capture() throws -> SelectionSnapshot {
         clearCapture()
+        lastFailureReason = nil
         captureDeadline = clock.now.advanced(by: Self.captureBudget)
         defer { captureDeadline = nil }
         guard Self.accessibilityPermissionGranted else { throw ImrseError.permissionRequired }
-        guard !IsSecureEventInputEnabled() else { throw ImrseError.secureInput }
+        guard !IsSecureEventInputEnabled() else { throw failure(.protectedTarget, .secureInput) }
         guard let runningApplication = NSWorkspace.shared.frontmostApplication else {
-            throw ImrseError.noSelection
+            throw failure(.frontmostApplicationUnavailable, .noSelection)
         }
 
         let processID = runningApplication.processIdentifier
-        guard processID != ProcessInfo.processInfo.processIdentifier else { throw ImrseError.noSelection }
+        guard processID != ProcessInfo.processInfo.processIdentifier else {
+            throw failure(.ownApplicationFocused, .noSelection)
+        }
         let application = AXUIElementCreateApplication(processID)
         try configureAXMessaging(application)
         guard let element = try AccessibilityFocusAcquisition.acquire(
+            readApplicationRole: {
+                _ = try self.stringAttribute(application, kAXRoleAttribute, failure: .noSelection)
+            },
             requestManualAccessibility: { try self.requestManualAccessibility(on: application) },
             hasTimeForRetry: { self.hasCaptureTimeForFocusRetry() },
             readFocusedElement: {
                 try self.elementAttribute(application, kAXFocusedUIElementAttribute, failure: .noSelection)
             },
             validate: { element in
-                guard try !self.isSecure(element, in: application) else { throw ImrseError.secureInput }
+                guard try !self.isSecure(element, in: application) else {
+                    throw self.failure(.protectedTarget, .secureInput)
+                }
             },
             waitBeforeRetry: {
                 Thread.sleep(forTimeInterval: Double(Self.focusRetryDelayMilliseconds) / 1_000.0)
             }
         ) else {
-            throw ImrseError.noSelection
+            throw failure(.focusedElementUnavailable, .noSelection)
         }
         guard let role = try stringAttribute(element, kAXRoleAttribute, failure: .noSelection) else {
-            throw ImrseError.noSelection
+            throw failure(.roleUnavailable, .noSelection)
         }
         let canReadValue = supportsPlainTextValueReplacement(element, role: role)
-        guard let range = try rangeAttribute(element, kAXSelectedTextRangeAttribute, failure: .noSelection),
-              isValidRangeArithmetic(range),
-              range.length > 0,
-              let text = try selectedText(
-                element,
-                range: range,
-                failure: .noSelection,
-                allowValueFallback: canReadValue
-              ),
-              !text.isEmpty,
-              text.utf16.count == range.length
-        else {
-            throw ImrseError.noSelection
+        let selectedRange = try rangeAttribute(element, kAXSelectedTextRangeAttribute, failure: .noSelection)
+        if let reason = SelectionReadValidation.rangeFailure(selectedRange, allowingEmpty: false) {
+            throw failure(reason, .noSelection)
         }
+        guard let range = selectedRange else { throw failure(.selectedRangeUnavailable, .noSelection) }
+        let selected = try selectedText(element, range: range, failure: .noSelection, allowValueFallback: canReadValue)
+        if let reason = SelectionReadValidation.textFailure(selected, range: range, allowingEmpty: false) {
+            throw failure(reason, .noSelection)
+        }
+        guard let text = selected else { throw failure(.selectedTextUnavailable, .noSelection) }
 
         let applicationID = runningApplication.bundleIdentifier ?? "pid:\(processID)"
         let snapshot = SelectionSnapshot(
@@ -175,21 +180,24 @@ public final class MacSelectionAccess: SelectionAccess {
                 try currentSelection(handle),
                 NativeSelection(text: text, range: range)
             ) else {
-                throw ImrseError.noSelection
+                throw failure(.captureChangedDuringSetup, .noSelection)
             }
             capturedScreen = sourceScreen(for: element)
         } catch {
             invalidateCapture(snapshot.id)
             throw error
         }
+        lastFailureReason = nil
         return snapshot
     }
 
     public func validate(_ target: SelectionSnapshot) throws {
         guard let captured = capturedTarget, captured.snapshot.id == target.id else {
-            throw ImrseError.targetLost
+            throw failure(lastFailureReason ?? .captureInvalidated, .targetLost)
         }
+        lastFailureReason = nil
         guard sameSnapshot(target, captured.snapshot) else {
+            lastFailureReason = .snapshotMismatch
             invalidateCapture(target.id)
             throw ImrseError.staleSelection
         }
@@ -197,11 +205,13 @@ public final class MacSelectionAccess: SelectionAccess {
         do {
             try requireSafeForeground(captured.handle)
             let selection = try currentSelection(captured.handle)
-            guard let range = target.range,
-                  sameSelection(selection, NativeSelection(text: target.text, range: range))
-            else {
-                throw ImrseError.staleSelection
+            guard selection.range == target.range else {
+                throw failure(.rangeChanged, .staleSelection)
             }
+            guard sameText(selection.text, target.text) else {
+                throw failure(.textChanged, .staleSelection)
+            }
+            lastFailureReason = nil
         } catch {
             invalidateCapture(target.id)
             throw error
@@ -247,10 +257,12 @@ public final class MacSelectionAccess: SelectionAccess {
             replacementRange: replacementRange,
             focusedSelection: applied.focusedSelection
         )
+        lastFailureReason = nil
         return receipt
     }
 
     public func undo(_ receipt: ReplacementReceipt) async throws {
+        lastFailureReason = nil
         try recoverPendingClipboard()
         guard let undoTarget, sameReceipt(receipt, undoTarget.receipt) else {
             throw ImrseError.undoUnavailable
@@ -258,7 +270,7 @@ public final class MacSelectionAccess: SelectionAccess {
         do {
             let current = try currentSelection(undoTarget.handle, allowingEmpty: true)
             guard sameSelection(current, undoTarget.focusedSelection) else {
-                throw ImrseError.undoUnavailable
+                throw failure(current.range == undoTarget.focusedSelection.range ? .textChanged : .rangeChanged, .undoUnavailable)
             }
             if supportsPlainTextValueReplacement(undoTarget.handle.element, role: undoTarget.handle.role) {
                 try undoPlainTextField(undoTarget, receipt: receipt, currentSelection: current)
@@ -305,6 +317,7 @@ public final class MacSelectionAccess: SelectionAccess {
                 )
             }
             self.undoTarget = nil
+            lastFailureReason = nil
         } catch let error as ImrseError {
             if error == .staleSelection || error == .secureInput || error == .targetLost || error == .undoUnavailable {
                 self.undoTarget = nil
@@ -402,15 +415,16 @@ public final class MacSelectionAccess: SelectionAccess {
     }
 
     public func discard(_ target: SelectionSnapshot) {
-        invalidateCapture(target.id)
+        invalidateCapture(target.id, reason: .captureDiscarded)
         if undoTarget?.receipt.target.id == target.id { undoTarget = nil }
     }
 
-    private static let observerCallback: AXObserverCallback = { _, _, _, refcon in
+    private static let observerCallback: AXObserverCallback = { _, _, notification, refcon in
         guard let refcon else { return }
         let context = Unmanaged<ObserverContext>.fromOpaque(refcon).takeUnretainedValue()
+        let reason = ObservedCaptureNotification.failureReason(for: notification)
         MainActor.assumeIsolated {
-            context.owner?.observedChange(for: context.targetID)
+            context.owner?.observedChange(for: context.targetID, reason: reason)
         }
     }
 
@@ -468,11 +482,14 @@ public final class MacSelectionAccess: SelectionAccess {
         targetID: UUID,
         targetProcessID: Int32
     ) {
+        guard capturedTarget?.snapshot.id == targetID else { return }
         guard let processID = activatedProcessID else {
+            lastFailureReason = .frontmostApplicationUnavailable
             invalidateCapture(targetID)
             return
         }
         guard processID == targetProcessID || processID == ProcessInfo.processInfo.processIdentifier else {
+            lastFailureReason = .foregroundApplicationChanged
             invalidateCapture(targetID)
             return
         }
@@ -484,8 +501,27 @@ public final class MacSelectionAccess: SelectionAccess {
         self.workspaceObserver = nil
     }
 
-    private func observedChange(for targetID: UUID) {
-        invalidateCapture(targetID)
+    private func observedChange(for targetID: UUID, reason: SelectionFailureReason) {
+        if reason == .captureObservedFocusChange,
+           let captured = capturedTarget {
+            let previousFailureReason = lastFailureReason
+            let preservesCapture = ObservedFocusValidation.preservesCapture(
+                observedTargetID: targetID,
+                currentTargetID: captured.snapshot.id,
+                capturedElement: captured.handle.element,
+                readFocusedElement: {
+                    defer { self.lastFailureReason = previousFailureReason }
+                    return try self.elementAttribute(
+                        captured.handle.application,
+                        kAXFocusedUIElementAttribute,
+                        failure: .targetLost
+                    )
+                },
+                sameElement: { self.sameElement($0, $1) }
+            )
+            if preservesCapture { return }
+        }
+        invalidateCapture(targetID, reason: reason)
     }
 
     private func clearCapture() {
@@ -514,19 +550,25 @@ public final class MacSelectionAccess: SelectionAccess {
         clearCapture()
     }
 
-    private func invalidateCapture(_ targetID: UUID) {
+    private func invalidateCapture(
+        _ targetID: UUID,
+        reason: SelectionFailureReason = .captureInvalidated
+    ) {
+        if capturedTarget?.snapshot.id == targetID, lastFailureReason == nil {
+            lastFailureReason = reason
+        }
         clearCapture(for: targetID)
         if undoTarget?.receipt.target.id == targetID { undoTarget = nil }
     }
 
     private func requireSafeForeground(_ target: TargetHandle) throws {
         guard let frontmostApplication = NSWorkspace.shared.frontmostApplication else {
-            throw ImrseError.staleSelection
+            throw failure(.frontmostApplicationUnavailable, .staleSelection)
         }
         let processID = frontmostApplication.processIdentifier
         guard processID == ProcessInfo.processInfo.processIdentifier
                 || (processID == target.processID && (frontmostApplication.bundleIdentifier ?? "pid:\(processID)") == target.applicationID)
-        else { throw ImrseError.staleSelection }
+        else { throw failure(.foregroundApplicationChanged, .staleSelection) }
     }
 
     private func requireTargetForeground(_ target: TargetHandle) throws {
@@ -535,7 +577,7 @@ public final class MacSelectionAccess: SelectionAccess {
               frontmostApplication.processIdentifier == target.processID,
               (frontmostApplication.bundleIdentifier ?? "pid:\(target.processID)") == target.applicationID
         else {
-            throw ImrseError.staleSelection
+            throw failure(.foregroundApplicationChanged, .staleSelection)
         }
     }
 
@@ -550,34 +592,40 @@ public final class MacSelectionAccess: SelectionAccess {
     private func validateSelectionTarget(_ target: TargetHandle) throws {
         guard Self.accessibilityPermissionGranted else { throw ImrseError.permissionRequired }
         guard !IsSecureEventInputEnabled(), try !isSecure(target.element, in: target.application) else {
-            throw ImrseError.secureInput
+            throw failure(.protectedTarget, .secureInput)
         }
         try requireSafeForeground(target)
-        guard let focused = try elementAttribute(target.application, kAXFocusedUIElementAttribute, failure: .targetLost),
-              sameElement(focused, target.element)
-        else {
-            throw ImrseError.staleSelection
+        guard let focused = try elementAttribute(target.application, kAXFocusedUIElementAttribute, failure: .targetLost) else {
+            throw failure(.focusedElementUnavailable, .staleSelection)
+        }
+        guard sameElement(focused, target.element) else {
+            throw failure(.focusedElementChanged, .staleSelection)
         }
         guard try stringAttribute(target.element, kAXRoleAttribute, failure: .targetLost) == target.role else {
-            throw ImrseError.staleSelection
+            throw failure(.roleChanged, .staleSelection)
         }
     }
 
     private func readSelection(_ target: TargetHandle, allowingEmpty: Bool) throws -> NativeSelection? {
-        guard let range = try rangeAttribute(target.element, kAXSelectedTextRangeAttribute, failure: .targetLost),
-              isValidRangeArithmetic(range),
-              (allowingEmpty || range.length > 0),
-              let text = try selectedText(
-                target.element,
-                range: range,
-                failure: .targetLost,
-                allowingEmpty: allowingEmpty,
-                allowValueFallback: supportsPlainTextValueReplacement(target.element, role: target.role)
-              ),
-              text.utf16.count == range.length
-        else {
+        let selectedRange = try rangeAttribute(target.element, kAXSelectedTextRangeAttribute, failure: .targetLost)
+        if let reason = SelectionReadValidation.rangeFailure(selectedRange, allowingEmpty: allowingEmpty) {
+            lastFailureReason = reason
             return nil
         }
+        guard let range = selectedRange else { return nil }
+        let selected = try selectedText(
+            target.element,
+            range: range,
+            failure: .targetLost,
+            allowingEmpty: allowingEmpty,
+            allowValueFallback: supportsPlainTextValueReplacement(target.element, role: target.role)
+        )
+        if let reason = SelectionReadValidation.textFailure(selected, range: range, allowingEmpty: allowingEmpty) {
+            lastFailureReason = reason
+            return nil
+        }
+        guard let text = selected else { return nil }
+        lastFailureReason = nil
         return NativeSelection(text: text, range: range)
     }
 
@@ -761,7 +809,7 @@ public final class MacSelectionAccess: SelectionAccess {
                 }
             )
             guard status == .success else {
-                invalidateAfterUnverifiedWrite(target.id)
+                invalidateAfterUnverifiedWrite(target.id, reason: .replacementWriteRejected)
                 throw ImrseError.replacementFailed
             }
             let after: NativeSelection
@@ -776,7 +824,7 @@ public final class MacSelectionAccess: SelectionAccess {
                     afterValue = nil
                 }
             } catch {
-                invalidateAfterUnverifiedWrite(target.id)
+                invalidateAfterUnverifiedWrite(target.id, reason: .replacementReadbackFailed)
                 throw ImrseError.replacementFailed
             }
             if SelectedTextReplacementValidation.confirms(
@@ -794,21 +842,28 @@ public final class MacSelectionAccess: SelectionAccess {
                 selectedText: after.text,
                 atEndOf: replacementRange
             ) {
+                var failureReason = SelectionFailureReason.replacementReadbackFailed
                 do {
                     guard let rangeText = try stringForRange(
                         target.element,
                         range: replacementRange,
                         failure: .replacementFailed
-                    ), sameText(rangeText, replacement) else {
+                    ) else {
                         throw ImrseError.replacementFailed
                     }
+                    failureReason = .replacementEvidenceMismatch
+                    guard sameText(rangeText, replacement) else {
+                        throw ImrseError.replacementFailed
+                    }
+                    failureReason = .replacementReadbackFailed
                     let verifiedSelection = try currentSelection(target, allowingEmpty: true)
+                    failureReason = .replacementEvidenceMismatch
                     guard sameSelection(verifiedSelection, after) else {
                         throw ImrseError.replacementFailed
                     }
                     return AppliedReplacement(strategy: .selectedText, focusedSelection: verifiedSelection)
                 } catch {
-                    invalidateAfterUnverifiedWrite(target.id)
+                    invalidateAfterUnverifiedWrite(target.id, reason: failureReason)
                     throw ImrseError.replacementFailed
                 }
             }
@@ -841,7 +896,7 @@ public final class MacSelectionAccess: SelectionAccess {
                     throw ImrseError.replacementFailed
                 }
             } else {
-                invalidateAfterUnverifiedWrite(target.id)
+                invalidateAfterUnverifiedWrite(target.id, reason: .replacementEvidenceMismatch)
                 throw ImrseError.replacementFailed
             }
         }
@@ -866,7 +921,7 @@ public final class MacSelectionAccess: SelectionAccess {
                 }
             )
             guard status == .success else {
-                invalidateAfterUnverifiedWrite(target.id)
+                invalidateAfterUnverifiedWrite(target.id, reason: .replacementWriteRejected)
                 throw ImrseError.replacementFailed
             }
             let afterValue: String
@@ -876,7 +931,7 @@ public final class MacSelectionAccess: SelectionAccess {
                 }
                 afterValue = value
             } catch {
-                invalidateAfterUnverifiedWrite(target.id)
+                invalidateAfterUnverifiedWrite(target.id, reason: .replacementReadbackFailed)
                 throw ImrseError.replacementFailed
             }
             if sameText(afterValue, expectedValue) {
@@ -884,12 +939,12 @@ public final class MacSelectionAccess: SelectionAccess {
                 do {
                     after = try currentSelection(target, allowingEmpty: true)
                 } catch {
-                    invalidateAfterUnverifiedWrite(target.id)
+                    invalidateAfterUnverifiedWrite(target.id, reason: .replacementReadbackFailed)
                     throw ImrseError.replacementFailed
                 }
                 return AppliedReplacement(strategy: .valueRange, focusedSelection: after)
             }
-            invalidateAfterUnverifiedWrite(target.id)
+            invalidateAfterUnverifiedWrite(target.id, reason: .replacementEvidenceMismatch)
             throw ImrseError.replacementFailed
         }
 
@@ -937,7 +992,11 @@ public final class MacSelectionAccess: SelectionAccess {
         return AppliedReplacement(strategy: .clipboard, focusedSelection: afterPaste)
     }
 
-    private func invalidateAfterUnverifiedWrite(_ targetID: UUID) {
+    private func invalidateAfterUnverifiedWrite(
+        _ targetID: UUID,
+        reason: SelectionFailureReason = .replacementVerificationFailed
+    ) {
+        lastFailureReason = reason
         invalidateCapture(targetID)
         if undoTarget?.receipt.target.id == targetID { undoTarget = nil }
     }
@@ -955,9 +1014,10 @@ public final class MacSelectionAccess: SelectionAccess {
         guard Self.eventPostingPermissionGranted else { throw ImrseError.permissionRequired }
         try requireTargetForeground(target)
         guard clipboardFallbackTargetIsEligible(target) else { throw ImrseError.staleSelection }
-        guard let application = NSRunningApplication(processIdentifier: target.processID),
-              !application.isTerminated,
-              let identity = clipboardIdentity(application),
+        guard let application = NSRunningApplication(processIdentifier: target.processID), !application.isTerminated else {
+            throw failure(.targetApplicationUnavailable, .clipboardFailed)
+        }
+        guard let identity = clipboardIdentity(application),
               identity.applicationID == target.applicationID,
               let replacementRange = validatedRange(at: range.location, length: text.utf16.count),
               let keyDown = CGEvent(keyboardEventSource: nil, virtualKey: CGKeyCode(kVK_ANSI_V), keyDown: true),
@@ -1048,7 +1108,7 @@ public final class MacSelectionAccess: SelectionAccess {
               let current = NSRunningApplication(processIdentifier: destination.identity.processID),
               !current.isTerminated,
               clipboardIdentity(current) == destination.identity
-        else { throw ImrseError.staleSelection }
+        else { throw failure(.targetApplicationUnavailable, .staleSelection) }
     }
 
     private func confirmedClipboardSelection(_ destination: ClipboardDestination) throws -> NativeSelection? {
@@ -1092,7 +1152,7 @@ public final class MacSelectionAccess: SelectionAccess {
     }
 
     private func clipboardFallbackTargetIsEligible(_ target: TargetHandle) -> Bool {
-        ClipboardTargetStructureValidation.permits(
+        let eligible = ClipboardTargetStructureValidation.permits(
             root: target.element,
             readRole: { element in
                 guard let role = try self.stringAttribute(element, kAXRoleAttribute, failure: .staleSelection) else {
@@ -1105,6 +1165,10 @@ public final class MacSelectionAccess: SelectionAccess {
             },
             sameElement: { self.sameElement($0, $1) }
         )
+        if !eligible, lastFailureReason == nil {
+            lastFailureReason = .clipboardTargetIneligible
+        }
+        return eligible
     }
 
     private func elementChildren(_ element: AXUIElement, failure: ImrseError) throws -> [AXUIElement] {
@@ -1127,7 +1191,7 @@ public final class MacSelectionAccess: SelectionAccess {
         var settable = DarwinBoolean(false)
         let status = AXUIElementIsAttributeSettable(element, attribute as CFString, &settable)
         if status == .attributeUnsupported || status == .noValue || status == .notImplemented { return false }
-        guard status == .success else { throw ImrseError.replacementFailed }
+        guard status == .success else { throw failure(.axReadFailure, .replacementFailed) }
         return settable.boolValue
     }
 
@@ -1137,9 +1201,9 @@ public final class MacSelectionAccess: SelectionAccess {
     }
 
     private func configureAXMessaging(_ element: AXUIElement) throws {
-        if let captureDeadline, clock.now >= captureDeadline { throw ImrseError.targetLost }
+        if let captureDeadline, clock.now >= captureDeadline { throw failure(.axMessagingFailure, .targetLost) }
         guard AXUIElementSetMessagingTimeout(element, Self.axMessagingTimeout) == .success else {
-            throw ImrseError.targetLost
+            throw failure(.axMessagingFailure, .targetLost)
         }
     }
 
@@ -1215,7 +1279,8 @@ public final class MacSelectionAccess: SelectionAccess {
             || status == .notImplemented {
             return nil
         }
-        guard status == .success, let value, let result = value as? String else { throw failure }
+        guard status == .success, let value else { throw self.failure(.axReadFailure, failure) }
+        guard let result = value as? String else { throw self.failure(.axValueTypeMismatch, failure) }
         return result
     }
 
@@ -1247,7 +1312,8 @@ public final class MacSelectionAccess: SelectionAccess {
         var value: CFTypeRef?
         let status = AXUIElementCopyAttributeValue(element, attribute as CFString, &value)
         if status == .attributeUnsupported || status == .noValue { return nil }
-        guard status == .success, let value, CFGetTypeID(value) == AXUIElementGetTypeID() else { throw failure }
+        guard status == .success, let value else { throw self.failure(.axReadFailure, failure) }
+        guard CFGetTypeID(value) == AXUIElementGetTypeID() else { throw self.failure(.axValueTypeMismatch, failure) }
         return unsafeDowncast(value, to: AXUIElement.self)
     }
 
@@ -1260,7 +1326,8 @@ public final class MacSelectionAccess: SelectionAccess {
         var value: CFTypeRef?
         let status = AXUIElementCopyAttributeValue(element, attribute as CFString, &value)
         if status == .attributeUnsupported || status == .noValue { return nil }
-        guard status == .success, let value, let result = value as? String else { throw failure }
+        guard status == .success, let value else { throw self.failure(.axReadFailure, failure) }
+        guard let result = value as? String else { throw self.failure(.axValueTypeMismatch, failure) }
         return result
     }
 
@@ -1273,7 +1340,8 @@ public final class MacSelectionAccess: SelectionAccess {
         var value: CFTypeRef?
         let status = AXUIElementCopyAttributeValue(element, attribute as CFString, &value)
         if status == .attributeUnsupported || status == .noValue { return nil }
-        guard status == .success, let value, CFGetTypeID(value) == AXValueGetTypeID() else { throw failure }
+        guard status == .success, let value else { throw self.failure(.axReadFailure, failure) }
+        guard CFGetTypeID(value) == AXValueGetTypeID() else { throw self.failure(.axValueTypeMismatch, failure) }
         return unsafeDowncast(value, to: AXValue.self)
     }
 
@@ -1308,10 +1376,11 @@ public final class MacSelectionAccess: SelectionAccess {
         var value: CFTypeRef?
         let status = AXUIElementCopyAttributeValue(element, attribute as CFString, &value)
         if status == .attributeUnsupported || status == .noValue { return nil }
-        guard status == .success, let value, CFGetTypeID(value) == AXValueGetTypeID() else { throw failure }
+        guard status == .success, let value else { throw self.failure(.axReadFailure, failure) }
+        guard CFGetTypeID(value) == AXValueGetTypeID() else { throw self.failure(.axValueTypeMismatch, failure) }
         let axValue = unsafeDowncast(value, to: AXValue.self)
         var range = CFRange()
-        guard AXValueGetValue(axValue, .cfRange, &range) else { throw failure }
+        guard AXValueGetValue(axValue, .cfRange, &range) else { throw self.failure(.axValueTypeMismatch, failure) }
         return TextRange(location: range.location, length: range.length)
     }
 
@@ -1324,12 +1393,11 @@ public final class MacSelectionAccess: SelectionAccess {
         var value: CFTypeRef?
         let status = AXUIElementCopyAttributeValue(element, attribute as CFString, &value)
         if status == .attributeUnsupported || status == .noValue { return nil }
-        guard status == .success,
-              let value,
-              CFGetTypeID(value) == CFBooleanGetTypeID(),
+        guard status == .success, let value else { throw self.failure(.axReadFailure, failure) }
+        guard CFGetTypeID(value) == CFBooleanGetTypeID(),
               let result = value as? Bool
         else {
-            throw failure
+            throw self.failure(.axValueTypeMismatch, failure)
         }
         return result
     }
@@ -1352,6 +1420,7 @@ public final class MacSelectionAccess: SelectionAccess {
             directText: directText,
             range: range,
             failure: failure,
+            onTextLengthMismatch: { self.lastFailureReason = .selectedTextLengthMismatch },
             readStringForRange: {
                 try stringForRange(element, range: range, failure: failure)
             }
@@ -1394,6 +1463,11 @@ public final class MacSelectionAccess: SelectionAccess {
 
     private func sameText(_ lhs: String, _ rhs: String) -> Bool {
         lhs.utf16.elementsEqual(rhs.utf16)
+    }
+
+    private func failure(_ reason: SelectionFailureReason, _ error: ImrseError) -> ImrseError {
+        lastFailureReason = reason
+        return error
     }
 
     private func substring(_ value: String, range: TextRange) -> String? {

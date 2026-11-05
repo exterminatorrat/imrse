@@ -1,6 +1,42 @@
 #if os(macOS)
+import ApplicationServices
+import CoreFoundation
 import Foundation
 import ImrseCore
+
+enum ObservedCaptureNotification {
+    static func failureReason(for notification: CFString) -> SelectionFailureReason {
+        if CFEqual(notification, kAXFocusedUIElementChangedNotification as CFString) {
+            return .captureObservedFocusChange
+        }
+        if CFEqual(notification, kAXSelectedTextChangedNotification as CFString) {
+            return .captureObservedSelectionChange
+        }
+        if CFEqual(notification, kAXValueChangedNotification as CFString) {
+            return .captureObservedValueChange
+        }
+        return .captureInvalidated
+    }
+}
+
+@MainActor
+enum ObservedFocusValidation {
+    static func preservesCapture<Element>(
+        observedTargetID: UUID,
+        currentTargetID: UUID,
+        capturedElement: Element,
+        readFocusedElement: () throws -> Element?,
+        sameElement: (Element, Element) -> Bool
+    ) -> Bool {
+        guard observedTargetID == currentTargetID else { return false }
+        do {
+            guard let focusedElement = try readFocusedElement() else { return false }
+            return sameElement(focusedElement, capturedElement)
+        } catch {
+            return false
+        }
+    }
+}
 
 enum UTF16SelectionRange {
     static func isValid(_ range: ImrseCore.TextRange) -> Bool {
@@ -67,14 +103,32 @@ enum UTF16SelectionRange {
     }
 }
 
+enum SelectionReadValidation {
+    static func rangeFailure(_ range: ImrseCore.TextRange?, allowingEmpty: Bool) -> SelectionFailureReason? {
+        guard let range else { return .selectedRangeUnavailable }
+        guard UTF16SelectionRange.isValid(range) else { return .invalidSelectedRange }
+        guard allowingEmpty || range.length > 0 else { return .emptySelection }
+        return nil
+    }
+
+    static func textFailure(_ text: String?, range: ImrseCore.TextRange, allowingEmpty: Bool) -> SelectionFailureReason? {
+        guard let text else { return .selectedTextUnavailable }
+        guard allowingEmpty || !text.isEmpty else { return .emptySelection }
+        guard text.utf16.count == range.length else { return .selectedTextLengthMismatch }
+        return nil
+    }
+}
+
 enum AccessibilityFocusAcquisition {
     static func acquire<Element>(
+        readApplicationRole: () throws -> Void = {},
         requestManualAccessibility: () throws -> Void,
         hasTimeForRetry: () -> Bool,
         readFocusedElement: () throws -> Element?,
         validate: (Element) throws -> Void,
         waitBeforeRetry: () -> Void
     ) throws -> Element? {
+        _ = try? readApplicationRole()
         _ = try? requestManualAccessibility()
         while true {
             guard let element = try readFocusedElement() else {
@@ -94,16 +148,23 @@ enum SelectedTextRangeFallback {
         directText: String?,
         range: ImrseCore.TextRange,
         failure: ImrseError,
+        onTextLengthMismatch: () -> Void = {},
         readStringForRange: () throws -> String?
     ) throws -> String? {
         guard UTF16SelectionRange.isValid(range), range.length > 0 else { throw failure }
         if let directText, !directText.isEmpty {
-            guard directText.utf16.count == range.length else { throw failure }
+            guard directText.utf16.count == range.length else {
+                onTextLengthMismatch()
+                throw failure
+            }
             return directText
         }
         guard UTF16SelectionRange.isWithinSupportedRange(range) else { throw failure }
         guard let rangeText = try readStringForRange() else { return nil }
-        guard rangeText.utf16.count == range.length else { throw failure }
+        guard rangeText.utf16.count == range.length else {
+            onTextLengthMismatch()
+            throw failure
+        }
         return rangeText
     }
 }

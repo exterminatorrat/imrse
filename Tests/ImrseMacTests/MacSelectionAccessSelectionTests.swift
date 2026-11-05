@@ -1,9 +1,94 @@
+import ApplicationServices
 import ImrseCore
 import XCTest
 @testable import ImrseMac
 
 final class MacSelectionAccessSelectionTests: XCTestCase {
     private typealias SelectionRange = ImrseCore.TextRange
+
+    func testObservedCaptureNotificationsMapOnlyToClosedReasons() {
+        XCTAssertEqual(
+            ObservedCaptureNotification.failureReason(for: kAXFocusedUIElementChangedNotification as CFString),
+            .captureObservedFocusChange
+        )
+        XCTAssertEqual(
+            ObservedCaptureNotification.failureReason(for: kAXSelectedTextChangedNotification as CFString),
+            .captureObservedSelectionChange
+        )
+        XCTAssertEqual(
+            ObservedCaptureNotification.failureReason(for: kAXValueChangedNotification as CFString),
+            .captureObservedValueChange
+        )
+        XCTAssertEqual(ObservedCaptureNotification.failureReason(for: "unrecognized" as CFString), .captureInvalidated)
+    }
+
+    @MainActor
+    func testObservedFocusPreservesCaptureOnlyForSameCurrentElement() {
+        let targetID = UUID()
+
+        XCTAssertTrue(ObservedFocusValidation.preservesCapture(
+            observedTargetID: targetID,
+            currentTargetID: targetID,
+            capturedElement: 7,
+            readFocusedElement: { 7 },
+            sameElement: { $0 == $1 }
+        ))
+        XCTAssertFalse(ObservedFocusValidation.preservesCapture(
+            observedTargetID: targetID,
+            currentTargetID: targetID,
+            capturedElement: 7,
+            readFocusedElement: { 8 },
+            sameElement: { $0 == $1 }
+        ))
+    }
+
+    @MainActor
+    func testObservedFocusFailsClosedOnMissingOrUnreadableFocusAndSkipsStaleTarget() {
+        let targetID = UUID()
+        XCTAssertFalse(ObservedFocusValidation.preservesCapture(
+            observedTargetID: targetID,
+            currentTargetID: targetID,
+            capturedElement: 7,
+            readFocusedElement: { nil },
+            sameElement: { $0 == $1 }
+        ))
+        XCTAssertFalse(ObservedFocusValidation.preservesCapture(
+            observedTargetID: targetID,
+            currentTargetID: targetID,
+            capturedElement: 7,
+            readFocusedElement: { throw ImrseError.noSelection },
+            sameElement: { $0 == $1 }
+        ))
+
+        var focusReads = 0
+        XCTAssertFalse(ObservedFocusValidation.preservesCapture(
+            observedTargetID: UUID(),
+            currentTargetID: targetID,
+            capturedElement: 7,
+            readFocusedElement: { focusReads += 1; return 7 },
+            sameElement: { $0 == $1 }
+        ))
+        XCTAssertEqual(focusReads, 0)
+    }
+
+    func testSelectionReadReasonsDistinguishMissingInvalidAndEmptyRanges() {
+        XCTAssertEqual(SelectionReadValidation.rangeFailure(nil, allowingEmpty: false), .selectedRangeUnavailable)
+        XCTAssertEqual(SelectionReadValidation.rangeFailure(.init(location: -1, length: 1), allowingEmpty: false), .invalidSelectedRange)
+        XCTAssertEqual(SelectionReadValidation.rangeFailure(.init(location: Int.max, length: 1), allowingEmpty: false), .invalidSelectedRange)
+        XCTAssertEqual(SelectionReadValidation.rangeFailure(.init(location: 0, length: 0), allowingEmpty: false), .emptySelection)
+        XCTAssertNil(SelectionReadValidation.rangeFailure(.init(location: 0, length: 0), allowingEmpty: true))
+        XCTAssertNil(SelectionReadValidation.rangeFailure(.init(location: 0, length: 2), allowingEmpty: false))
+    }
+
+    func testSelectionReadReasonsUseUTF16AndPreserveCollapsedCaretSupport() {
+        let range = SelectionRange(location: 0, length: 2)
+        XCTAssertEqual(SelectionReadValidation.textFailure(nil, range: range, allowingEmpty: false), .selectedTextUnavailable)
+        XCTAssertEqual(SelectionReadValidation.textFailure("", range: range, allowingEmpty: false), .emptySelection)
+        XCTAssertEqual(SelectionReadValidation.textFailure("a", range: range, allowingEmpty: false), .selectedTextLengthMismatch)
+        XCTAssertNil(SelectionReadValidation.textFailure("😀", range: range, allowingEmpty: false))
+        XCTAssertNil(SelectionReadValidation.textFailure("", range: .init(location: 2, length: 0), allowingEmpty: true))
+        XCTAssertEqual(SelectionReadValidation.textFailure("a", range: .init(location: 2, length: 0), allowingEmpty: true), .selectedTextLengthMismatch)
+    }
 
     func testFocusAppearingAfterThreeAttemptsIsAcquiredWhileBudgetRemains() throws {
         var events: [String] = []
@@ -36,6 +121,35 @@ final class MacSelectionAccessSelectionTests: XCTestCase {
             "focused-element",
             "validate-7"
         ])
+    }
+
+    func testApplicationRoleIsReadBeforeManualAccessibilityAndFocus() throws {
+        var events: [String] = []
+        let focused = try AccessibilityFocusAcquisition.acquire(
+            readApplicationRole: { events.append("application-role") },
+            requestManualAccessibility: { events.append("manual-accessibility") },
+            hasTimeForRetry: { false },
+            readFocusedElement: { events.append("focus"); return Target(id: 1) },
+            validate: { _ in events.append("validate") },
+            waitBeforeRetry: { XCTFail("A focused target should not wait") }
+        )
+        XCTAssertEqual(focused?.id, 1)
+        XCTAssertEqual(events, ["application-role", "manual-accessibility", "focus", "validate"])
+    }
+
+    func testUnavailableApplicationRoleDoesNotPreventManualAccessibilityOrStrictValidation() throws {
+        var manualRequests = 0
+        var validations = 0
+        XCTAssertThrowsError(try AccessibilityFocusAcquisition.acquire(
+            readApplicationRole: { throw ImrseError.noSelection },
+            requestManualAccessibility: { manualRequests += 1 },
+            hasTimeForRetry: { false },
+            readFocusedElement: { Target(id: 1) },
+            validate: { _ in validations += 1; throw ImrseError.secureInput },
+            waitBeforeRetry: { XCTFail("Protected targets must not retry") }
+        )) { XCTAssertEqual($0 as? ImrseError, .secureInput) }
+        XCTAssertEqual(manualRequests, 1)
+        XCTAssertEqual(validations, 1)
     }
 
     func testUnsupportedManualAccessibilityPreservesSingleFocusRead() throws {

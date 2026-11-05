@@ -53,6 +53,11 @@ final class AppPillBridge {
         pill.onUndo = { [weak self] in self?.onUndo?() }
         pill.onClipboardFocusHandoff = { [weak self] in self?.beginClipboardFocusHandoff() }
         engine.onChange = { [weak self] state in self?.handle(state) }
+        engine.onPrepareReplacement = { [weak self] in
+            guard let self, let id = self.activeSubmissionID else { return }
+            self.pill.generated(id)
+            self.beginClipboardFocusHandoff()
+        }
         pillLifecycleSubscription = pill.$lifecycle.sink { [weak self] lifecycle in
             guard let self, lifecycle.phase == .hidden else { return }
             self.focusHandoffPending = false
