@@ -1,6 +1,7 @@
 import Foundation
 import ImrseCore
 #if os(macOS) && arch(arm64)
+import MLX
 import MLXHuggingFace
 import MLXLLM
 import MLXLMCommon
@@ -133,62 +134,76 @@ private enum ManagedLocalMLX {
         additionalContext: [String: any Sendable]
     ) async throws -> ManagedLocalGenerationResult {
         #if os(macOS) && arch(arm64)
-        let model = try await loadModelContainer(
-            from: modelDirectory,
-            using: #huggingFaceTokenizerLoader()
-        )
-        let input = try await model.prepare(
-            input: UserInput(
-                chat: [.system(instructions), .user(prompt)],
-                additionalContext: additionalContext
+        return try await ManagedLocalGenerationSession.run {
+            let model = try await loadModelContainer(
+                from: modelDirectory,
+                using: #huggingFaceTokenizerLoader()
             )
-        )
-        try ManagedLocalGenerationLimits.validatePreparedPromptTokenCount(input.text.tokens.size)
-        try Task.checkCancellation()
-        let stream = try await model.generate(
-            input: input,
-            parameters: GenerateParameters(
-                maxTokens: ManagedLocalGenerationLimits.maximumGeneratedTokens,
-                temperature: 0
-            )
-        )
-        var output = ""
-        var outputBytes = 0
-        var completionInfo: GenerateCompletionInfo?
-        for await event in stream {
-            try Task.checkCancellation()
-            switch event {
-            case .chunk(let chunk):
-                outputBytes += chunk.utf8.count
-                guard outputBytes <= ManagedLocalTextProvider.maximumOutputBytes else {
-                    throw ImrseError.outputTooLarge
-                }
-                output += chunk
-            case .info(let info):
-                guard completionInfo == nil else { throw ImrseError.malformedResponse }
-                completionInfo = info
-            case .toolCall:
-                throw ImrseError.malformedResponse
+            return try await model.perform { context in
+                let input = try await context.processor.prepare(
+                    input: UserInput(
+                        chat: [.system(instructions), .user(prompt)],
+                        additionalContext: additionalContext
+                    )
+                )
+                try ManagedLocalGenerationLimits.validatePreparedPromptTokenCount(input.text.tokens.size)
+                try Task.checkCancellation()
+                let iterator = try TokenIterator(
+                    input: input,
+                    model: context.model,
+                    parameters: GenerateParameters(
+                        maxTokens: ManagedLocalGenerationLimits.maximumGeneratedTokens,
+                        temperature: 0
+                    )
+                )
+                return MLXLMCommon.generateTask(
+                    promptTokenCount: input.text.tokens.size,
+                    modelConfiguration: context.configuration,
+                    tokenizer: context.tokenizer,
+                    iterator: iterator
+                )
             }
+        } consume: { stream in
+            var output = ""
+            var outputBytes = 0
+            var completionInfo: GenerateCompletionInfo?
+            for await event in stream {
+                try Task.checkCancellation()
+                switch event {
+                case .chunk(let chunk):
+                    outputBytes += chunk.utf8.count
+                    guard outputBytes <= ManagedLocalTextProvider.maximumOutputBytes else {
+                        throw ImrseError.outputTooLarge
+                    }
+                    output += chunk
+                case .info(let info):
+                    guard completionInfo == nil else { throw ImrseError.malformedResponse }
+                    completionInfo = info
+                case .toolCall:
+                    throw ImrseError.malformedResponse
+                }
+            }
+            try Task.checkCancellation()
+            guard let completionInfo else {
+                return ManagedLocalGenerationResult(text: output, generationTokenCount: 0, termination: .incomplete)
+            }
+            let termination: ManagedLocalGenerationTermination
+            switch completionInfo.stopReason {
+            case .stop:
+                termination = .stop
+            case .length:
+                termination = .length
+            case .cancelled:
+                termination = .cancelled
+            }
+            return ManagedLocalGenerationResult(
+                text: output,
+                generationTokenCount: completionInfo.generationTokenCount,
+                termination: termination
+            )
+        } releaseCache: {
+            Memory.clearCache()
         }
-        try Task.checkCancellation()
-        guard let completionInfo else {
-            return ManagedLocalGenerationResult(text: output, generationTokenCount: 0, termination: .incomplete)
-        }
-        let termination: ManagedLocalGenerationTermination
-        switch completionInfo.stopReason {
-        case .stop:
-            termination = .stop
-        case .length:
-            termination = .length
-        case .cancelled:
-            termination = .cancelled
-        }
-        return ManagedLocalGenerationResult(
-            text: output,
-            generationTokenCount: completionInfo.generationTokenCount,
-            termination: termination
-        )
         #else
         throw ImrseError.localModelUnavailable
         #endif
