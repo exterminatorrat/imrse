@@ -794,39 +794,38 @@ public final class MacSelectionAccess: SelectionAccess {
         var selectedTextOutcome: SelectionMutationOutcome<AppliedReplacement>?
         if before.range == range, sameText(before.text, expectedText),
            capabilities.canConsider(.selectedText) {
-            @MainActor
-            func attemptSelectedText() throws -> SelectionMutationOutcome<AppliedReplacement> {
-                let status = try VerifiedAction.perform(
-                    verify: {
-                        let current = try self.currentSelection(target, allowingEmpty: true)
-                        guard self.sameSelection(current, before) else {
+            let status = try VerifiedAction.perform(
+                verify: {
+                    let current = try self.currentSelection(target, allowingEmpty: true)
+                    guard self.sameSelection(current, before) else {
+                        throw ImrseError.staleSelection
+                    }
+                    if let oldValue {
+                        guard let currentValue = try self.wholeValue(target.element, failure: .replacementFailed),
+                              self.sameText(currentValue, oldValue)
+                        else {
                             throw ImrseError.staleSelection
                         }
-                        if let oldValue {
-                            guard let currentValue = try self.wholeValue(target.element, failure: .replacementFailed),
-                                  self.sameText(currentValue, oldValue)
-                            else {
-                                throw ImrseError.staleSelection
-                            }
-                        }
-                        if self.clipboardFallbackEnabled {
-                            selectedTextFallbackBaseline = ClipboardFallbackNoOpValidation.baseline(
-                                value: oldValue ?? (try? self.wholeValue(target.element, failure: .replacementFailed)),
-                                range: range,
-                                selectedText: expectedText
-                            )
-                        }
-                    },
-                    action: {
-                        try self.setAttribute(target.element, kAXSelectedTextAttribute, value: replacement as CFString)
                     }
-                )
-                guard status == .success else { return .indeterminate(.replacementWriteRejected) }
-
-                let after: NativeSelection
-                let afterValue: String?
+                    if self.clipboardFallbackEnabled {
+                        selectedTextFallbackBaseline = ClipboardFallbackNoOpValidation.baseline(
+                            value: oldValue ?? (try? self.wholeValue(target.element, failure: .replacementFailed)),
+                            range: range,
+                            selectedText: expectedText
+                        )
+                    }
+                },
+                action: {
+                    try self.setAttribute(target.element, kAXSelectedTextAttribute, value: replacement as CFString)
+                }
+            )
+            if status != .success {
+                selectedTextOutcome = .indeterminate(.replacementWriteRejected)
+            } else {
+                var failureReason = SelectionFailureReason.replacementReadbackFailed
                 do {
-                    after = try self.currentSelection(target, allowingEmpty: true)
+                    let after = try currentSelection(target, allowingEmpty: true)
+                    let afterValue: String?
                     if self.clipboardFallbackEnabled, selectedTextFallbackBaseline != nil {
                         afterValue = try? self.wholeValue(target.element, failure: .replacementFailed)
                     } else if !self.clipboardFallbackEnabled, allowsWholeValueWrite {
@@ -834,26 +833,22 @@ public final class MacSelectionAccess: SelectionAccess {
                     } else {
                         afterValue = nil
                     }
-                } catch {
-                    return .indeterminate(.replacementReadbackFailed)
-                }
-                if SelectedTextReplacementValidation.confirms(
-                    afterValue: afterValue,
-                    expectedValue: expectedValue,
-                    afterRange: after.range,
-                    afterText: after.text,
-                    replacementRange: replacementRange,
-                    replacement: replacement
-                ) {
-                    return .confirmedApplied(AppliedReplacement(strategy: .selectedText, focusedSelection: after))
-                }
-                if UTF16SelectionRange.isCollapsedCaret(
-                    after.range,
-                    selectedText: after.text,
-                    atEndOf: replacementRange
-                ) {
-                    var failureReason = SelectionFailureReason.replacementReadbackFailed
-                    do {
+                    if SelectedTextReplacementValidation.confirms(
+                        afterValue: afterValue,
+                        expectedValue: expectedValue,
+                        afterRange: after.range,
+                        afterText: after.text,
+                        replacementRange: replacementRange,
+                        replacement: replacement
+                    ) {
+                        selectedTextOutcome = .confirmedApplied(
+                            AppliedReplacement(strategy: .selectedText, focusedSelection: after)
+                        )
+                    } else if UTF16SelectionRange.isCollapsedCaret(
+                        after.range,
+                        selectedText: after.text,
+                        atEndOf: replacementRange
+                    ) {
                         guard let rangeText = try self.stringForRange(
                             target.element,
                             range: replacementRange,
@@ -871,20 +866,16 @@ public final class MacSelectionAccess: SelectionAccess {
                         guard self.sameSelection(verifiedSelection, after) else {
                             throw ImrseError.replacementFailed
                         }
-                        return .confirmedApplied(
+                        selectedTextOutcome = .confirmedApplied(
                             AppliedReplacement(strategy: .selectedText, focusedSelection: verifiedSelection)
                         )
-                    } catch {
-                        return .indeterminate(failureReason)
-                    }
-                }
-                if self.clipboardFallbackEnabled,
-                   let selectedTextFallbackBaseline,
-                   let afterValue,
-                   after.range == before.range,
-                   self.sameText(after.text, before.text),
-                   self.sameText(afterValue, selectedTextFallbackBaseline) {
-                    do {
+                    } else if self.clipboardFallbackEnabled,
+                              let selectedTextFallbackBaseline,
+                              let afterValue,
+                              after.range == before.range,
+                              self.sameText(after.text, before.text),
+                              self.sameText(afterValue, selectedTextFallbackBaseline) {
+                        failureReason = .replacementVerificationFailed
                         try self.requireTargetForeground(target)
                         let recheckedSelection = try self.currentSelection(target, allowingEmpty: true)
                         guard let recheckedValue = try self.wholeValue(target.element, failure: .replacementFailed),
@@ -901,15 +892,14 @@ public final class MacSelectionAccess: SelectionAccess {
                         else {
                             throw ImrseError.replacementFailed
                         }
-                        return .provedNotApplied
-                    } catch {
-                        return .indeterminate(.replacementVerificationFailed)
+                        selectedTextOutcome = .provedNotApplied
+                    } else {
+                        selectedTextOutcome = .indeterminate(.replacementEvidenceMismatch)
                     }
+                } catch {
+                    selectedTextOutcome = .indeterminate(failureReason)
                 }
-                return .indeterminate(.replacementEvidenceMismatch)
             }
-
-            selectedTextOutcome = try attemptSelectedText()
         }
         if let selectedTextOutcome {
             switch selectedTextOutcome {
