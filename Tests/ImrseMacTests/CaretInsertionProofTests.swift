@@ -5,6 +5,8 @@ import Testing
 @testable import ImrseMac
 
 struct CaretInsertionProofTests {
+    private typealias TextRange = ImrseCore.TextRange
+
     @Test(arguments: [0, 1, 3, 5])
     func insertionPreservesExactUnicodeContext(at offset: Int) throws {
         let proof = try #require(CaretInsertionProof(
