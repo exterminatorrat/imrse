@@ -260,6 +260,153 @@ struct ContenteditableTextStyleProofTests {
     }
 
     @Test
+    func freezesMutableNSStringFontAndColorLeaves() throws {
+        let expectedFont = "mutable leaf baseline font"
+        let expectedForeground = "mutable leaf baseline foreground"
+        let expectedBackground = "mutable leaf baseline background"
+        let mutableFont = NSMutableString(string: expectedFont)
+        let mutableForeground = NSMutableString(string: expectedForeground)
+        let mutableBackground = NSMutableString(string: expectedBackground)
+        let proof = try #require(ContenteditableTextStyleProof(
+            originalValue: styled(
+                "target",
+                font: mutableFont,
+                foreground: mutableForeground,
+                background: mutableBackground
+            ),
+            selectionRange: TextRange(location: 0, length: 6),
+            selectedText: "target",
+            replacement: "replacement"
+        ))
+
+        mutableFont.setString("caller changed font")
+        mutableForeground.setString("caller changed foreground")
+        mutableBackground.setString("caller changed background")
+
+        #expect(proof.confirmsOriginal(styled(
+            "target",
+            font: expectedFont,
+            foreground: expectedForeground,
+            background: expectedBackground
+        )))
+        #expect(proof.confirmsApplied(styled(
+            "replacement",
+            font: expectedFont,
+            foreground: expectedForeground,
+            background: expectedBackground
+        )))
+        #expect(!proof.confirmsOriginal(styled(
+            "target",
+            font: mutableFont,
+            foreground: mutableForeground,
+            background: mutableBackground
+        )))
+        #expect(!proof.confirmsApplied(styled(
+            "replacement",
+            font: mutableFont,
+            foreground: mutableForeground,
+            background: mutableBackground
+        )))
+    }
+
+    @Test
+    func freezesMutableFontDictionaryKeysValuesAndEntries() throws {
+        let expectedFamilyKey = "family"
+        let expectedSizeKey = "size"
+        let expectedFamily = "mutable dictionary family"
+        let expectedSize = 12
+        let mutableFamilyKey = NSMutableString(string: expectedFamilyKey)
+        let mutableSizeKey = NSMutableString(string: expectedSizeKey)
+        let mutableFamily = NSMutableString(string: expectedFamily)
+        let mutableFont = NSMutableDictionary()
+        mutableFont.setObject(mutableFamily, forKey: mutableFamilyKey as NSString)
+        mutableFont.setObject(NSNumber(value: expectedSize), forKey: mutableSizeKey as NSString)
+        let proof = try #require(ContenteditableTextStyleProof(
+            originalValue: styled("target", font: mutableFont),
+            selectionRange: TextRange(location: 0, length: 6),
+            selectedText: "target",
+            replacement: "replacement"
+        ))
+
+        mutableFamilyKey.setString("caller changed family key")
+        mutableSizeKey.setString("caller changed size key")
+        mutableFamily.setString("caller changed family")
+        mutableFont.setObject(NSString(string: "caller added entry"), forKey: "extra" as NSString)
+
+        let expectedFont = NSDictionary(dictionary: [
+            expectedFamilyKey: expectedFamily,
+            expectedSizeKey: NSNumber(value: expectedSize)
+        ])
+        #expect(proof.confirmsOriginal(styled("target", font: expectedFont)))
+        #expect(proof.confirmsApplied(styled("replacement", font: expectedFont)))
+        #expect(!proof.confirmsOriginal(styled("target", font: mutableFont)))
+        #expect(!proof.confirmsApplied(styled("replacement", font: mutableFont)))
+    }
+
+    @Test
+    func inverseUsesFrozenStyleAndRequiresTheExactOriginalResult() throws {
+        let mutableFont = NSMutableDictionary(dictionary: [
+            "family": "frozen inverse font",
+            "size": NSNumber(value: 13)
+        ])
+        let proof = try #require(ContenteditableTextStyleProof(
+            originalValue: styled("before target after", font: mutableFont),
+            selectionRange: TextRange(location: 7, length: 6),
+            selectedText: "target",
+            replacement: "replacement"
+        ))
+        mutableFont.setObject("caller changed inverse font", forKey: "family" as NSString)
+
+        let inverse = try #require(proof.inverse(
+            selectionRange: TextRange(location: 7, length: 11),
+            selectedText: "replacement",
+            replacement: "target"
+        ))
+        let expectedFont = NSDictionary(dictionary: [
+            "family": "frozen inverse font",
+            "size": NSNumber(value: 13)
+        ])
+        #expect(inverse.originalText.utf16.elementsEqual("before replacement after".utf16))
+        #expect(inverse.expectedText.utf16.elementsEqual("before target after".utf16))
+        #expect(inverse.confirmsOriginal(styled("before replacement after", font: expectedFont)))
+        #expect(inverse.confirmsApplied(styled("before target after", font: expectedFont)))
+        #expect(!inverse.confirmsApplied(styled("before target after", font: mutableFont)))
+        #expect(proof.inverse(
+            selectionRange: TextRange(location: 7, length: 11),
+            selectedText: "replacement",
+            replacement: "different"
+        ) == nil)
+        #expect(proof.inverse(
+            selectionRange: TextRange(location: 0, length: 11),
+            selectedText: "replacement",
+            replacement: "target"
+        ) == nil)
+    }
+
+    @Test
+    func preservesExactUTF16StyleStringsAndFontKeys() throws {
+        let decomposedFont = "precise font e\u{301}"
+        let composedFont = "precise font é"
+        let proof = try #require(ContenteditableTextStyleProof(
+            originalValue: styled("target", font: decomposedFont),
+            selectionRange: TextRange(location: 0, length: 6),
+            selectedText: "target",
+            replacement: "text"
+        ))
+        #expect(proof.confirmsApplied(styled("text", font: decomposedFont)))
+        #expect(!proof.confirmsApplied(styled("text", font: composedFont)))
+
+        let dictionaryProof = try #require(ContenteditableTextStyleProof(
+            originalValue: styled("target", font: NSDictionary(dictionary: [decomposedFont: "family"])),
+            selectionRange: TextRange(location: 0, length: 6),
+            selectedText: "target",
+            replacement: "text"
+        ))
+        #expect(dictionaryProof.confirmsApplied(styled("text", font: NSDictionary(dictionary: [decomposedFont: "family"]))))
+        #expect(!dictionaryProof.confirmsApplied(styled("text", font: NSDictionary(dictionary: [composedFont: "family"]))))
+    }
+
+    @Test
     func enforcesFlatFontDictionarySizeLimits() throws {
         let maximumKey = String(repeating: "k", count: 128)
         let maximumString = String(repeating: "v", count: 1_024)

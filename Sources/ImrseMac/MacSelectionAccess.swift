@@ -433,13 +433,11 @@ public final class MacSelectionAccess: SelectionAccess {
         styleProof: ContenteditableTextStyleProof
     ) async throws {
         let target = undoTarget.handle
-        guard let inverseProof = ContenteditableTextStyleProof(
-            originalValue: styleProof.expectedValue,
+        guard let inverseProof = styleProof.inverse(
             selectionRange: undoTarget.replacementRange,
             selectedText: receipt.replacement,
             replacement: receipt.target.text
         ),
-        inverseProof.confirmsApplied(styleProof.originalValue),
         try requireContenteditableStyleState(
             target,
             proof: styleProof,
@@ -508,15 +506,15 @@ public final class MacSelectionAccess: SelectionAccess {
             replacing: receipt.replacement,
             at: undoTarget.replacementRange,
             expectedSelection: replacementSelection,
-            oldValue: styleProof.expectedValue.string,
-            expectedValue: styleProof.originalValue.string,
+            oldValue: styleProof.expectedText,
+            expectedValue: styleProof.originalText,
             styleProof: inverseProof
         )
 
         do {
             guard let actual = try attributedWholeValue(
                 target.element,
-                matching: styleProof.originalValue.string,
+                matching: styleProof.originalText,
                 failure: .undoUnavailable
             ),
             styleProof.confirmsOriginal(actual),
@@ -1411,7 +1409,7 @@ public final class MacSelectionAccess: SelectionAccess {
         confirmsApplied: Bool
     ) throws -> Bool {
         guard try contenteditableClipboardTargetIsEligible(target) else { return false }
-        let expectedValue = confirmsApplied ? proof.expectedValue.string : proof.originalValue.string
+        let expectedValue = confirmsApplied ? proof.expectedText : proof.originalText
         guard let actual = try attributedWholeValue(
             target.element,
             matching: expectedValue,
