@@ -10,7 +10,7 @@ All live work is synthetic-only on the authorized Mini test copy, with the canon
 
 ## Starting source and evidence
 
-The dependency is open/unmerged PR22 at b5d4aa49709d85b7d85ad921c4e8142d02a0f1dc. Its composed compatibility build dc4d46bf02375ff7424184e8f3e87d63453d4441 passed hosted verification and bounded Mini rich/plain replacement, product Undo, later-edit preservation, Cancel and changed-field refusal. Browser input/textarea guarded-paste evidence exists on an earlier composed source, not yet on this new foundation. Do not mix those identities.
+The dependency is open/unmerged PR22 at b5d4aa49709d85b7d85ad921c4e8142d02a0f1dc. Its composed compatibility build dc4d46bf02375ff7424184e8f3e87d63453d4441 passed hosted verification and bounded Mini rich/plain replacement, product Undo, later-edit preservation, Cancel and changed-field refusal. The later foundation's source-specific browser/native evidence is recorded below; keep those source identities separate from earlier guarded-paste observations and from the new, unaccepted contenteditable layer.
 
 Source seams:
 - Capture and initial evidence: Sources/ImrseMac/MacSelectionAccess.swift:104–191.
@@ -25,6 +25,20 @@ Source seams:
 The proved problems are distinct: a focus callback falsely invalidated the tested rich target (bounded repair now accepted); capturable Vivaldi contenteditable fails a conservative tree gate; native-only browser setters can return contradictory/no-op evidence; an inaccessible editor lacks usable capture. None establishes WeChat's cause or universal API coverage.
 
 ## Caller contract and state ownership
+
+### Current implementation evidence
+
+M1 / HEH-15 is complete at PR23 `5815f0a7`, tested as exact compatibility composition `b9d561a4`. Hosted verification and independently validated, existing-identity Mini test-copy installation passed. Plain/rich selected replacement, product Undo, later-edit refusal, Cancel, changed-field refusal and fallback-enabled Vivaldi input/textarea replacement/Undo were observed on that source. Browser transport was not separately recorded. PR22/23 remain unmerged.
+
+The next source layer implements a narrower M2/M3 profile, not a general host search. The observed contenteditable is already the focused `AXTextArea`; the adapter must keep that exact binding through validation, commit and Undo. A separate helper recognizes only one direct, childless `AXStaticText`, leaving legacy tree admission unchanged. Candidate admission additionally requires an enabled root and both `AXEditableAncestor` and `AXHighestEditableAncestor` resolving by identity to that same root in the same PID. Advertised names alone do not establish those relationships.
+
+The new clipboard profile requires a frozen, bounded whole-value attributed proof before staging the clipboard. The full value is limited to 65,536 UTF-16 units with one uniform run and only `AXFont`, `AXForegroundColor` and optional `AXBackgroundColor`; font and foreground are required. Supported style values are bounded strings, immutable colors and bounded flat font dictionaries, not arbitrary recursive object graphs. Missing, mixed, unknown or oversized evidence refuses. The selected span must match exactly at scalar-safe UTF-16 boundaries. Expected result text and attributes are independently confirmed before a receipt is returned, and private Undo evidence requires the exact expected full state before the inverse and exact original state afterward. Public Core receipts and `SelectionAccess` remain unchanged.
+
+Clipboard consumption and edit acceptance are separate proofs. Existing exact textual consumption evidence can settle ownership-safe clipboard restoration even if subsequent style confirmation fails. That failure still invalidates the uncertain edit, returns no success/Undo receipt and permits no other transport; it must not trap a consumed clipboard transaction indefinitely merely because formatting is unconfirmed.
+
+The retained authority is a closed value snapshot, not a retained `NSAttributedString`: Foundation can cache and reuse equal attribute dictionaries that still reference caller-owned mutable values. Text, style strings and raw font keys use owned UTF-16 units; bounded flat font entries retain value snapshots, and colors retain validated immutable values. Numeric snapshots must round-trip without loss. Confirmation and inverse construction consume this frozen authority directly; computed attributed strings are compatibility views only and never establish commit or Undo authority.
+
+This profile is not yet live-accepted. A trusted, exact-owned-URL read-only observation established a direct-static root, valid range/text/value, parameterized span match and available uniform attributed selection; it did not establish editable-ancestor identity, full-value style admission, model persistence or an inverse. A later short Safari follow-up missed its explicit closure deadline, so its observations are not promoted as a completed bounded acceptance phase. Future native batches require fresh coordination, admission-time reserves and off-state/actual closure in the same executing program. Arbitrary rich HTML/markup, mixed styles, opaque editors and caret insertion remain unsupported or unfinished; WeChat remains paused.
 
 The application invokes the engine with an explicit editing intent. The engine captures once, owns generation/cancellation and asks the adapter to commit the completed result. It does not select AX versus paste, rediscover fields, infer intent from a failed capture, or reconstruct targets from diagnostics.
 
@@ -88,7 +102,7 @@ An indeterminate native mutation does not create a success/Undo receipt. Invalid
 | M4: explicit caret insertion (HEH-17) | Core intent/snapshot/engine contracts and test doubles; native capture/read/replace/receipt/Undo intent handling; minimal App bridge wiring after activation decision | Empty/start/middle/end, emoji/combining/CJK, invalid offsets, active IME, no selection context, cancellation, drift and later-edit-safe inverse | Separate dependent layer; no implicit empty-selection insertion |
 | M5: delivery matrix (HEH-1) | Documentation/status corrections and cause-supported repairs only | Exact source/artifact/signer/runtime rows, safety matrix, usable packaged candidate, explicit unsupported/paused rows | Keep all PRs unmerged pending explicit merge authorization |
 
-Ready independent work: M1 production files and NEW pure fixture file have different owners in one worktree; coordinator alone handles Git. Host, contenteditable and insertion integrations depend on the verified contracts. Do not have multiple agents edit MacSelectionAccess.swift at once. A review is targeted to the cross-process mutation/identity boundary, not duplicate whole-repository reviews.
+Parallel ownership: M1 production files and its new pure fixture file had different owners in one worktree; the coordinator alone handled Git. The current M2/M3 layer likewise separates production and new-fixture ownership, followed by one integration review of mutation, recovery and inverse boundaries. Insertion integration remains dependent. Do not have multiple agents edit MacSelectionAccess.swift at once or duplicate whole-repository reviews.
 
 File-level follow-through:
 - Sources/ImrseCore/Contracts.swift: intent/snapshot/receipt additions only in M4 with real consumers and explicit migration defaults.
@@ -128,7 +142,7 @@ Close every native interval explicitly, verify holder exit and independent acqui
 | Capability loss | permission/focus/readback/observer loss and pending recovery | failure stage remains specific, no fallback after indeterminate mutation and no receipt from uncertainty |
 | Paused/opaque | WeChat; inaccessible editor without sufficient AX evidence; proposed bridges | explicitly paused/unsupported/untested, not marked passed or secretly activated |
 
-Each live row records source and tree, artifact receipt, signer/runtime executable, fixture, intent, before/after evidence, actual transport, receipt/inverse result and safety outcome. Keep supported, safely refused, unsupported, paused and untested separate. An app name is not a capability and green CI is not native acceptance. Current source browser evidence is still pending; contenteditable support is not yet implemented.
+Each live row records source and tree, artifact receipt, signer/runtime executable, fixture, intent, before/after evidence, actual transport, receipt/inverse result and safety outcome. Keep supported, safely refused, unsupported, paused and untested separate. An app name is not a capability and green CI is not native acceptance. Foundation source `b9d561a4` has the bounded Vivaldi evidence described above. The new attributed-proof contenteditable layer still needs hosted and exact-source native acceptance; no broad browser or formatting support follows from its source alone.
 
 ## Explicit insertion activation decision
 
