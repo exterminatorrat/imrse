@@ -422,8 +422,9 @@ public final class MacSelectionAccess: SelectionAccess {
     private static let observerCallback: AXObserverCallback = { _, _, notification, refcon in
         guard let refcon else { return }
         let context = Unmanaged<ObserverContext>.fromOpaque(refcon).takeUnretainedValue()
+        let reason = ObservedCaptureNotification.failureReason(for: notification)
         MainActor.assumeIsolated {
-            context.owner?.observedChange(for: context.targetID, notification: notification)
+            context.owner?.observedChange(for: context.targetID, reason: reason)
         }
     }
 
@@ -500,8 +501,8 @@ public final class MacSelectionAccess: SelectionAccess {
         self.workspaceObserver = nil
     }
 
-    private func observedChange(for targetID: UUID, notification: CFString) {
-        invalidateCapture(targetID, reason: ObservedCaptureNotification.failureReason(for: notification))
+    private func observedChange(for targetID: UUID, reason: SelectionFailureReason) {
+        invalidateCapture(targetID, reason: reason)
     }
 
     private func clearCapture() {
