@@ -4,6 +4,222 @@ import CoreFoundation
 import Foundation
 import ImrseCore
 
+#if DEBUG
+@MainActor
+@_spi(SyntheticCaptureDiagnostics)
+public struct SyntheticCaptureIdentity {
+    public let processIdentifier: Int32
+    public let processLaunchDate: Date
+    public let bundleIdentifier: String
+    public let documentURL: URL
+    public let documentRoot: AXUIElement
+    public let focusedField: AXUIElement
+
+    public init(
+        processIdentifier: Int32,
+        processLaunchDate: Date,
+        bundleIdentifier: String,
+        documentURL: URL,
+        documentRoot: AXUIElement,
+        focusedField: AXUIElement
+    ) {
+        self.processIdentifier = processIdentifier
+        self.processLaunchDate = processLaunchDate
+        self.bundleIdentifier = bundleIdentifier
+        self.documentURL = documentURL
+        self.documentRoot = documentRoot
+        self.focusedField = focusedField
+    }
+}
+
+@_spi(SyntheticCaptureDiagnostics)
+public enum SyntheticCaptureSessionState: Equatable {
+    case armed
+    case capturing
+    case consumed
+    case failed
+    case cancelled
+}
+
+@MainActor
+@_spi(SyntheticCaptureDiagnostics)
+public final class SyntheticCaptureSession {
+    public static let maximumLifetime: Duration = .seconds(30)
+
+    public private(set) var state: SyntheticCaptureSessionState
+    private var identity: SyntheticCaptureIdentity?
+    private let deadline: ContinuousClock.Instant?
+    private let now: () -> ContinuousClock.Instant
+    private var attemptsRemaining = 1
+
+    public var retainsNativeIdentity: Bool { identity != nil }
+
+    public convenience init(
+        identity: SyntheticCaptureIdentity,
+        lifetime: Duration = .seconds(30)
+    ) {
+        self.init(identity: identity, lifetime: lifetime, now: { ContinuousClock().now })
+    }
+
+    public init(
+        identity: SyntheticCaptureIdentity,
+        lifetime: Duration,
+        now: @escaping () -> ContinuousClock.Instant
+    ) {
+        self.now = now
+        guard Self.valid(identity), lifetime > .zero, lifetime <= Self.maximumLifetime else {
+            self.identity = nil
+            self.deadline = nil
+            self.state = .failed
+            return
+        }
+        self.identity = identity
+        self.deadline = now().advanced(by: lifetime)
+        self.state = .armed
+    }
+
+    func beginCapture(intent: SelectionEditIntent) throws -> SyntheticCaptureIdentity {
+        guard state == .armed, attemptsRemaining == 1, let identity else {
+            if state == .capturing { fail() }
+            throw ImrseError.targetLost
+        }
+        guard isBeforeDeadline else {
+            fail()
+            throw ImrseError.targetLost
+        }
+        guard intent == .insertAtCaret else {
+            fail()
+            throw ImrseError.insertionUnavailable
+        }
+        attemptsRemaining = 0
+        state = .capturing
+        return identity
+    }
+
+    func isCaptureActive() -> Bool {
+        guard state == .capturing, isBeforeDeadline else {
+            if state == .capturing || state == .armed { fail() }
+            return false
+        }
+        return identity != nil
+    }
+
+    @discardableResult
+    func finishCapture(succeeded: Bool) -> Bool {
+        guard state == .capturing else { return false }
+        guard isBeforeDeadline else {
+            fail()
+            return false
+        }
+        state = succeeded ? .consumed : .failed
+        identity = nil
+        return succeeded
+    }
+
+    func fail() {
+        guard state == .armed || state == .capturing else { return }
+        state = .failed
+        identity = nil
+    }
+
+    @_spi(SyntheticCaptureDiagnostics)
+    public func cancel() {
+        guard state == .armed || state == .capturing else { return }
+        state = .cancelled
+        identity = nil
+    }
+
+    private var isBeforeDeadline: Bool {
+        guard let deadline else { return false }
+        return now() < deadline
+    }
+
+    private static func valid(_ identity: SyntheticCaptureIdentity) -> Bool {
+        identity.processIdentifier > 0
+            && identity.processLaunchDate.timeIntervalSince1970.isFinite
+            && identity.processLaunchDate.timeIntervalSince1970 > 0
+            && !identity.bundleIdentifier.isEmpty
+            && identity.documentURL.isFileURL
+            && !identity.documentURL.absoluteString.isEmpty
+    }
+}
+
+enum SyntheticCaptureMetadataValidation {
+    static func processMatches(
+        expectedProcessIdentifier: Int32,
+        expectedLaunchDate: Date,
+        expectedBundleIdentifier: String,
+        actualProcessIdentifier: Int32,
+        actualLaunchDate: Date?,
+        actualBundleIdentifier: String?
+    ) -> Bool {
+        expectedProcessIdentifier > 0
+            && expectedLaunchDate.timeIntervalSince1970.isFinite
+            && expectedLaunchDate.timeIntervalSince1970 > 0
+            && actualProcessIdentifier > 0
+            && expectedProcessIdentifier == actualProcessIdentifier
+            && actualLaunchDate == expectedLaunchDate
+            && actualBundleIdentifier == expectedBundleIdentifier
+    }
+
+    @MainActor
+    static func documentRootIsValid<Element>(
+        expectedRoot: Element,
+        expectedDocumentURL: URL,
+        application: Element,
+        expectedProcessIdentifier: Int32,
+        readFocusedRoot: @MainActor () throws -> Element?,
+        readRootParent: @MainActor () throws -> Element?,
+        readRootRole: @MainActor () throws -> String?,
+        readApplicationProcessIdentifier: @MainActor () -> Int32?,
+        readRootProcessIdentifier: @MainActor () -> Int32?,
+        readDocumentURL: @MainActor () throws -> URL?,
+        sameElement: @MainActor (Element, Element) -> Bool
+    ) throws -> Bool {
+        guard expectedProcessIdentifier > 0,
+              let focusedRoot = try readFocusedRoot(),
+              sameElement(focusedRoot, expectedRoot),
+              let rootParent = try readRootParent(),
+              sameElement(rootParent, application),
+              try readRootRole() == (kAXWindowRole as String),
+              readApplicationProcessIdentifier() == expectedProcessIdentifier,
+              readRootProcessIdentifier() == expectedProcessIdentifier,
+              documentURLMatches(expected: expectedDocumentURL, actual: try readDocumentURL())
+        else { return false }
+        return true
+    }
+
+    static func documentURLMatches(expected: URL, actual: URL?) -> Bool {
+        guard expected.isFileURL, let actual, actual.isFileURL else { return false }
+        return expected.absoluteString == actual.absoluteString
+    }
+
+    @MainActor
+    static func focusedFieldIsValid<Element>(
+        expectedField: Element,
+        acquiredField: Element,
+        expectedRoot: Element,
+        expectedProcessIdentifier: Int32,
+        readFieldProcessIdentifier: @MainActor () -> Int32?,
+        readCurrentFocusedField: @MainActor () throws -> Element?,
+        readFieldWindow: @MainActor () throws -> Element?,
+        readWindowProcessIdentifier: @MainActor (Element) -> Int32?,
+        sameElement: @MainActor (Element, Element) -> Bool
+    ) throws -> Bool {
+        guard expectedProcessIdentifier > 0,
+              sameElement(acquiredField, expectedField),
+              readFieldProcessIdentifier() == expectedProcessIdentifier,
+              let currentFocusedField = try readCurrentFocusedField(),
+              sameElement(currentFocusedField, expectedField),
+              let fieldWindow = try readFieldWindow(),
+              readWindowProcessIdentifier(fieldWindow) == expectedProcessIdentifier,
+              sameElement(fieldWindow, expectedRoot)
+        else { return false }
+        return true
+    }
+}
+#endif
+
 enum ObservedCaptureNotification {
     static func failureReason(for notification: CFString) -> SelectionFailureReason {
         if CFEqual(notification, kAXFocusedUIElementChangedNotification as CFString) {
