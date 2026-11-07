@@ -1,16 +1,40 @@
-#if os(macOS) && DEBUG
+#if os(macOS)
 import ApplicationServices
 import Foundation
 import ImrseCore
 import XCTest
 @_spi(SyntheticCaptureDiagnostics) @testable import ImrseMac
 
+final class SyntheticCaptureDiagnosticsAvailabilityTests: XCTestCase {
+    func testCompiledAvailabilityMatchesTheTargetScopedBuildSetting() {
+#if IMRSE_SYNTHETIC_CAPTURE_DIAGNOSTICS
+        XCTAssertTrue(SyntheticCaptureDiagnosticsAvailability.isEnabled)
+#else
+        XCTAssertFalse(SyntheticCaptureDiagnosticsAvailability.isEnabled)
+#endif
+    }
+}
+
+#if DEBUG || IMRSE_SYNTHETIC_CAPTURE_DIAGNOSTICS
 @MainActor
 final class SyntheticCaptureSessionTests: XCTestCase {
     private let processIdentifier: Int32 = 41
     private let launchDate = Date(timeIntervalSince1970: 1_700_000_000)
     private let bundleIdentifier = "org.example.synthetic-editor"
     private let documentURL = URL(fileURLWithPath: "/synthetic/approved.txt")
+
+    func testSyntheticFixtureContractUsesOnlyItsExactBoundedContents() {
+        var unexpectedContents = SyntheticCaptureFixtureContract.expectedContents
+        unexpectedContents.append(0)
+        XCTAssertTrue(SyntheticCaptureFixtureContract.matches(
+            contents: SyntheticCaptureFixtureContract.expectedContents
+        ))
+        XCTAssertFalse(SyntheticCaptureFixtureContract.matches(contents: unexpectedContents))
+        XCTAssertEqual(
+            SyntheticCaptureFixtureContract.relativePath,
+            ".capy/work/imrs16-ax-only-ui-preparation-20261107/Synthetic-native-replacement.txt"
+        )
+    }
 
     func testProcessIncarnationRequiresPositivePIDAndExactLaunchDateAndBundle() {
         XCTAssertTrue(SyntheticCaptureMetadataValidation.processMatches(
@@ -70,6 +94,97 @@ final class SyntheticCaptureSessionTests: XCTestCase {
             actualLaunchDate: invalidLaunchDate,
             actualBundleIdentifier: bundleIdentifier
         ))
+    }
+
+    func testIdentityBoundSessionKeepsItsAbsoluteDeadline() {
+        let now = ContinuousClock().now
+        let deadline = now.advanced(by: .seconds(3))
+        let anchor = AXUIElementCreateSystemWide()
+        let identity = SyntheticCaptureIdentity(
+            processIdentifier: processIdentifier,
+            processLaunchDate: launchDate,
+            bundleIdentifier: bundleIdentifier,
+            documentURL: documentURL,
+            documentRoot: anchor,
+            focusedField: anchor
+        )
+        let session = SyntheticCaptureSession(identity: identity, deadline: deadline, now: { now })
+
+        XCTAssertEqual(session.state, .armed)
+        XCTAssertEqual(session.deadline, deadline)
+    }
+
+    func testFocusedCaptureRejectsDocumentBeforeReadingField() throws {
+        var focusedFieldReads = 0
+        let result: (root: Int, field: Int)? = try SyntheticCaptureMetadataValidation.focusedCaptureIsValid(
+            expectedDocumentURL: documentURL,
+            application: 1,
+            expectedProcessIdentifier: processIdentifier,
+            readFocusedRoot: { 2 },
+            readRootParent: { _ in 1 },
+            readRootRole: { _ in kAXWindowRole as String },
+            readApplicationProcessIdentifier: { processIdentifier },
+            readRootProcessIdentifier: { _ in processIdentifier },
+            readDocumentURL: { _ in URL(fileURLWithPath: "/synthetic/other.txt") },
+            readFocusedField: {
+                focusedFieldReads += 1
+                return 3
+            },
+            readFieldProcessIdentifier: { _ in processIdentifier },
+            readCurrentFocusedField: { 3 },
+            readFieldWindow: { _ in 2 },
+            readWindowProcessIdentifier: { _ in processIdentifier },
+            sameElement: { $0 == $1 }
+        )
+
+        XCTAssertNil(result)
+        XCTAssertEqual(focusedFieldReads, 0)
+    }
+
+    func testFocusedCaptureRevalidatesRootAfterFieldMetadata() throws {
+        var reads: [String] = []
+        var focusedRootReadCount = 0
+        let result: (root: Int, field: Int)? = try SyntheticCaptureMetadataValidation.focusedCaptureIsValid(
+            expectedDocumentURL: documentURL,
+            application: 1,
+            expectedProcessIdentifier: processIdentifier,
+            readFocusedRoot: {
+                reads.append("root")
+                focusedRootReadCount += 1
+                return focusedRootReadCount < 3 ? 2 : 99
+            },
+            readRootParent: { _ in
+                reads.append("parent")
+                return 1
+            },
+            readRootRole: { _ in
+                reads.append("role")
+                return kAXWindowRole as String
+            },
+            readApplicationProcessIdentifier: { processIdentifier },
+            readRootProcessIdentifier: { _ in processIdentifier },
+            readDocumentURL: { _ in
+                reads.append("document")
+                return documentURL
+            },
+            readFocusedField: {
+                reads.append("field")
+                return 3
+            },
+            readFieldProcessIdentifier: { _ in processIdentifier },
+            readCurrentFocusedField: { 3 },
+            readFieldWindow: { _ in 2 },
+            readWindowProcessIdentifier: { _ in processIdentifier },
+            sameElement: { $0 == $1 }
+        )
+
+        XCTAssertNil(result)
+        let documentIndex = try XCTUnwrap(reads.firstIndex(of: "document"))
+        let fieldIndex = try XCTUnwrap(reads.firstIndex(of: "field"))
+        XCTAssertLessThan(documentIndex, fieldIndex)
+        XCTAssertEqual(focusedRootReadCount, 3)
+        XCTAssertEqual(reads.filter { $0 == "field" }.count, 1)
+        XCTAssertEqual(reads.filter { $0 == "document" }.count, 1)
     }
 
     func testInvalidProcessIncarnationFailsBeforeRetainingNativeIdentity() {
@@ -467,4 +582,5 @@ final class SyntheticCaptureSessionTests: XCTestCase {
         var contentReads = 0
     }
 }
+#endif
 #endif

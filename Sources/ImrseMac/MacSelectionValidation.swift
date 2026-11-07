@@ -4,7 +4,15 @@ import CoreFoundation
 import Foundation
 import ImrseCore
 
-#if DEBUG
+enum SyntheticCaptureDiagnosticsAvailability {
+#if IMRSE_SYNTHETIC_CAPTURE_DIAGNOSTICS
+    static let isEnabled = true
+#else
+    static let isEnabled = false
+#endif
+}
+
+#if DEBUG || IMRSE_SYNTHETIC_CAPTURE_DIAGNOSTICS
 @MainActor
 @_spi(SyntheticCaptureDiagnostics)
 public struct SyntheticCaptureIdentity {
@@ -33,6 +41,29 @@ public struct SyntheticCaptureIdentity {
 }
 
 @_spi(SyntheticCaptureDiagnostics)
+public struct SyntheticCaptureProcessIdentity: Equatable {
+    public let processIdentifier: Int32
+    public let processLaunchDate: Date?
+    public let bundleIdentifier: String?
+
+    public init(processIdentifier: Int32, processLaunchDate: Date?, bundleIdentifier: String?) {
+        self.processIdentifier = processIdentifier
+        self.processLaunchDate = processLaunchDate
+        self.bundleIdentifier = bundleIdentifier
+    }
+}
+
+enum SyntheticCaptureFixtureContract {
+    static let bundleIdentifier = "com.apple.TextEdit"
+    static let relativePath = ".capy/work/imrs16-ax-only-ui-preparation-20261107/Synthetic-native-replacement.txt"
+    static let expectedContents = Data("Synthetic native alpha\n".utf8)
+
+    static func matches(contents: Data) -> Bool {
+        contents == expectedContents
+    }
+}
+
+@_spi(SyntheticCaptureDiagnostics)
 public enum SyntheticCaptureSessionState: Equatable {
     case armed
     case capturing
@@ -48,7 +79,7 @@ public final class SyntheticCaptureSession {
 
     public private(set) var state: SyntheticCaptureSessionState
     private var identity: SyntheticCaptureIdentity?
-    private let deadline: ContinuousClock.Instant?
+    let deadline: ContinuousClock.Instant?
     private let now: () -> ContinuousClock.Instant
     private var attemptsRemaining = 1
 
@@ -78,8 +109,37 @@ public final class SyntheticCaptureSession {
         self.state = .armed
     }
 
+    init(identity: SyntheticCaptureIdentity, deadline: ContinuousClock.Instant, now: @escaping () -> ContinuousClock.Instant) {
+        self.now = now
+        let lifetime = now().duration(to: deadline)
+        guard Self.valid(identity),
+              lifetime > .zero,
+              lifetime <= Self.maximumLifetime
+        else {
+            self.identity = nil
+            self.deadline = nil
+            self.state = .failed
+            return
+        }
+        self.identity = identity
+        self.deadline = deadline
+        self.state = .armed
+    }
+
+    var expectedCaptureProcessIdentity: SyntheticCaptureProcessIdentity? {
+        guard let identity else { return nil }
+        return SyntheticCaptureProcessIdentity(
+            processIdentifier: identity.processIdentifier,
+            processLaunchDate: identity.processLaunchDate,
+            bundleIdentifier: identity.bundleIdentifier
+        )
+    }
+
     func beginCapture(intent: SelectionEditIntent) throws -> SyntheticCaptureIdentity {
-        guard state == .armed, attemptsRemaining == 1, let identity else {
+        guard state == .armed,
+              attemptsRemaining == 1,
+              let identity
+        else {
             if state == .capturing { fail() }
             throw ImrseError.targetLost
         }
@@ -142,9 +202,27 @@ public final class SyntheticCaptureSession {
             && identity.documentURL.isFileURL
             && !identity.documentURL.absoluteString.isEmpty
     }
+
 }
 
 enum SyntheticCaptureMetadataValidation {
+    static func processMatches(
+        expected: SyntheticCaptureProcessIdentity,
+        actual: SyntheticCaptureProcessIdentity
+    ) -> Bool {
+        guard let expectedLaunchDate = expected.processLaunchDate,
+              let expectedBundleIdentifier = expected.bundleIdentifier
+        else { return false }
+        return processMatches(
+            expectedProcessIdentifier: expected.processIdentifier,
+            expectedLaunchDate: expectedLaunchDate,
+            expectedBundleIdentifier: expectedBundleIdentifier,
+            actualProcessIdentifier: actual.processIdentifier,
+            actualLaunchDate: actual.processLaunchDate,
+            actualBundleIdentifier: actual.bundleIdentifier
+        )
+    }
+
     static func processMatches(
         expectedProcessIdentifier: Int32,
         expectedLaunchDate: Date,
@@ -216,6 +294,67 @@ enum SyntheticCaptureMetadataValidation {
               sameElement(fieldWindow, expectedRoot)
         else { return false }
         return true
+    }
+
+    @MainActor
+    static func focusedCaptureIsValid<Element>(
+        expectedDocumentURL: URL,
+        application: Element,
+        expectedProcessIdentifier: Int32,
+        readFocusedRoot: @MainActor () throws -> Element?,
+        readRootParent: @MainActor (Element) throws -> Element?,
+        readRootRole: @MainActor (Element) throws -> String?,
+        readApplicationProcessIdentifier: @MainActor () -> Int32?,
+        readRootProcessIdentifier: @MainActor (Element) -> Int32?,
+        readDocumentURL: @MainActor (Element) throws -> URL?,
+        readFocusedField: @MainActor () throws -> Element?,
+        readFieldProcessIdentifier: @MainActor (Element) -> Int32?,
+        readCurrentFocusedField: @MainActor () throws -> Element?,
+        readFieldWindow: @MainActor (Element) throws -> Element?,
+        readWindowProcessIdentifier: @MainActor (Element) -> Int32?,
+        sameElement: @MainActor (Element, Element) -> Bool
+    ) throws -> (root: Element, field: Element)? {
+        guard let root = try readFocusedRoot(),
+              try documentRootIsValid(
+                expectedRoot: root,
+                expectedDocumentURL: expectedDocumentURL,
+                application: application,
+                expectedProcessIdentifier: expectedProcessIdentifier,
+                readFocusedRoot: readFocusedRoot,
+                readRootParent: { try readRootParent(root) },
+                readRootRole: { try readRootRole(root) },
+                readApplicationProcessIdentifier: readApplicationProcessIdentifier,
+                readRootProcessIdentifier: { readRootProcessIdentifier(root) },
+                readDocumentURL: { try readDocumentURL(root) },
+                sameElement: sameElement
+              ),
+              let field = try readFocusedField(),
+              try focusedFieldIsValid(
+                expectedField: field,
+                acquiredField: field,
+                expectedRoot: root,
+                expectedProcessIdentifier: expectedProcessIdentifier,
+                readFieldProcessIdentifier: { readFieldProcessIdentifier(field) },
+                readCurrentFocusedField: readCurrentFocusedField,
+                readFieldWindow: { try readFieldWindow(field) },
+                readWindowProcessIdentifier: readWindowProcessIdentifier,
+                sameElement: sameElement
+              ),
+              try documentRootIsValid(
+                expectedRoot: root,
+                expectedDocumentURL: expectedDocumentURL,
+                application: application,
+                expectedProcessIdentifier: expectedProcessIdentifier,
+                readFocusedRoot: readFocusedRoot,
+                readRootParent: { try readRootParent(root) },
+                readRootRole: { try readRootRole(root) },
+                readApplicationProcessIdentifier: readApplicationProcessIdentifier,
+                readRootProcessIdentifier: { readRootProcessIdentifier(root) },
+                readDocumentURL: { try readDocumentURL(root) },
+                sameElement: sameElement
+              )
+        else { return nil }
+        return (root, field)
     }
 }
 #endif

@@ -5,7 +5,7 @@ import Dispatch
 import Foundation
 import ImrseCore
 import ImrseLocal
-#if DEBUG
+#if DEBUG || IMRSE_SYNTHETIC_CAPTURE_DIAGNOSTICS
 @_spi(SyntheticCaptureDiagnostics) import ImrseMac
 #else
 import ImrseMac
@@ -107,6 +107,40 @@ private enum ManagedLocalModelInstallAction: Sendable {
     case repair
 }
 
+#if IMRSE_SYNTHETIC_CAPTURE_DIAGNOSTICS
+enum SyntheticCaptureDiagnosticsStatus: Equatable {
+    case notStarted
+    case busy
+    case waitingForTarget
+    case completed
+    case unavailable
+    case timedOut
+    case cancelled
+
+    var message: String? {
+        switch self {
+        case .notStarted: nil
+        case .busy: "Capture check unavailable while imrse is busy."
+        case .waitingForTarget: "Return to TextEdit with the prepared text field focused within 30 seconds."
+        case .completed: "Capture check completed. No text was changed or generated. Normal shortcuts stay paused until imrse restarts."
+        case .unavailable: "Capture check couldn't confirm the prepared target. Normal shortcuts stay paused until imrse restarts."
+        case .timedOut: "Capture check expired. Normal shortcuts stay paused until imrse restarts."
+        case .cancelled: "Capture check cancelled. Normal shortcuts stay paused until imrse restarts."
+        }
+    }
+}
+
+private enum SyntheticCaptureDiagnosticsProviderError: Error {
+    case providerInvoked
+}
+
+private struct SyntheticCaptureDiagnosticsTripwireProvider: TextProvider {
+    func stream(_ request: TransformationRequest) async throws -> AsyncThrowingStream<String, Error> {
+        throw SyntheticCaptureDiagnosticsProviderError.providerInvoked
+    }
+}
+#endif
+
 @MainActor
 final class AppModel: ObservableObject {
     let configurationStore: ConfigurationStore
@@ -152,13 +186,28 @@ final class AppModel: ObservableObject {
 
     var onPresentPill: (@MainActor (NSScreen?) -> Void)?
     var onHidePillForFocusHandoff: (@MainActor () -> Void)?
-    #if DEBUG
+#if DEBUG
     private(set) var previewState: AppPreviewState?
+#endif
+#if DEBUG || IMRSE_SYNTHETIC_CAPTURE_DIAGNOSTICS
     private var usesDebugSyntheticCaptureSession = false
     private var debugSyntheticCaptureSessionEnded = false
     private var debugSyntheticCaptureTeardownInProgress = false
     private var debugSyntheticCaptureTeardownCompleted = false
-    #endif
+#endif
+#if IMRSE_SYNTHETIC_CAPTURE_DIAGNOSTICS
+    @Published private(set) var syntheticCaptureDiagnosticsStatus: SyntheticCaptureDiagnosticsStatus = .notStarted
+    private var syntheticCaptureDiagnosticsLatched = false
+    private var syntheticCaptureDiagnosticsTextProvider: any TextProvider = SyntheticCaptureDiagnosticsTripwireProvider()
+    private var syntheticCaptureDiagnosticsAccess: MacSelectionAccess?
+    private var syntheticCaptureDiagnosticsExpectedProcessIdentity: SyntheticCaptureProcessIdentity?
+    private var syntheticCaptureDiagnosticsObserver: NSObjectProtocol?
+    private var syntheticCaptureDiagnosticsDeadline: ContinuousClock.Instant?
+    private var syntheticCaptureDiagnosticsDeadlineTask: Task<Void, Never>?
+    private var syntheticCaptureDiagnosticsDeadlineWaiter: (@MainActor (ContinuousClock.Instant) async throws -> Void)?
+    private var syntheticCaptureDiagnosticsOperationID: UUID?
+    private var syntheticCaptureDiagnosticsCallbackEpoch: UInt64?
+#endif
 
     private var undoTask: Task<Void, Never>?
     private var terminationReplies: [@MainActor (NSApplication.TerminateReply) -> Void] = []
@@ -204,17 +253,34 @@ final class AppModel: ObservableObject {
     private let lifecycleLogger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "imrse", category: "lifecycle")
     private var lifecycleStartedAt: Date?
 
+#if IMRSE_SYNTHETIC_CAPTURE_DIAGNOSTICS
+    static let syntheticCaptureDiagnosticsBuildEnabled = true
+#else
+    static let syntheticCaptureDiagnosticsBuildEnabled = false
+#endif
+
     var canUndo: Bool {
-#if DEBUG
+#if IMRSE_SYNTHETIC_CAPTURE_DIAGNOSTICS
+        if syntheticCaptureDiagnosticsLatched { return false }
+#endif
+#if DEBUG || IMRSE_SYNTHETIC_CAPTURE_DIAGNOSTICS
         if usesDebugSyntheticCaptureSession && debugSyntheticCaptureSessionEnded { return false }
 #endif
         return engine.canUndo && undoTask == nil
     }
 
-    var canOpenSettings: Bool { !isTerminating && undoTask == nil && state != .replacing && state != .undoing }
+    var canOpenSettings: Bool {
+#if IMRSE_SYNTHETIC_CAPTURE_DIAGNOSTICS
+        guard syntheticCaptureDiagnosticsStatus != .waitingForTarget else { return false }
+#endif
+        return !isTerminating && undoTask == nil && state != .replacing && state != .undoing
+    }
 
     var canChangeSettings: Bool {
-        !isPreviewMode && !isTerminating && configurationIssue == nil && !isProcessing
+#if IMRSE_SYNTHETIC_CAPTURE_DIAGNOSTICS
+        guard !syntheticCaptureDiagnosticsLatched else { return false }
+#endif
+        return !isPreviewMode && !isTerminating && configurationIssue == nil && !isProcessing
     }
 
     var chatGPTRecommendations: [CuratedModelChoice] {
@@ -286,7 +352,12 @@ final class AppModel: ObservableObject {
     }
 
     var shouldShowKeyboardMonitoringRetry: Bool {
+#if IMRSE_SYNTHETIC_CAPTURE_DIAGNOSTICS
+        !syntheticCaptureDiagnosticsLatched
+            && allowsGlobalShortcutMonitoring && !isPreviewMode && !isRecordingShortcut && !shortcutMonitor.isMonitoring
+#else
         allowsGlobalShortcutMonitoring && !isPreviewMode && !isRecordingShortcut && !shortcutMonitor.isMonitoring
+#endif
     }
 
     var canRetryKeyboardMonitoring: Bool {
@@ -352,7 +423,9 @@ final class AppModel: ObservableObject {
             permissionStatusRefreshClock: permissionStatusRefreshClock
         )
     }
+    #endif
 
+#if DEBUG || IMRSE_SYNTHETIC_CAPTURE_DIAGNOSTICS
     convenience init?(
         debugSyntheticCaptureAccess: MacSelectionAccess,
         textProvider: any TextProvider,
@@ -361,7 +434,8 @@ final class AppModel: ObservableObject {
         configurationStore: ConfigurationStore? = nil,
         shortcutMonitoring: (any ShortcutMonitoring)? = nil,
         permissionStatusReader: PermissionStatusReader? = nil,
-        permissionStatusRefreshClock: PermissionStatusRefreshClock? = nil
+        permissionStatusRefreshClock: PermissionStatusRefreshClock? = nil,
+        deadlineWaiter: (@MainActor (ContinuousClock.Instant) async throws -> Void)? = nil
     ) {
         guard debugSyntheticCaptureAccess.hasSyntheticCaptureSession else { return nil }
         let engine = TransformationEngine(
@@ -369,21 +443,28 @@ final class AppModel: ObservableObject {
             textProvider: textProvider
         )
         self.init(
-            testEngine: engine,
-            selectionAccess: debugSyntheticCaptureAccess,
-            configuration: configuration,
-            presets: presets,
-            configurationStore: configurationStore,
-            shortcutMonitoring: shortcutMonitoring,
-            permissionStatusReader: permissionStatusReader,
+            loadSettingsFromDisk: false,
+            isPreviewMode: false,
+            configurationOverride: configuration,
+            presetsOverride: presets,
+            engineOverride: engine,
+            selectionAccessOverride: debugSyntheticCaptureAccess,
+            configurationStoreOverride: configurationStore,
+            shortcutMonitorOverride: shortcutMonitoring,
+            permissionStatusReaderOverride: permissionStatusReader,
             permissionStatusRefreshClock: permissionStatusRefreshClock
         )
+#if IMRSE_SYNTHETIC_CAPTURE_DIAGNOSTICS
+        syntheticCaptureDiagnosticsDeadlineWaiter = deadlineWaiter
+#endif
     }
-    #else
+#endif
+
+#if !DEBUG
     convenience init() {
         self.init(loadSettingsFromDisk: true, isPreviewMode: false)
     }
-    #endif
+#endif
 
     private init(
         loadSettingsFromDisk: Bool,
@@ -505,7 +586,7 @@ final class AppModel: ObservableObject {
         self.configurationStore = store
         self.credentialStore = credentialStore
         self.selectionAccess = selectionAccess
-#if DEBUG
+#if DEBUG || IMRSE_SYNTHETIC_CAPTURE_DIAGNOSTICS
         self.usesDebugSyntheticCaptureSession = selectionAccess.hasSyntheticCaptureSession
 #endif
         self.engine = engine
@@ -531,8 +612,20 @@ final class AppModel: ObservableObject {
         #if DEBUG
         pillBridge.isPreviewMode = isPreviewMode
         #endif
-        pillBridge.onPresent = { [weak self] screen in self?.onPresentPill?(screen) }
-        pillBridge.onHideForFocusHandoff = { [weak self] in self?.onHidePillForFocusHandoff?() }
+        pillBridge.onPresent = { [weak self] screen in
+            guard let self else { return }
+#if IMRSE_SYNTHETIC_CAPTURE_DIAGNOSTICS
+            guard !self.syntheticCaptureDiagnosticsLatched else { return }
+#endif
+            self.onPresentPill?(screen)
+        }
+        pillBridge.onHideForFocusHandoff = { [weak self] in
+            guard let self else { return }
+#if IMRSE_SYNTHETIC_CAPTURE_DIAGNOSTICS
+            guard !self.syntheticCaptureDiagnosticsLatched else { return }
+#endif
+            self.onHidePillForFocusHandoff?()
+        }
         pillBridge.onUndo = { [weak self] in self?.undo() }
         pillBridge.onStateChange = { [weak self] state in self?.handleEngineState(state) }
 
@@ -551,6 +644,9 @@ final class AppModel: ObservableObject {
     }
 
     private func invoke(intent: SelectionEditIntent, presetID: String? = nil) {
+#if IMRSE_SYNTHETIC_CAPTURE_DIAGNOSTICS
+        guard !syntheticCaptureDiagnosticsLatched else { return }
+#endif
         guard !isPreviewMode,
               !terminationRequested,
               !isRecordingShortcut,
@@ -616,8 +712,210 @@ final class AppModel: ObservableObject {
         invoke(intent: .insertAtCaret)
     }
 
+#if IMRSE_SYNTHETIC_CAPTURE_DIAGNOSTICS
+    func beginSyntheticCaptureDiagnostics(
+        accessFactory: (@MainActor (ContinuousClock.Instant) throws -> MacSelectionAccess)? = nil
+    ) {
+        guard syntheticCaptureDiagnosticsStatus != .waitingForTarget,
+              !syntheticCaptureDiagnosticsLatched
+        else { return }
+        guard canBeginSyntheticCaptureDiagnostics else {
+            syntheticCaptureDiagnosticsStatus = .busy
+            return
+        }
+
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: .seconds(30))
+        let operationID = UUID()
+        syntheticCaptureDiagnosticsLatched = true
+        syntheticCaptureDiagnosticsStatus = .waitingForTarget
+        syntheticCaptureDiagnosticsDeadline = deadline
+        syntheticCaptureDiagnosticsOperationID = operationID
+        pillModel.onSubmit = { _ in }
+        syntheticCaptureDiagnosticsDeadlineTask = Task { @MainActor [weak self] in
+            do {
+                if let deadlineWaiter = self?.syntheticCaptureDiagnosticsDeadlineWaiter {
+                    try await deadlineWaiter(deadline)
+                } else {
+                    try await clock.sleep(until: deadline)
+                }
+            } catch {
+                return
+            }
+            guard let self, self.syntheticCaptureDiagnosticsOperationID == operationID else { return }
+            self.finishSyntheticCaptureDiagnostics(with: .timedOut)
+        }
+        stopShortcutMonitor()
+        syntheticCaptureDiagnosticsCallbackEpoch = shortcutMonitorActivationEpoch
+        accountStatusRefreshTask?.cancel()
+        accountStatusRefreshTask = nil
+        accountStatusSessionID = nil
+
+        do {
+            let diagnosticAccess: MacSelectionAccess
+            if let accessFactory {
+                diagnosticAccess = try accessFactory(deadline)
+            } else {
+                diagnosticAccess = try MacSelectionAccess.canonicalSyntheticCaptureAccess(deadline: deadline)
+            }
+            syntheticCaptureDiagnosticsAccess = diagnosticAccess
+            guard diagnosticAccess.hasSyntheticCaptureSession,
+                  diagnosticAccess.syntheticCaptureSessionState == .armed,
+                  let expectedProcess = diagnosticAccess.syntheticCaptureExpectedProcessIdentity
+            else { throw ImrseError.targetLost }
+            syntheticCaptureDiagnosticsExpectedProcessIdentity = expectedProcess
+            observeSyntheticCaptureDiagnosticsTargetActivation()
+        } catch {
+            finishSyntheticCaptureDiagnostics(
+                with: ContinuousClock().now >= deadline ? .timedOut : .unavailable
+            )
+        }
+    }
+
+    var syntheticCaptureDiagnosticsIsLatched: Bool { syntheticCaptureDiagnosticsLatched }
+
+    func cancelPendingSyntheticCaptureDiagnostics() {
+        guard syntheticCaptureDiagnosticsStatus == .waitingForTarget else { return }
+        finishSyntheticCaptureDiagnostics(with: .cancelled)
+    }
+
+#if DEBUG
+    func setChatGPTRefreshStateForTesting(task: Task<Void, Never>?, isRefreshing: Bool) {
+        accountStatusRefreshTask = task
+        isRefreshingChatGPTAccount = isRefreshing
+    }
+#endif
+
+    private var canBeginSyntheticCaptureDiagnostics: Bool {
+        !isPreviewMode
+            && !isTerminating
+            && !terminationRequested
+            && !isProcessing
+            && state == .idle
+            && engine.state == .idle
+            && !engine.canUndo
+            && pillModel.phase == .hidden
+            && !isRecordingShortcut
+            && shortcutRecordingSessionID == nil
+            && undoTask == nil
+            && managedLocalModelOperationTask == nil
+            && !isChangingManagedLocalModel
+            && !isRefreshingChatGPTAccount
+            && chatGPTSignInTask == nil
+            && !isConnectingChatGPT
+            && !isDisconnectingChatGPT
+            && officialAccountStatusRefreshTask == nil
+            && officialAccountSignInTask == nil
+            && officialAccountDisconnectTasks.isEmpty
+            && officialAccountOperationIDs.isEmpty
+            && officialAccountDeletionProviderIDs.isEmpty
+            && officialAccountRefreshingProviderID == nil
+            && officialAccountSigningInProviderID == nil
+            && officialAccountDisconnectingProviderIDs.isEmpty
+    }
+
+    private func finishSyntheticCaptureDiagnostics(with status: SyntheticCaptureDiagnosticsStatus) {
+        syntheticCaptureDiagnosticsDeadlineTask?.cancel()
+        syntheticCaptureDiagnosticsDeadlineTask = nil
+        syntheticCaptureDiagnosticsOperationID = nil
+        let diagnosticAccess = syntheticCaptureDiagnosticsAccess
+        syntheticCaptureDiagnosticsAccess = nil
+        diagnosticAccess?.endSyntheticCaptureSession()
+        syntheticCaptureDiagnosticsExpectedProcessIdentity = nil
+        syntheticCaptureDiagnosticsDeadline = nil
+        syntheticCaptureDiagnosticsCallbackEpoch = nil
+        removeSyntheticCaptureDiagnosticsObserver()
+        pillBridge.dismiss()
+        syntheticCaptureDiagnosticsStatus = status
+    }
+
+    private func observeSyntheticCaptureDiagnosticsTargetActivation() {
+        syntheticCaptureDiagnosticsObserver = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didActivateApplicationNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] notification in
+            guard let application = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication
+            else { return }
+            let processIdentifier = application.processIdentifier
+            let processLaunchDate = application.launchDate
+            let bundleIdentifier = application.bundleIdentifier
+            MainActor.assumeIsolated {
+                self?.handleSyntheticCaptureDiagnosticsActivation(
+                    processIdentifier: processIdentifier,
+                    processLaunchDate: processLaunchDate,
+                    bundleIdentifier: bundleIdentifier
+                )
+            }
+        }
+    }
+
+    private func removeSyntheticCaptureDiagnosticsObserver() {
+        guard let syntheticCaptureDiagnosticsObserver else { return }
+        NSWorkspace.shared.notificationCenter.removeObserver(syntheticCaptureDiagnosticsObserver)
+        self.syntheticCaptureDiagnosticsObserver = nil
+    }
+
+    func handleSyntheticCaptureDiagnosticsActivation(
+        processIdentifier: Int32,
+        processLaunchDate: Date?,
+        bundleIdentifier: String?
+    ) {
+        guard syntheticCaptureDiagnosticsStatus == .waitingForTarget,
+              let expected = syntheticCaptureDiagnosticsExpectedProcessIdentity
+        else { return }
+        guard processIdentifier == expected.processIdentifier
+                || bundleIdentifier == expected.bundleIdentifier
+        else { return }
+        guard processIdentifier == expected.processIdentifier,
+              processLaunchDate == expected.processLaunchDate,
+              bundleIdentifier == expected.bundleIdentifier
+        else {
+            finishSyntheticCaptureDiagnostics(with: .unavailable)
+            return
+        }
+        removeSyntheticCaptureDiagnosticsObserver()
+        syntheticCaptureDiagnosticsExpectedProcessIdentity = nil
+        captureSyntheticTargetAfterApplicationActivation()
+    }
+
+    private func captureSyntheticTargetAfterApplicationActivation() {
+        guard syntheticCaptureDiagnosticsStatus == .waitingForTarget,
+              let deadline = syntheticCaptureDiagnosticsDeadline,
+              let callbackEpoch = syntheticCaptureDiagnosticsCallbackEpoch
+        else { return }
+        guard ContinuousClock().now < deadline else {
+            finishSyntheticCaptureDiagnostics(with: .timedOut)
+            return
+        }
+        guard callbackEpoch == shortcutMonitorActivationEpoch,
+              let diagnosticAccess = syntheticCaptureDiagnosticsAccess,
+              let diagnosticModel = AppModel(
+                debugSyntheticCaptureAccess: diagnosticAccess,
+                textProvider: syntheticCaptureDiagnosticsTextProvider,
+                configuration: AppConfiguration(),
+                presets: []
+              )
+        else {
+            finishSyntheticCaptureDiagnostics(with: .unavailable)
+            return
+        }
+        diagnosticModel.pillModel.onSubmit = { _ in }
+        diagnosticModel.handleInsertAtCaretShortcutMonitorCallback(
+            activationEpoch: diagnosticModel.shortcutMonitorActivationEpoch
+        )
+        let succeeded = diagnosticModel.engine.state == .ready
+            && diagnosticAccess.syntheticCaptureSessionState == .consumed
+        diagnosticModel.endDebugSyntheticCaptureSession()
+        finishSyntheticCaptureDiagnostics(with: succeeded ? .completed : .unavailable)
+    }
+#endif
+
     private func canHandleShortcutCallback(activationEpoch: UInt64) -> Bool {
-        activationEpoch == shortcutMonitorActivationEpoch
+#if IMRSE_SYNTHETIC_CAPTURE_DIAGNOSTICS
+        guard !syntheticCaptureDiagnosticsLatched else { return false }
+#endif
+        return activationEpoch == shortcutMonitorActivationEpoch
             && !isRecordingShortcut
             && !terminationRequested
             && !isPreviewMode
@@ -632,6 +930,9 @@ final class AppModel: ObservableObject {
     }
 
     func undo() {
+#if IMRSE_SYNTHETIC_CAPTURE_DIAGNOSTICS
+        guard !syntheticCaptureDiagnosticsLatched else { return }
+#endif
         guard !isPreviewMode, !terminationRequested, canUndo else { return }
         pillModel.dismiss()
         undoTask = Task { [weak self] in
@@ -652,7 +953,10 @@ final class AppModel: ObservableObject {
 
     @discardableResult
     func selectPillPreset(at index: Int) -> Bool {
-        pillBridge.selectPreset(at: index)
+#if IMRSE_SYNTHETIC_CAPTURE_DIAGNOSTICS
+        guard !syntheticCaptureDiagnosticsLatched else { return false }
+#endif
+        return pillBridge.selectPreset(at: index)
     }
 
     #if DEBUG
@@ -712,7 +1016,7 @@ final class AppModel: ObservableObject {
         if managedLocalModelDownloadID != nil { managedLocalModelOperationTask?.cancel() }
         shortcutRecordingSessionID = nil
         isRecordingShortcut = false
-#if DEBUG
+#if DEBUG || IMRSE_SYNTHETIC_CAPTURE_DIAGNOSTICS
         if usesDebugSyntheticCaptureSession {
             endDebugSyntheticCaptureSession()
         } else {
@@ -720,6 +1024,11 @@ final class AppModel: ObservableObject {
         }
 #else
         stopShortcutMonitor()
+#endif
+#if IMRSE_SYNTHETIC_CAPTURE_DIAGNOSTICS
+        if syntheticCaptureDiagnosticsStatus == .waitingForTarget {
+            finishSyntheticCaptureDiagnostics(with: .cancelled)
+        }
 #endif
         pillBridge.dismiss()
         if undoTask != nil {
@@ -1320,6 +1629,9 @@ final class AppModel: ObservableObject {
     }
 
     func refreshChatGPTAccount() async {
+#if IMRSE_SYNTHETIC_CAPTURE_DIAGNOSTICS
+        guard !syntheticCaptureDiagnosticsLatched else { return }
+#endif
         guard !isPreviewMode, !terminationRequested, !isDisconnectingChatGPT, let openAIAccountClient else { return }
         let sessionID = UUID()
         accountStatusSessionID = sessionID
@@ -1718,6 +2030,9 @@ final class AppModel: ObservableObject {
         #if DEBUG
         guard !isPreviewMode else { throw AppSettingsError.previewMode }
         #endif
+#if IMRSE_SYNTHETIC_CAPTURE_DIAGNOSTICS
+        guard !syntheticCaptureDiagnosticsLatched else { throw AppSettingsError.transformationInProgress }
+#endif
         guard !terminationRequested else { throw AppSettingsError.terminationInProgress }
         guard !isProcessing else { throw AppSettingsError.transformationInProgress }
     }
@@ -1808,9 +2123,13 @@ final class AppModel: ObservableObject {
         case .idle, .replacing, .undoing:
             break
         }
+#if IMRSE_SYNTHETIC_CAPTURE_DIAGNOSTICS
+        if self.state != state, !syntheticCaptureDiagnosticsLatched { logLifecycleChange(state) }
+#else
         if self.state != state { logLifecycleChange(state) }
+#endif
         self.state = state
-#if DEBUG
+#if DEBUG || IMRSE_SYNTHETIC_CAPTURE_DIAGNOSTICS
         if debugSyntheticCaptureSessionEnded {
             finishDebugSyntheticCaptureTeardown()
         }
@@ -1874,7 +2193,10 @@ final class AppModel: ObservableObject {
     }
 
     private func startShortcutMonitor() {
-#if DEBUG
+#if IMRSE_SYNTHETIC_CAPTURE_DIAGNOSTICS
+        guard !syntheticCaptureDiagnosticsLatched else { return }
+#endif
+#if DEBUG || IMRSE_SYNTHETIC_CAPTURE_DIAGNOSTICS
         guard !debugSyntheticCaptureSessionEnded else { return }
 #endif
         guard allowsGlobalShortcutMonitoring,
@@ -1909,7 +2231,10 @@ final class AppModel: ObservableObject {
     }
 
     private func requestShortcutMonitorRefreshIfInactive() {
-#if DEBUG
+#if IMRSE_SYNTHETIC_CAPTURE_DIAGNOSTICS
+        guard !syntheticCaptureDiagnosticsLatched else { return }
+#endif
+#if DEBUG || IMRSE_SYNTHETIC_CAPTURE_DIAGNOSTICS
         guard !debugSyntheticCaptureSessionEnded else { return }
 #endif
         guard allowsGlobalShortcutMonitoring,
@@ -1923,7 +2248,10 @@ final class AppModel: ObservableObject {
     }
 
     private func applyPendingRuntimeSettingsIfSafe() {
-#if DEBUG
+#if IMRSE_SYNTHETIC_CAPTURE_DIAGNOSTICS
+        guard !syntheticCaptureDiagnosticsLatched else { return }
+#endif
+#if DEBUG || IMRSE_SYNTHETIC_CAPTURE_DIAGNOSTICS
         guard !debugSyntheticCaptureSessionEnded else { return }
 #endif
         guard !isProcessing, !terminationRequested, !isTerminating, !isPreviewMode, !isRecordingShortcut else { return }
@@ -1943,7 +2271,7 @@ final class AppModel: ObservableObject {
         refreshPermissionStatus()
     }
 
-#if DEBUG
+#if DEBUG || IMRSE_SYNTHETIC_CAPTURE_DIAGNOSTICS
     func endDebugSyntheticCaptureSession() {
         guard usesDebugSyntheticCaptureSession, !debugSyntheticCaptureSessionEnded else { return }
         debugSyntheticCaptureSessionEnded = true
@@ -2061,7 +2389,7 @@ final class AppModel: ObservableObject {
     }
 
     private func finishTerminationIfSettled() {
-#if DEBUG
+#if DEBUG || IMRSE_SYNTHETIC_CAPTURE_DIAGNOSTICS
         guard !usesDebugSyntheticCaptureSession
                 || !debugSyntheticCaptureSessionEnded
                 || debugSyntheticCaptureTeardownCompleted

@@ -39,6 +39,27 @@ jobs:
       - run: swift test --jobs 1 -Xswiftc -warnings-as-errors
       - run: swift test --package-path pill-kit/native -Xswiftc -warnings-as-errors
       - run: python3 pill-kit/scripts/verify-assets.py
+      - name: Verify ordinary Release excludes the capture diagnostic action
+        run: swift test --configuration release --jobs 1 -Xswiftc -warnings-as-errors --filter SyntheticCapture
+      - name: Verify diagnostic Debug and Release capture-only regressions
+        shell: bash
+        run: |
+          set -euo pipefail
+          manifest_backup="$(mktemp)"
+          cp Package.swift "$manifest_backup"
+          trap 'cp "$manifest_backup" Package.swift; rm -f "$manifest_backup"' EXIT
+          python3 - <<'PY'
+          from pathlib import Path
+          path = Path("Package.swift")
+          source = path.read_text()
+          ordinary = "let syntheticCaptureDiagnosticsEnabled = false"
+          diagnostic = "let syntheticCaptureDiagnosticsEnabled = true"
+          if source.count(ordinary) != 1 or diagnostic in source:
+              raise SystemExit("Expected exactly one default-off diagnostic build definition")
+          path.write_text(source.replace(ordinary, diagnostic, 1))
+          PY
+          swift test --jobs 1 -Xswiftc -warnings-as-errors --filter SyntheticCapture
+          swift test --configuration release --jobs 1 -Xswiftc -warnings-as-errors --filter SyntheticCapture
   package:
     runs-on: macos-26
     env:
