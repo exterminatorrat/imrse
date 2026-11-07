@@ -835,14 +835,16 @@ final class AppModel: ObservableObject {
             object: nil,
             queue: .main
         ) { [weak self] notification in
+            guard let application = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication
+            else { return }
+            let processIdentifier = application.processIdentifier
+            let processLaunchDate = application.launchDate
+            let bundleIdentifier = application.bundleIdentifier
             MainActor.assumeIsolated {
-                guard let self,
-                      let application = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication
-                else { return }
-                self.handleSyntheticCaptureDiagnosticsActivation(
-                    processIdentifier: application.processIdentifier,
-                    processLaunchDate: application.launchDate,
-                    bundleIdentifier: application.bundleIdentifier
+                self?.handleSyntheticCaptureDiagnosticsActivation(
+                    processIdentifier: processIdentifier,
+                    processLaunchDate: processLaunchDate,
+                    bundleIdentifier: bundleIdentifier
                 )
             }
         }
