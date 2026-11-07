@@ -116,7 +116,7 @@ final class SyntheticCaptureSessionTests: XCTestCase {
 
     func testFocusedCaptureRejectsDocumentBeforeReadingField() throws {
         var focusedFieldReads = 0
-        let result = try SyntheticCaptureMetadataValidation.focusedCaptureIsValid(
+        let result: (root: Int, field: Int)? = try SyntheticCaptureMetadataValidation.focusedCaptureIsValid(
             expectedDocumentURL: documentURL,
             application: 1,
             expectedProcessIdentifier: processIdentifier,
@@ -134,7 +134,7 @@ final class SyntheticCaptureSessionTests: XCTestCase {
             readCurrentFocusedField: { 3 },
             readFieldWindow: { _ in 2 },
             readWindowProcessIdentifier: { _ in processIdentifier },
-            sameElement: ==
+            sameElement: { $0 == $1 }
         )
 
         XCTAssertNil(result)
@@ -144,7 +144,7 @@ final class SyntheticCaptureSessionTests: XCTestCase {
     func testFocusedCaptureRevalidatesRootAfterFieldMetadata() throws {
         var reads: [String] = []
         var focusedRootReadCount = 0
-        let result = try SyntheticCaptureMetadataValidation.focusedCaptureIsValid(
+        let result: (root: Int, field: Int)? = try SyntheticCaptureMetadataValidation.focusedCaptureIsValid(
             expectedDocumentURL: documentURL,
             application: 1,
             expectedProcessIdentifier: processIdentifier,
@@ -175,7 +175,7 @@ final class SyntheticCaptureSessionTests: XCTestCase {
             readCurrentFocusedField: { 3 },
             readFieldWindow: { _ in 2 },
             readWindowProcessIdentifier: { _ in processIdentifier },
-            sameElement: ==
+            sameElement: { $0 == $1 }
         )
 
         XCTAssertNil(result)
