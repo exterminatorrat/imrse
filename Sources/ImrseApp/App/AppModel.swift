@@ -910,13 +910,13 @@ final class AppModel: ObservableObject {
 #endif
 
     private func canHandleShortcutCallback(activationEpoch: UInt64) -> Bool {
-        activationEpoch == shortcutMonitorActivationEpoch
+#if IMRSE_SYNTHETIC_CAPTURE_DIAGNOSTICS
+        guard !syntheticCaptureDiagnosticsLatched else { return false }
+#endif
+        return activationEpoch == shortcutMonitorActivationEpoch
             && !isRecordingShortcut
             && !terminationRequested
             && !isPreviewMode
-#if IMRSE_SYNTHETIC_CAPTURE_DIAGNOSTICS
-            && !syntheticCaptureDiagnosticsLatched
-#endif
     }
 
     func dismiss() {
