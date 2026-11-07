@@ -3,6 +3,7 @@ import AppKit
 import ApplicationServices
 import Carbon.HIToolbox
 import CoreGraphics
+import Darwin
 import Foundation
 import ImrseCore
 
@@ -93,8 +94,9 @@ public final class MacSelectionAccess: SelectionAccess {
     private var captureDeadline: ContinuousClock.Instant?
     private var undoTarget: UndoTarget?
     private let clipboardRecovery = ClipboardPasteRecovery<ClipboardPasteboardTransaction, ClipboardDestination>()
-#if DEBUG
+#if DEBUG || IMRSE_SYNTHETIC_CAPTURE_DIAGNOSTICS
     private var syntheticCaptureSession: SyntheticCaptureSession?
+    private var syntheticCaptureAdmissionDeadline: ContinuousClock.Instant?
 #endif
 
     public static var accessibilityPermissionGranted: Bool {
@@ -111,12 +113,13 @@ public final class MacSelectionAccess: SelectionAccess {
     ) {
         self.clipboardFallbackEnabled = clipboardFallbackEnabled
         self.prepareForClipboardPaste = prepareForClipboardPaste
-#if DEBUG
+#if DEBUG || IMRSE_SYNTHETIC_CAPTURE_DIAGNOSTICS
         self.syntheticCaptureSession = nil
+        self.syntheticCaptureAdmissionDeadline = nil
 #endif
     }
 
-#if DEBUG
+#if DEBUG || IMRSE_SYNTHETIC_CAPTURE_DIAGNOSTICS
     @_spi(SyntheticCaptureDiagnostics)
     public convenience init(
         syntheticCaptureSession: SyntheticCaptureSession,
@@ -139,11 +142,173 @@ public final class MacSelectionAccess: SelectionAccess {
     }
 
     @_spi(SyntheticCaptureDiagnostics)
+    public var syntheticCaptureExpectedProcessIdentity: SyntheticCaptureProcessIdentity? {
+        guard let identity = syntheticCaptureSession?.expectedCaptureProcessIdentity,
+              identity.processIdentifier > 0,
+              let launchDate = identity.processLaunchDate,
+              launchDate.timeIntervalSince1970.isFinite,
+              launchDate.timeIntervalSince1970 > 0,
+              identity.bundleIdentifier == SyntheticCaptureFixtureContract.bundleIdentifier
+        else { return nil }
+        return identity
+    }
+
+    @_spi(SyntheticCaptureDiagnostics)
     public func endSyntheticCaptureSession() {
         guard let syntheticCaptureSession else { return }
         syntheticCaptureSession.cancel()
         clearCapture()
         undoTarget = nil
+        syntheticCaptureAdmissionDeadline = nil
+        captureDeadline = nil
+    }
+#endif
+
+#if IMRSE_SYNTHETIC_CAPTURE_DIAGNOSTICS
+    @_spi(SyntheticCaptureDiagnostics)
+    public static func canonicalSyntheticCaptureAccess(
+        deadline: ContinuousClock.Instant
+    ) throws -> MacSelectionAccess {
+        let clock = ContinuousClock()
+        let documentURL = try validatedSyntheticFixtureURL()
+        let applications = NSRunningApplication.runningApplications(
+            withBundleIdentifier: SyntheticCaptureFixtureContract.bundleIdentifier
+        )
+        guard applications.count == 1,
+              let application = applications.first,
+              !application.isTerminated,
+              let launchDate = application.launchDate,
+              application.bundleIdentifier == SyntheticCaptureFixtureContract.bundleIdentifier,
+              clock.now < deadline,
+              clock.now.duration(to: deadline) > .milliseconds(500),
+              clock.now.duration(to: deadline) <= SyntheticCaptureSession.maximumLifetime,
+              SyntheticCaptureMetadataValidation.processMatches(
+                expectedProcessIdentifier: application.processIdentifier,
+                expectedLaunchDate: launchDate,
+                expectedBundleIdentifier: SyntheticCaptureFixtureContract.bundleIdentifier,
+                actualProcessIdentifier: application.processIdentifier,
+                actualLaunchDate: launchDate,
+                actualBundleIdentifier: application.bundleIdentifier
+              )
+        else {
+            throw ImrseError.targetLost
+        }
+        let admissionDeadline = deadline.advanced(by: .milliseconds(-500))
+        let qualifier = MacSelectionAccess()
+        qualifier.captureDeadline = admissionDeadline
+        let axApplication = AXUIElementCreateApplication(application.processIdentifier)
+        try qualifier.configureAXMessaging(axApplication)
+        guard let target = try qualifier.syntheticFocusedCapture(
+            documentURL: documentURL,
+            application: axApplication,
+            processID: application.processIdentifier
+        ) else { throw ImrseError.targetLost }
+
+        let currentApplications = NSRunningApplication.runningApplications(
+            withBundleIdentifier: SyntheticCaptureFixtureContract.bundleIdentifier
+        )
+        guard currentApplications.count == 1,
+              let currentApplication = currentApplications.first,
+              !currentApplication.isTerminated,
+              clock.now < admissionDeadline,
+              SyntheticCaptureMetadataValidation.processMatches(
+                expectedProcessIdentifier: application.processIdentifier,
+                expectedLaunchDate: launchDate,
+                expectedBundleIdentifier: SyntheticCaptureFixtureContract.bundleIdentifier,
+                actualProcessIdentifier: currentApplication.processIdentifier,
+                actualLaunchDate: currentApplication.launchDate,
+                actualBundleIdentifier: currentApplication.bundleIdentifier
+              )
+        else { throw ImrseError.targetLost }
+
+        let identity = SyntheticCaptureIdentity(
+            processIdentifier: application.processIdentifier,
+            processLaunchDate: launchDate,
+            bundleIdentifier: SyntheticCaptureFixtureContract.bundleIdentifier,
+            documentURL: documentURL,
+            documentRoot: target.root,
+            focusedField: target.field
+        )
+        let session = SyntheticCaptureSession(
+            identity: identity,
+            deadline: admissionDeadline,
+            now: { clock.now }
+        )
+        guard session.state == .armed else { throw ImrseError.targetLost }
+        let access = MacSelectionAccess(syntheticCaptureSession: session)
+        access.syntheticCaptureAdmissionDeadline = admissionDeadline
+        return access
+    }
+
+    private static func validatedSyntheticFixtureURL() throws -> URL {
+        let home = FileManager.default.homeDirectoryForCurrentUser.standardizedFileURL
+        let flags = O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW
+        var directoryDescriptor = Darwin.open("/", flags)
+        guard directoryDescriptor >= 0 else { throw ImrseError.targetLost }
+        defer { Darwin.close(directoryDescriptor) }
+
+        let homeComponents = Array(home.pathComponents.dropFirst())
+        guard !homeComponents.isEmpty else { throw ImrseError.targetLost }
+        for (index, component) in homeComponents.enumerated() {
+            let nextDescriptor = component.withCString { Darwin.openat(directoryDescriptor, $0, flags) }
+            guard nextDescriptor >= 0 else { throw ImrseError.targetLost }
+            var metadata = stat()
+            guard Darwin.fstat(nextDescriptor, &metadata) == 0,
+                  (metadata.st_mode & mode_t(S_IFMT)) == mode_t(S_IFDIR),
+                  index != homeComponents.count - 1 || metadata.st_uid == geteuid()
+            else {
+                Darwin.close(nextDescriptor)
+                throw ImrseError.targetLost
+            }
+            Darwin.close(directoryDescriptor)
+            directoryDescriptor = nextDescriptor
+        }
+
+        for component in [".capy", "work", "imrs16-ax-only-ui-preparation-20261107"] {
+            let nextDescriptor = component.withCString { Darwin.openat(directoryDescriptor, $0, flags) }
+            guard nextDescriptor >= 0 else { throw ImrseError.targetLost }
+            var metadata = stat()
+            guard Darwin.fstat(nextDescriptor, &metadata) == 0,
+                  Self.isOwnedDirectory(metadata)
+            else {
+                Darwin.close(nextDescriptor)
+                throw ImrseError.targetLost
+            }
+            Darwin.close(directoryDescriptor)
+            directoryDescriptor = nextDescriptor
+        }
+
+        let fileDescriptor = "Synthetic-native-replacement.txt".withCString {
+            Darwin.openat(directoryDescriptor, $0, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK)
+        }
+        guard fileDescriptor >= 0 else { throw ImrseError.targetLost }
+        defer { Darwin.close(fileDescriptor) }
+
+        var fileMetadata = stat()
+        guard Darwin.fstat(fileDescriptor, &fileMetadata) == 0,
+              (fileMetadata.st_mode & mode_t(S_IFMT)) == mode_t(S_IFREG),
+              fileMetadata.st_uid == geteuid(),
+              fileMetadata.st_nlink == 1,
+              fileMetadata.st_size == off_t(SyntheticCaptureFixtureContract.expectedContents.count)
+        else {
+            throw ImrseError.targetLost
+        }
+
+        var contents = [UInt8](repeating: 0, count: SyntheticCaptureFixtureContract.expectedContents.count + 1)
+        let count = contents.withUnsafeMutableBytes { buffer in
+            Darwin.read(fileDescriptor, buffer.baseAddress, buffer.count)
+        }
+        guard count == SyntheticCaptureFixtureContract.expectedContents.count,
+              SyntheticCaptureFixtureContract.matches(contents: Data(contents.prefix(count)))
+        else {
+            throw ImrseError.targetLost
+        }
+        return home.appendingPathComponent(SyntheticCaptureFixtureContract.relativePath).standardizedFileURL
+    }
+
+    private static func isOwnedDirectory(_ metadata: stat) -> Bool {
+        (metadata.st_mode & mode_t(S_IFMT)) == mode_t(S_IFDIR)
+            && metadata.st_uid == geteuid()
     }
 #endif
 
@@ -152,8 +317,9 @@ public final class MacSelectionAccess: SelectionAccess {
     }
 
     public func capture(intent: SelectionEditIntent) throws -> SelectionSnapshot {
-#if DEBUG
+#if DEBUG || IMRSE_SYNTHETIC_CAPTURE_DIAGNOSTICS
         let syntheticSession = syntheticCaptureSession
+        let syntheticCaptureSessionActive = syntheticSession != nil
         let syntheticIdentity: SyntheticCaptureIdentity?
         if let syntheticSession {
             do {
@@ -166,12 +332,19 @@ public final class MacSelectionAccess: SelectionAccess {
             clearCapture()
         }
 #else
+        let syntheticCaptureSessionActive = false
         clearCapture()
 #endif
         lastFailureReason = nil
-        captureDeadline = clock.now.advanced(by: Self.captureBudget)
+        let localCaptureDeadline = clock.now.advanced(by: Self.captureBudget)
+#if DEBUG || IMRSE_SYNTHETIC_CAPTURE_DIAGNOSTICS
+        let admissionDeadline = syntheticCaptureAdmissionDeadline
+#else
+        let admissionDeadline: ContinuousClock.Instant? = nil
+#endif
+        captureDeadline = min(localCaptureDeadline, admissionDeadline ?? localCaptureDeadline)
         defer { captureDeadline = nil }
-#if DEBUG
+#if DEBUG || IMRSE_SYNTHETIC_CAPTURE_DIAGNOSTICS
         var syntheticCaptureCompleted = false
         defer {
             if let syntheticSession, !syntheticCaptureCompleted {
@@ -189,27 +362,27 @@ public final class MacSelectionAccess: SelectionAccess {
         guard processID != ProcessInfo.processInfo.processIdentifier else {
             throw failure(.ownApplicationFocused, .noSelection)
         }
-#if DEBUG
+#if DEBUG || IMRSE_SYNTHETIC_CAPTURE_DIAGNOSTICS
         if let syntheticIdentity {
             guard syntheticSession?.isCaptureActive() == true,
-                  SyntheticCaptureMetadataValidation.processMatches(
-                    expectedProcessIdentifier: syntheticIdentity.processIdentifier,
-                    expectedLaunchDate: syntheticIdentity.processLaunchDate,
-                    expectedBundleIdentifier: syntheticIdentity.bundleIdentifier,
-                    actualProcessIdentifier: processID,
-                    actualLaunchDate: runningApplication.launchDate,
-                    actualBundleIdentifier: runningApplication.bundleIdentifier
-                  )
+              SyntheticCaptureMetadataValidation.processMatches(
+                expectedProcessIdentifier: syntheticIdentity.processIdentifier,
+                expectedLaunchDate: syntheticIdentity.processLaunchDate,
+                expectedBundleIdentifier: syntheticIdentity.bundleIdentifier,
+                actualProcessIdentifier: processID,
+                actualLaunchDate: runningApplication.launchDate,
+                actualBundleIdentifier: runningApplication.bundleIdentifier
+              )
             else { throw failure(.foregroundApplicationChanged, .staleSelection) }
         }
-        if syntheticSession != nil { clearCapture() }
+        if syntheticIdentity != nil { clearCapture() }
 #endif
         let application = AXUIElementCreateApplication(processID)
         try configureAXMessaging(application)
-#if DEBUG
+#if DEBUG || IMRSE_SYNTHETIC_CAPTURE_DIAGNOSTICS
         if let syntheticIdentity {
             guard syntheticSession?.isCaptureActive() == true,
-                  try syntheticDocumentRootIsValid(
+              try syntheticDocumentRootIsValid(
                     syntheticIdentity,
                     application: application,
                     processID: processID
@@ -219,15 +392,19 @@ public final class MacSelectionAccess: SelectionAccess {
 #endif
         guard let element = try AccessibilityFocusAcquisition.acquire(
             readApplicationRole: {
+                guard !syntheticCaptureSessionActive else { return }
                 _ = try self.stringAttribute(application, kAXRoleAttribute, failure: .noSelection)
             },
-            requestManualAccessibility: { try self.requestManualAccessibility(on: application) },
-            hasTimeForRetry: { self.hasCaptureTimeForFocusRetry() },
+            requestManualAccessibility: {
+                guard !syntheticCaptureSessionActive else { return }
+                try self.requestManualAccessibility(on: application)
+            },
+            hasTimeForRetry: { !syntheticCaptureSessionActive && self.hasCaptureTimeForFocusRetry() },
             readFocusedElement: {
                 try self.elementAttribute(application, kAXFocusedUIElementAttribute, failure: .noSelection)
             },
             validate: { element in
-#if DEBUG
+#if DEBUG || IMRSE_SYNTHETIC_CAPTURE_DIAGNOSTICS
                 if let syntheticIdentity {
                     guard syntheticSession?.isCaptureActive() == true,
                           try self.syntheticDocumentRootIsValid(
@@ -249,6 +426,7 @@ public final class MacSelectionAccess: SelectionAccess {
                 }
             },
             waitBeforeRetry: {
+                guard !syntheticCaptureSessionActive else { return }
                 Thread.sleep(forTimeInterval: Double(Self.focusRetryDelayMilliseconds) / 1_000.0)
             }
         ) else {
@@ -259,15 +437,15 @@ public final class MacSelectionAccess: SelectionAccess {
         }
         let canReadValue = supportsPlainTextValueReplacement(element, role: role)
         let inserting = intent == .insertAtCaret
-#if DEBUG
+#if DEBUG || IMRSE_SYNTHETIC_CAPTURE_DIAGNOSTICS
         if let syntheticIdentity {
             guard syntheticSession?.isCaptureActive() == true,
-                  try syntheticDocumentRootIsValid(
+              try syntheticDocumentRootIsValid(
                     syntheticIdentity,
                     application: application,
                     processID: processID
                   ),
-                  try syntheticFocusedFieldIsValid(
+              try syntheticFocusedFieldIsValid(
                     syntheticIdentity,
                     acquiredField: element,
                     application: application,
@@ -281,6 +459,16 @@ public final class MacSelectionAccess: SelectionAccess {
             throw failure(reason, .noSelection)
         }
         guard let range = selectedRange else { throw failure(.selectedRangeUnavailable, .noSelection) }
+#if DEBUG || IMRSE_SYNTHETIC_CAPTURE_DIAGNOSTICS
+        if let syntheticIdentity {
+            guard try syntheticCaptureAnchorsAreValid(
+                syntheticIdentity,
+                acquiredField: element,
+                application: application,
+                processID: processID
+            ) else { throw failure(.focusedElementChanged, .staleSelection) }
+        }
+#endif
         let selected: String?
         if inserting {
             selected = try stringAttribute(element, kAXSelectedTextAttribute, failure: .insertionUnavailable)
@@ -291,6 +479,16 @@ public final class MacSelectionAccess: SelectionAccess {
             throw failure(reason, .noSelection)
         }
         guard let text = selected else { throw failure(.selectedTextUnavailable, .noSelection) }
+#if DEBUG || IMRSE_SYNTHETIC_CAPTURE_DIAGNOSTICS
+        if let syntheticIdentity {
+            guard try syntheticCaptureAnchorsAreValid(
+                syntheticIdentity,
+                acquiredField: element,
+                application: application,
+                processID: processID
+            ) else { throw failure(.focusedElementChanged, .staleSelection) }
+        }
+#endif
         let insertionProof: CaretInsertionProof?
         let insertionWindow: AXUIElement?
         if inserting {
@@ -304,6 +502,16 @@ public final class MacSelectionAccess: SelectionAccess {
                     .insertionUnavailable
                 )
             }
+#if DEBUG || IMRSE_SYNTHETIC_CAPTURE_DIAGNOSTICS
+            if let syntheticIdentity {
+                guard try syntheticCaptureAnchorsAreValid(
+                    syntheticIdentity,
+                    acquiredField: element,
+                    application: application,
+                    processID: processID
+                ) else { throw failure(.focusedElementChanged, .staleSelection) }
+            }
+#endif
             guard let proof = CaretInsertionProof(
                 value: try wholeValue(element, failure: .insertionUnavailable),
                 range: range,
@@ -360,7 +568,7 @@ public final class MacSelectionAccess: SelectionAccess {
             invalidateCapture(snapshot.id)
             throw error
         }
-#if DEBUG
+#if DEBUG || IMRSE_SYNTHETIC_CAPTURE_DIAGNOSTICS
         if let syntheticSession {
             guard syntheticSession.finishCapture(succeeded: true) else {
                 invalidateCapture(snapshot.id)
@@ -1746,15 +1954,29 @@ public final class MacSelectionAccess: SelectionAccess {
         return AXUIElementGetPid(element, &processID) == .success && Int32(processID) == expected
     }
 
-#if DEBUG
+#if DEBUG || IMRSE_SYNTHETIC_CAPTURE_DIAGNOSTICS
     private func syntheticDocumentRootIsValid(
         _ identity: SyntheticCaptureIdentity,
         application: AXUIElement,
         processID: Int32
     ) throws -> Bool {
+        try syntheticDocumentRootIsValid(
+            documentRoot: identity.documentRoot,
+            documentURL: identity.documentURL,
+            application: application,
+            processID: processID
+        )
+    }
+
+    private func syntheticDocumentRootIsValid(
+        documentRoot: AXUIElement,
+        documentURL: URL,
+        application: AXUIElement,
+        processID: Int32
+    ) throws -> Bool {
         try SyntheticCaptureMetadataValidation.documentRootIsValid(
-            expectedRoot: identity.documentRoot,
-            expectedDocumentURL: identity.documentURL,
+            expectedRoot: documentRoot,
+            expectedDocumentURL: documentURL,
             application: application,
             expectedProcessIdentifier: processID,
             readFocusedRoot: {
@@ -1766,27 +1988,77 @@ public final class MacSelectionAccess: SelectionAccess {
             },
             readRootParent: {
                 try self.elementAttribute(
-                    identity.documentRoot,
+                    documentRoot,
                     kAXParentAttribute,
                     failure: .staleSelection
                 )
             },
             readRootRole: {
                 try self.stringAttribute(
-                    identity.documentRoot,
+                    documentRoot,
                     kAXRoleAttribute,
                     failure: .staleSelection
                 )
             },
             readApplicationProcessIdentifier: { self.processIdentifier(of: application) },
-            readRootProcessIdentifier: { self.processIdentifier(of: identity.documentRoot) },
+            readRootProcessIdentifier: { self.processIdentifier(of: documentRoot) },
             readDocumentURL: {
                 try self.urlAttribute(
-                    identity.documentRoot,
+                    documentRoot,
                     kAXDocumentAttribute as String,
                     failure: .staleSelection
                 )
             },
+            sameElement: { self.sameElement($0, $1) }
+        )
+    }
+
+    private func syntheticFocusedCapture(
+        documentURL: URL,
+        application: AXUIElement,
+        processID: Int32
+    ) throws -> (root: AXUIElement, field: AXUIElement)? {
+        try SyntheticCaptureMetadataValidation.focusedCaptureIsValid(
+            expectedDocumentURL: documentURL,
+            application: application,
+            expectedProcessIdentifier: processID,
+            readFocusedRoot: {
+                try self.elementAttribute(
+                    application,
+                    kAXFocusedWindowAttribute,
+                    failure: .targetLost
+                )
+            },
+            readRootParent: { root in
+                try self.elementAttribute(root, kAXParentAttribute, failure: .targetLost)
+            },
+            readRootRole: { root in
+                try self.stringAttribute(root, kAXRoleAttribute, failure: .targetLost)
+            },
+            readApplicationProcessIdentifier: { self.processIdentifier(of: application) },
+            readRootProcessIdentifier: { self.processIdentifier(of: $0) },
+            readDocumentURL: { root in
+                try self.urlAttribute(root, kAXDocumentAttribute as String, failure: .targetLost)
+            },
+            readFocusedField: {
+                try self.elementAttribute(
+                    application,
+                    kAXFocusedUIElementAttribute,
+                    failure: .targetLost
+                )
+            },
+            readFieldProcessIdentifier: { self.processIdentifier(of: $0) },
+            readCurrentFocusedField: {
+                try self.elementAttribute(
+                    application,
+                    kAXFocusedUIElementAttribute,
+                    failure: .targetLost
+                )
+            },
+            readFieldWindow: { field in
+                try self.elementAttribute(field, kAXWindowAttribute, failure: .targetLost)
+            },
+            readWindowProcessIdentifier: { self.processIdentifier(of: $0) },
             sameElement: { self.sameElement($0, $1) }
         )
     }
@@ -1820,6 +2092,28 @@ public final class MacSelectionAccess: SelectionAccess {
             readWindowProcessIdentifier: { self.processIdentifier(of: $0) },
             sameElement: { self.sameElement($0, $1) }
         )
+    }
+
+    private func syntheticCaptureAnchorsAreValid(
+        _ identity: SyntheticCaptureIdentity,
+        acquiredField: AXUIElement,
+        application: AXUIElement,
+        processID: Int32
+    ) throws -> Bool {
+        guard syntheticCaptureSession?.isCaptureActive() == true,
+              try syntheticDocumentRootIsValid(
+                identity,
+                application: application,
+                processID: processID
+              ),
+              try syntheticFocusedFieldIsValid(
+                identity,
+                acquiredField: acquiredField,
+                application: application,
+                processID: processID
+              )
+        else { return false }
+        return true
     }
 
     private func processIdentifier(of element: AXUIElement) -> Int32? {

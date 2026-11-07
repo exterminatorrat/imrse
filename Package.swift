@@ -1,6 +1,11 @@
 // swift-tools-version: 6.0
 import PackageDescription
 
+let syntheticCaptureDiagnosticsEnabled = false
+let syntheticCaptureDiagnosticSettings: [SwiftSetting] = syntheticCaptureDiagnosticsEnabled
+    ? [.define("IMRSE_SYNTHETIC_CAPTURE_DIAGNOSTICS")]
+    : []
+
 var products: [Product] = [
     .library(name: "ImrseCore", targets: ["ImrseCore"]),
     .library(name: "ImrseServices", targets: ["ImrseServices"])
@@ -33,10 +38,10 @@ targets.append(.testTarget(name: "ImrseLocalTests", dependencies: ["ImrseLocal"]
     targets.append(.target(name: "ImrseLocal", dependencies: ["ImrseCore"], resources: [.copy("Resources/Qwen3-APACHE-LICENSE.txt")]))
 #endif
 products.append(.executable(name: "imrse", targets: ["ImrseApp"]))
-targets.append(.target(name: "ImrseMac", dependencies: ["ImrseCore"]))
-targets.append(.executableTarget(name: "ImrseApp", dependencies: ["ImrseCore", "ImrseServices", "ImrseMac", "ImrseLocal", .product(name: "ImrsePillUI", package: "native")], resources: [.copy("Resources/Brand")]))
-targets.append(.testTarget(name: "ImrseMacTests", dependencies: ["ImrseMac", "ImrseCore"]))
-targets.append(.testTarget(name: "ImrseAppTests", dependencies: ["ImrseApp", "ImrseCore", "ImrseServices", "ImrseMac", "ImrseLocal", .product(name: "ImrsePillUI", package: "native")]))
+targets.append(.target(name: "ImrseMac", dependencies: ["ImrseCore"], swiftSettings: syntheticCaptureDiagnosticSettings))
+targets.append(.executableTarget(name: "ImrseApp", dependencies: ["ImrseCore", "ImrseServices", "ImrseMac", "ImrseLocal", .product(name: "ImrsePillUI", package: "native")], resources: [.copy("Resources/Brand")], swiftSettings: syntheticCaptureDiagnosticSettings))
+targets.append(.testTarget(name: "ImrseMacTests", dependencies: ["ImrseMac", "ImrseCore"], swiftSettings: syntheticCaptureDiagnosticSettings))
+targets.append(.testTarget(name: "ImrseAppTests", dependencies: ["ImrseApp", "ImrseCore", "ImrseServices", "ImrseMac", "ImrseLocal", .product(name: "ImrsePillUI", package: "native")], swiftSettings: syntheticCaptureDiagnosticSettings))
 #endif
 
 let package = Package(name: "imrse", platforms: [.macOS(.v14)], products: products, dependencies: dependencies, targets: targets)

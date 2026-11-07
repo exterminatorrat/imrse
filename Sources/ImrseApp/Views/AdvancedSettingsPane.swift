@@ -280,7 +280,7 @@ private struct DiagnosticsSheet: View {
 
                 Spacer()
 
-                Button(action: { dismiss() }) {
+                Button(action: dismissDiagnostics) {
                     Image(systemName: "xmark")
                         .font(.system(size: 10, weight: .semibold))
                         .frame(width: 26, height: 26)
@@ -296,12 +296,24 @@ private struct DiagnosticsSheet: View {
             )
 
             SettingsScrollView {
-                Text(model.isPreviewMode ? "Diagnostics are not queried in preview." : model.redactedDiagnosticsReport)
-                    .font(.system(.footnote, design: .monospaced))
-                    .textSelection(.enabled)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(12)
-                    .background(ImrseControlBackground())
+                VStack(alignment: .leading, spacing: 12) {
+#if IMRSE_SYNTHETIC_CAPTURE_DIAGNOSTICS
+                    ImrseSecondaryButton(title: "Check synthetic insertion capture (no generation)") {
+                        model.beginSyntheticCaptureDiagnostics()
+                    }
+                    .disabled(model.isPreviewMode || model.syntheticCaptureDiagnosticsIsLatched)
+
+                    if let message = model.syntheticCaptureDiagnosticsStatus.message {
+                        SettingsHint(title: "Capture check", detail: message, symbol: "scope")
+                    }
+#endif
+                    Text(model.isPreviewMode ? "Diagnostics are not queried in preview." : model.redactedDiagnosticsReport)
+                        .font(.system(.footnote, design: .monospaced))
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(12)
+                        .background(ImrseControlBackground())
+                }
             }
 
             if let message = model.diagnosticsCopiedMessage {
@@ -314,11 +326,18 @@ private struct DiagnosticsSheet: View {
                     _ = model.copyDiagnostics()
                 }
                 .disabled(model.isPreviewMode)
-                ImrsePrimaryButton(title: "Done") { dismiss() }
+                ImrsePrimaryButton(title: "Done") { dismissDiagnostics() }
             }
         }
         .padding(24)
         .frame(width: 500, height: 360)
+    }
+
+    private func dismissDiagnostics() {
+#if IMRSE_SYNTHETIC_CAPTURE_DIAGNOSTICS
+        model.cancelPendingSyntheticCaptureDiagnostics()
+#endif
+        dismiss()
     }
 }
 #endif
