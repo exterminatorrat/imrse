@@ -5,7 +5,11 @@ import Dispatch
 import Foundation
 import ImrseCore
 import ImrseLocal
+#if DEBUG
+@_spi(SyntheticCaptureDiagnostics) import ImrseMac
+#else
 import ImrseMac
+#endif
 import ImrsePillUI
 import ImrseServices
 import OSLog
@@ -150,6 +154,10 @@ final class AppModel: ObservableObject {
     var onHidePillForFocusHandoff: (@MainActor () -> Void)?
     #if DEBUG
     private(set) var previewState: AppPreviewState?
+    private var usesDebugSyntheticCaptureSession = false
+    private var debugSyntheticCaptureSessionEnded = false
+    private var debugSyntheticCaptureTeardownInProgress = false
+    private var debugSyntheticCaptureTeardownCompleted = false
     #endif
 
     private var undoTask: Task<Void, Never>?
@@ -196,7 +204,12 @@ final class AppModel: ObservableObject {
     private let lifecycleLogger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "imrse", category: "lifecycle")
     private var lifecycleStartedAt: Date?
 
-    var canUndo: Bool { engine.canUndo && undoTask == nil }
+    var canUndo: Bool {
+#if DEBUG
+        if usesDebugSyntheticCaptureSession && debugSyntheticCaptureSessionEnded { return false }
+#endif
+        return engine.canUndo && undoTask == nil
+    }
 
     var canOpenSettings: Bool { !isTerminating && undoTask == nil && state != .replacing && state != .undoing }
 
@@ -304,6 +317,7 @@ final class AppModel: ObservableObject {
 
     convenience init(
         testEngine: TransformationEngine,
+        selectionAccess: MacSelectionAccess? = nil,
         configuration: AppConfiguration = AppConfiguration(),
         presets: [Preset] = [],
         configurationStore: ConfigurationStore? = nil,
@@ -324,6 +338,7 @@ final class AppModel: ObservableObject {
             configurationOverride: configuration,
             presetsOverride: presets,
             engineOverride: testEngine,
+            selectionAccessOverride: selectionAccess,
             configurationStoreOverride: configurationStore,
             shortcutMonitorOverride: shortcutMonitoring,
             accountClientOverride: accountClient,
@@ -334,6 +349,33 @@ final class AppModel: ObservableObject {
             officialAccountSignInCoordinatorOverride: officialAccountSignInCoordinator,
             providerModelCatalogOverride: providerModelCatalog,
             permissionStatusReaderOverride: permissionStatusReader,
+            permissionStatusRefreshClock: permissionStatusRefreshClock
+        )
+    }
+
+    convenience init?(
+        debugSyntheticCaptureAccess: MacSelectionAccess,
+        textProvider: any TextProvider,
+        configuration: AppConfiguration = AppConfiguration(),
+        presets: [Preset] = [],
+        configurationStore: ConfigurationStore? = nil,
+        shortcutMonitoring: (any ShortcutMonitoring)? = nil,
+        permissionStatusReader: PermissionStatusReader? = nil,
+        permissionStatusRefreshClock: PermissionStatusRefreshClock? = nil
+    ) {
+        guard debugSyntheticCaptureAccess.hasSyntheticCaptureSession else { return nil }
+        let engine = TransformationEngine(
+            selectionAccess: debugSyntheticCaptureAccess,
+            textProvider: textProvider
+        )
+        self.init(
+            testEngine: engine,
+            selectionAccess: debugSyntheticCaptureAccess,
+            configuration: configuration,
+            presets: presets,
+            configurationStore: configurationStore,
+            shortcutMonitoring: shortcutMonitoring,
+            permissionStatusReader: permissionStatusReader,
             permissionStatusRefreshClock: permissionStatusRefreshClock
         )
     }
@@ -349,6 +391,7 @@ final class AppModel: ObservableObject {
         configurationOverride: AppConfiguration? = nil,
         presetsOverride: [Preset]? = nil,
         engineOverride: TransformationEngine? = nil,
+        selectionAccessOverride: MacSelectionAccess? = nil,
         configurationStoreOverride: ConfigurationStore? = nil,
         shortcutMonitorOverride: (any ShortcutMonitoring)? = nil,
         accountClientOverride: OpenAIAccountClient? = nil,
@@ -389,7 +432,7 @@ final class AppModel: ObservableObject {
         } else {
             managedLocalModelStore = nil
         }
-        let selectionAccess = MacSelectionAccess(
+        let selectionAccess = selectionAccessOverride ?? MacSelectionAccess(
             clipboardFallbackEnabled: configuration.clipboardFallbackEnabled,
             prepareForClipboardPaste: { [weak pillModel] in pillModel?.prepareForClipboardFocusHandoff() }
         )
@@ -462,6 +505,9 @@ final class AppModel: ObservableObject {
         self.configurationStore = store
         self.credentialStore = credentialStore
         self.selectionAccess = selectionAccess
+#if DEBUG
+        self.usesDebugSyntheticCaptureSession = selectionAccess.hasSyntheticCaptureSession
+#endif
         self.engine = engine
         self.pillModel = pillModel
         self.pillBridge = pillBridge
@@ -666,7 +712,15 @@ final class AppModel: ObservableObject {
         if managedLocalModelDownloadID != nil { managedLocalModelOperationTask?.cancel() }
         shortcutRecordingSessionID = nil
         isRecordingShortcut = false
+#if DEBUG
+        if usesDebugSyntheticCaptureSession {
+            endDebugSyntheticCaptureSession()
+        } else {
+            stopShortcutMonitor()
+        }
+#else
         stopShortcutMonitor()
+#endif
         pillBridge.dismiss()
         if undoTask != nil {
             terminationReplies.append(reply)
@@ -1756,6 +1810,11 @@ final class AppModel: ObservableObject {
         }
         if self.state != state { logLifecycleChange(state) }
         self.state = state
+#if DEBUG
+        if debugSyntheticCaptureSessionEnded {
+            finishDebugSyntheticCaptureTeardown()
+        }
+#endif
         if terminationRequested {
             finishTerminationIfSettled()
             return
@@ -1815,6 +1874,9 @@ final class AppModel: ObservableObject {
     }
 
     private func startShortcutMonitor() {
+#if DEBUG
+        guard !debugSyntheticCaptureSessionEnded else { return }
+#endif
         guard allowsGlobalShortcutMonitoring,
               !isRecordingShortcut,
               !terminationRequested,
@@ -1847,6 +1909,9 @@ final class AppModel: ObservableObject {
     }
 
     private func requestShortcutMonitorRefreshIfInactive() {
+#if DEBUG
+        guard !debugSyntheticCaptureSessionEnded else { return }
+#endif
         guard allowsGlobalShortcutMonitoring,
               !isPreviewMode,
               !terminationRequested,
@@ -1858,6 +1923,9 @@ final class AppModel: ObservableObject {
     }
 
     private func applyPendingRuntimeSettingsIfSafe() {
+#if DEBUG
+        guard !debugSyntheticCaptureSessionEnded else { return }
+#endif
         guard !isProcessing, !terminationRequested, !isTerminating, !isPreviewMode, !isRecordingShortcut else { return }
         if let pendingClipboardFallback {
             selectionAccess.clipboardFallbackEnabled = pendingClipboardFallback
@@ -1874,6 +1942,42 @@ final class AppModel: ObservableObject {
         shortcutMonitor.stop()
         refreshPermissionStatus()
     }
+
+#if DEBUG
+    func endDebugSyntheticCaptureSession() {
+        guard usesDebugSyntheticCaptureSession, !debugSyntheticCaptureSessionEnded else { return }
+        debugSyntheticCaptureSessionEnded = true
+        stopShortcutMonitor()
+        switch engine.state {
+        case .replacing, .undoing:
+            pillBridge.dismiss()
+            return
+        default:
+            finishDebugSyntheticCaptureTeardown()
+        }
+    }
+
+    private func finishDebugSyntheticCaptureTeardown() {
+        guard usesDebugSyntheticCaptureSession,
+              debugSyntheticCaptureSessionEnded,
+              !debugSyntheticCaptureTeardownInProgress,
+              !debugSyntheticCaptureTeardownCompleted
+        else { return }
+        switch engine.state {
+        case .replacing, .undoing:
+            return
+        default:
+            break
+        }
+        debugSyntheticCaptureTeardownInProgress = true
+        if case .generating = engine.state { engine.cancel() }
+        engine.dismiss()
+        pillBridge.dismiss()
+        selectionAccess.endSyntheticCaptureSession()
+        debugSyntheticCaptureTeardownCompleted = true
+        debugSyntheticCaptureTeardownInProgress = false
+    }
+#endif
 
     func refreshPermissionStatus() {
         let shuttingDown = isTerminating || terminationRequested
@@ -1957,6 +2061,12 @@ final class AppModel: ObservableObject {
     }
 
     private func finishTerminationIfSettled() {
+#if DEBUG
+        guard !usesDebugSyntheticCaptureSession
+                || !debugSyntheticCaptureSessionEnded
+                || debugSyntheticCaptureTeardownCompleted
+        else { return }
+#endif
         guard !terminationReplies.isEmpty,
               undoTask == nil,
               managedLocalModelOperationTask == nil,

@@ -93,6 +93,9 @@ public final class MacSelectionAccess: SelectionAccess {
     private var captureDeadline: ContinuousClock.Instant?
     private var undoTarget: UndoTarget?
     private let clipboardRecovery = ClipboardPasteRecovery<ClipboardPasteboardTransaction, ClipboardDestination>()
+#if DEBUG
+    private var syntheticCaptureSession: SyntheticCaptureSession?
+#endif
 
     public static var accessibilityPermissionGranted: Bool {
         AXIsProcessTrusted()
@@ -108,17 +111,74 @@ public final class MacSelectionAccess: SelectionAccess {
     ) {
         self.clipboardFallbackEnabled = clipboardFallbackEnabled
         self.prepareForClipboardPaste = prepareForClipboardPaste
+#if DEBUG
+        self.syntheticCaptureSession = nil
+#endif
     }
+
+#if DEBUG
+    @_spi(SyntheticCaptureDiagnostics)
+    public convenience init(
+        syntheticCaptureSession: SyntheticCaptureSession,
+        clipboardFallbackEnabled: Bool = false,
+        prepareForClipboardPaste: ClipboardPastePreparation? = nil
+    ) {
+        self.init(
+            clipboardFallbackEnabled: clipboardFallbackEnabled,
+            prepareForClipboardPaste: prepareForClipboardPaste
+        )
+        self.syntheticCaptureSession = syntheticCaptureSession
+    }
+
+    @_spi(SyntheticCaptureDiagnostics)
+    public var hasSyntheticCaptureSession: Bool { syntheticCaptureSession != nil }
+
+    @_spi(SyntheticCaptureDiagnostics)
+    public var syntheticCaptureSessionState: SyntheticCaptureSessionState? {
+        syntheticCaptureSession?.state
+    }
+
+    @_spi(SyntheticCaptureDiagnostics)
+    public func endSyntheticCaptureSession() {
+        guard let syntheticCaptureSession else { return }
+        syntheticCaptureSession.cancel()
+        clearCapture()
+        undoTarget = nil
+    }
+#endif
 
     public func capture() throws -> SelectionSnapshot {
         try capture(intent: .replaceSelection)
     }
 
     public func capture(intent: SelectionEditIntent) throws -> SelectionSnapshot {
+#if DEBUG
+        let syntheticSession = syntheticCaptureSession
+        let syntheticIdentity: SyntheticCaptureIdentity?
+        if let syntheticSession {
+            do {
+                syntheticIdentity = try syntheticSession.beginCapture(intent: intent)
+            } catch {
+                throw failure(.captureInvalidated, .targetLost)
+            }
+        } else {
+            syntheticIdentity = nil
+            clearCapture()
+        }
+#else
         clearCapture()
+#endif
         lastFailureReason = nil
         captureDeadline = clock.now.advanced(by: Self.captureBudget)
         defer { captureDeadline = nil }
+#if DEBUG
+        var syntheticCaptureCompleted = false
+        defer {
+            if let syntheticSession, !syntheticCaptureCompleted {
+                syntheticSession.finishCapture(succeeded: false)
+            }
+        }
+#endif
         guard Self.accessibilityPermissionGranted else { throw ImrseError.permissionRequired }
         guard !IsSecureEventInputEnabled() else { throw failure(.protectedTarget, .secureInput) }
         guard let runningApplication = NSWorkspace.shared.frontmostApplication else {
@@ -129,8 +189,34 @@ public final class MacSelectionAccess: SelectionAccess {
         guard processID != ProcessInfo.processInfo.processIdentifier else {
             throw failure(.ownApplicationFocused, .noSelection)
         }
+#if DEBUG
+        if let syntheticIdentity {
+            guard syntheticSession?.isCaptureActive() == true,
+                  SyntheticCaptureMetadataValidation.processMatches(
+                    expectedProcessIdentifier: syntheticIdentity.processIdentifier,
+                    expectedLaunchDate: syntheticIdentity.processLaunchDate,
+                    expectedBundleIdentifier: syntheticIdentity.bundleIdentifier,
+                    actualProcessIdentifier: processID,
+                    actualLaunchDate: runningApplication.launchDate,
+                    actualBundleIdentifier: runningApplication.bundleIdentifier
+                  )
+            else { throw failure(.foregroundApplicationChanged, .staleSelection) }
+        }
+        if syntheticSession != nil { clearCapture() }
+#endif
         let application = AXUIElementCreateApplication(processID)
         try configureAXMessaging(application)
+#if DEBUG
+        if let syntheticIdentity {
+            guard syntheticSession?.isCaptureActive() == true,
+                  try syntheticDocumentRootIsValid(
+                    syntheticIdentity,
+                    application: application,
+                    processID: processID
+                  )
+            else { throw failure(.captureInvalidated, .staleSelection) }
+        }
+#endif
         guard let element = try AccessibilityFocusAcquisition.acquire(
             readApplicationRole: {
                 _ = try self.stringAttribute(application, kAXRoleAttribute, failure: .noSelection)
@@ -141,6 +227,23 @@ public final class MacSelectionAccess: SelectionAccess {
                 try self.elementAttribute(application, kAXFocusedUIElementAttribute, failure: .noSelection)
             },
             validate: { element in
+#if DEBUG
+                if let syntheticIdentity {
+                    guard syntheticSession?.isCaptureActive() == true,
+                          try self.syntheticDocumentRootIsValid(
+                            syntheticIdentity,
+                            application: application,
+                            processID: processID
+                          ),
+                          try self.syntheticFocusedFieldIsValid(
+                            syntheticIdentity,
+                            acquiredField: element,
+                            application: application,
+                            processID: processID
+                          )
+                    else { throw self.failure(.focusedElementChanged, .staleSelection) }
+                }
+#endif
                 guard try !self.isSecure(element, in: application) else {
                     throw self.failure(.protectedTarget, .secureInput)
                 }
@@ -156,6 +259,23 @@ public final class MacSelectionAccess: SelectionAccess {
         }
         let canReadValue = supportsPlainTextValueReplacement(element, role: role)
         let inserting = intent == .insertAtCaret
+#if DEBUG
+        if let syntheticIdentity {
+            guard syntheticSession?.isCaptureActive() == true,
+                  try syntheticDocumentRootIsValid(
+                    syntheticIdentity,
+                    application: application,
+                    processID: processID
+                  ),
+                  try syntheticFocusedFieldIsValid(
+                    syntheticIdentity,
+                    acquiredField: element,
+                    application: application,
+                    processID: processID
+                  )
+            else { throw failure(.focusedElementChanged, .staleSelection) }
+        }
+#endif
         let selectedRange = try rangeAttribute(element, kAXSelectedTextRangeAttribute, failure: .noSelection)
         if let reason = SelectionReadValidation.rangeFailure(selectedRange, allowingEmpty: inserting) {
             throw failure(reason, .noSelection)
@@ -240,6 +360,15 @@ public final class MacSelectionAccess: SelectionAccess {
             invalidateCapture(snapshot.id)
             throw error
         }
+#if DEBUG
+        if let syntheticSession {
+            guard syntheticSession.finishCapture(succeeded: true) else {
+                invalidateCapture(snapshot.id)
+                throw failure(.captureInvalidated, .targetLost)
+            }
+            syntheticCaptureCompleted = true
+        }
+#endif
         lastFailureReason = nil
         return snapshot
     }
@@ -1616,6 +1745,105 @@ public final class MacSelectionAccess: SelectionAccess {
         var processID: pid_t = 0
         return AXUIElementGetPid(element, &processID) == .success && Int32(processID) == expected
     }
+
+#if DEBUG
+    private func syntheticDocumentRootIsValid(
+        _ identity: SyntheticCaptureIdentity,
+        application: AXUIElement,
+        processID: Int32
+    ) throws -> Bool {
+        try SyntheticCaptureMetadataValidation.documentRootIsValid(
+            expectedRoot: identity.documentRoot,
+            expectedDocumentURL: identity.documentURL,
+            application: application,
+            expectedProcessIdentifier: processID,
+            readFocusedRoot: {
+                try self.elementAttribute(
+                    application,
+                    kAXFocusedWindowAttribute,
+                    failure: .staleSelection
+                )
+            },
+            readRootParent: {
+                try self.elementAttribute(
+                    identity.documentRoot,
+                    kAXParentAttribute,
+                    failure: .staleSelection
+                )
+            },
+            readRootRole: {
+                try self.stringAttribute(
+                    identity.documentRoot,
+                    kAXRoleAttribute,
+                    failure: .staleSelection
+                )
+            },
+            readApplicationProcessIdentifier: { self.processIdentifier(of: application) },
+            readRootProcessIdentifier: { self.processIdentifier(of: identity.documentRoot) },
+            readDocumentURL: {
+                try self.urlAttribute(
+                    identity.documentRoot,
+                    kAXDocumentAttribute as String,
+                    failure: .staleSelection
+                )
+            },
+            sameElement: { self.sameElement($0, $1) }
+        )
+    }
+
+    private func syntheticFocusedFieldIsValid(
+        _ identity: SyntheticCaptureIdentity,
+        acquiredField: AXUIElement,
+        application: AXUIElement,
+        processID: Int32
+    ) throws -> Bool {
+        try SyntheticCaptureMetadataValidation.focusedFieldIsValid(
+            expectedField: identity.focusedField,
+            acquiredField: acquiredField,
+            expectedRoot: identity.documentRoot,
+            expectedProcessIdentifier: processID,
+            readFieldProcessIdentifier: { self.processIdentifier(of: acquiredField) },
+            readCurrentFocusedField: {
+                try self.elementAttribute(
+                    application,
+                    kAXFocusedUIElementAttribute,
+                    failure: .staleSelection
+                )
+            },
+            readFieldWindow: {
+                try self.elementAttribute(
+                    acquiredField,
+                    kAXWindowAttribute,
+                    failure: .staleSelection
+                )
+            },
+            readWindowProcessIdentifier: { self.processIdentifier(of: $0) },
+            sameElement: { self.sameElement($0, $1) }
+        )
+    }
+
+    private func processIdentifier(of element: AXUIElement) -> Int32? {
+        var processID: pid_t = 0
+        guard AXUIElementGetPid(element, &processID) == .success else { return nil }
+        return Int32(processID)
+    }
+
+    private func urlAttribute(
+        _ element: AXUIElement,
+        _ attribute: String,
+        failure: ImrseError
+    ) throws -> URL? {
+        try configureAXMessaging(element)
+        var value: CFTypeRef?
+        let status = AXUIElementCopyAttributeValue(element, attribute as CFString, &value)
+        if status == .attributeUnsupported || status == .noValue { return nil }
+        guard status == .success, let value else { throw self.failure(.axReadFailure, failure) }
+        if let url = value as? URL { return url }
+        if let string = value as? String, let url = URL(string: string) { return url }
+        throw self.failure(.axValueTypeMismatch, failure)
+    }
+
+#endif
 
     private func elementChildren(_ element: AXUIElement, failure: ImrseError) throws -> [AXUIElement] {
         try configureAXMessaging(element)
