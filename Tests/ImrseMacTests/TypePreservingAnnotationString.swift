@@ -16,7 +16,7 @@ final class TypePreservingAnnotationString: NSAttributedString {
         self.base = base
         self.annotation = annotation
         annotationRange = range
-        super.init(string: base.string)
+        super.init()
     }
 
     required init?(coder: NSCoder) { return nil }
