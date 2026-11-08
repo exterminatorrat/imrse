@@ -228,10 +228,11 @@ struct ContenteditableTextStyleProofTests {
             value: "unsupported",
             range: NSRange(location: 14, length: 5)
         )
+        let boolean: CFBoolean = kCFBooleanTrue
         let unknownBooleanAttribute = NSMutableAttributedString(attributedString: styled("target"))
         unknownBooleanAttribute.addAttribute(
             NSAttributedString.Key(rawValue: "AXUnknownBoolean"),
-            value: kCFBooleanTrue,
+            value: boolean,
             range: NSRange(location: 0, length: 6)
         )
         #expect(ContenteditableTextStyleProof(
@@ -429,9 +430,11 @@ struct ContenteditableTextStyleProofTests {
 
     @Test
     func freezesMutableBooleanFontDictionaryKeysAndValues() throws {
+        let trueValue: CFBoolean = kCFBooleanTrue
+        let falseValue: CFBoolean = kCFBooleanFalse
         let mutableKey = NSMutableString(string: "enabled")
         let mutableFont = NSMutableDictionary()
-        mutableFont.setObject(kCFBooleanTrue, forKey: mutableKey as NSString)
+        mutableFont.setObject(trueValue, forKey: mutableKey as NSString)
         let original = styledWithFontDictionary("target", font: mutableFont)
         let inputBoolean = try fontDictionaryLeaf(in: original)
         #expect(CFGetTypeID(inputBoolean as CFTypeRef) == CFBooleanGetTypeID())
@@ -445,8 +448,8 @@ struct ContenteditableTextStyleProofTests {
 
         mutableKey.setString("changed key")
         mutableFont.removeObject(forKey: "enabled" as NSString)
-        mutableFont.setObject(kCFBooleanFalse, forKey: "changed key" as NSString)
-        mutableFont.setObject(kCFBooleanTrue, forKey: "added key" as NSString)
+        mutableFont.setObject(falseValue, forKey: "changed key" as NSString)
+        mutableFont.setObject(trueValue, forKey: "added key" as NSString)
 
         let frozenFont = fontDictionaryWithBoolean(true)
         #expect(proof.originalValue.isEqual(to: styledWithFontDictionary("target", font: frozenFont)))
@@ -586,9 +589,10 @@ struct ContenteditableTextStyleProofTests {
 
         let tooManyEntries = NSMutableDictionary(dictionary: boundaryFont)
         tooManyEntries.setObject(NSNumber(value: 32), forKey: "extra" as NSString)
+        let boolean: CFBoolean = kCFBooleanTrue
         let tooManyBooleanEntries = NSMutableDictionary()
         for index in 0..<33 {
-            tooManyBooleanEntries.setObject(kCFBooleanTrue, forKey: "trait\(index)" as NSString)
+            tooManyBooleanEntries.setObject(boolean, forKey: "trait\(index)" as NSString)
         }
         let tooLongKey = NSDictionary(dictionary: [String(repeating: "k", count: 129): "value"])
         let tooLongValue = NSDictionary(dictionary: ["font": String(repeating: "v", count: 1_025)])
@@ -606,11 +610,12 @@ struct ContenteditableTextStyleProofTests {
 
     @Test
     func rejectsNestedAndUnsupportedAttributeValues() {
+        let boolean: CFBoolean = kCFBooleanTrue
         let nestedFont = NSDictionary(dictionary: [
             "font": NSDictionary(dictionary: ["family": "synthetic"])
         ])
         let nestedBooleanFont = NSDictionary(dictionary: [
-            "trait": NSDictionary(dictionary: ["enabled": kCFBooleanTrue])
+            "trait": NSDictionary(dictionary: ["enabled": boolean])
         ])
         let unsupportedValues: [Any] = [
             nestedFont,
