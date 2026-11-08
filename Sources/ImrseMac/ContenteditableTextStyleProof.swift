@@ -148,12 +148,14 @@ struct ContenteditableTextStyleProof {
         while index < value.length {
             var run = NSRange(location: 0, length: 0)
             let attributes = value.attributes(at: index, effectiveRange: &run)
-            guard run.location == index,
+            guard run.location >= 0,
+                  run.location <= index,
                   run.length > 0,
-                  run.length <= value.length - index,
+                  run.length <= value.length - run.location,
+                  index < run.location + run.length,
                   style.matches(attributes: attributes)
             else { return nil }
-            index += run.length
+            index = run.location + run.length
         }
         return style
     }
