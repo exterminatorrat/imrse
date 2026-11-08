@@ -1,4 +1,5 @@
 #if os(macOS)
+import AppKit
 import CoreFoundation
 import Foundation
 import Testing
@@ -19,6 +20,8 @@ final class TypePreservingAnnotationString: NSAttributedString {
     }
 
     required init?(coder: NSCoder) { return nil }
+
+    required init?(pasteboardPropertyList propertyList: Any, ofType type: NSPasteboard.PasteboardType) { return nil }
 
     override var string: String { base.string }
     override var length: Int { base.length }
