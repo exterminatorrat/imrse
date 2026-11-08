@@ -10,6 +10,7 @@ struct ContenteditableTextStyleProof {
     private static let fontKey = NSAttributedString.Key("AXFont")
     private static let foregroundColorKey = NSAttributedString.Key("AXForegroundColor")
     private static let backgroundColorKey = NSAttributedString.Key("AXBackgroundColor")
+    private static let markedMisspelledKey = NSAttributedString.Key("AXMarkedMisspelled")
     private static let allowedKeys: Set<NSAttributedString.Key> = [fontKey, foregroundColorKey, backgroundColorKey]
     private static let maximumFontDictionaryEntries = 32
     private static let maximumFontDictionaryKeyUTF16Length = 128
@@ -40,13 +41,7 @@ struct ContenteditableTextStyleProof {
         let originalUTF16 = Array(originalString.utf16)
         guard originalUTF16.count == originalValue.length else { return nil }
 
-        var originalRun = NSRange(location: 0, length: 0)
-        let attributes = originalValue.attributes(at: 0, effectiveRange: &originalRun)
-        guard originalRun == NSRange(location: 0, length: originalValue.length),
-              let style = StyleSnapshot(attributes: attributes)
-        else {
-            return nil
-        }
+        guard let style = Self.uniformStyle(in: originalValue) else { return nil }
 
         self.init(
             originalTextUTF16: originalUTF16,
@@ -139,10 +134,28 @@ struct ContenteditableTextStyleProof {
             return false
         }
 
-        var actualRun = NSRange(location: 0, length: 0)
-        let attributes = actual.attributes(at: 0, effectiveRange: &actualRun)
-        return actualRun == NSRange(location: 0, length: actual.length)
-            && style.matches(attributes: attributes)
+        guard let actualStyle = uniformStyle(in: actual) else { return false }
+        return style.matches(actualStyle)
+    }
+
+    private static func uniformStyle(in value: NSAttributedString) -> StyleSnapshot? {
+        guard value.length > 0,
+              value.length <= maximumWholeValueUTF16Length,
+              let style = StyleSnapshot(attributes: value.attributes(at: 0, effectiveRange: nil))
+        else { return nil }
+
+        var index = 0
+        while index < value.length {
+            var run = NSRange(location: 0, length: 0)
+            let attributes = value.attributes(at: index, effectiveRange: &run)
+            guard run.location == index,
+                  run.length > 0,
+                  run.length <= value.length - index,
+                  style.matches(attributes: attributes)
+            else { return nil }
+            index += run.length
+        }
+        return style
     }
 
     private static func frozenString(_ value: Any, maximumUTF16Length: Int) -> FrozenString? {
@@ -374,6 +387,10 @@ struct ContenteditableTextStyleProof {
         let backgroundColor: FrozenColor?
 
         init?(attributes: [NSAttributedString.Key: Any]) {
+            var attributes = attributes
+            if let annotation = attributes.removeValue(forKey: ContenteditableTextStyleProof.markedMisspelledKey) {
+                guard CFGetTypeID(annotation as CFTypeRef) == CFBooleanGetTypeID() else { return nil }
+            }
             guard attributes.keys.allSatisfy(ContenteditableTextStyleProof.allowedKeys.contains),
                   attributes.count == 2 || attributes.count == 3,
                   let fontValue = attributes[ContenteditableTextStyleProof.fontKey],
