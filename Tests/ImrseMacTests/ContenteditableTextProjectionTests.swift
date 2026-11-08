@@ -38,7 +38,7 @@ struct ContenteditableTextProjectionTests {
         (TextRange(location: 22, length: 5), 23, "Outer")
     ])
     func mapsScalarSafeRangesAcrossDisplaySeparators(
-        _ range: TextRange,
+        _ range: ImrseCore.TextRange,
         toDisplayLocation expectedLocation: Int,
         selecting expectedText: String
     ) throws {
@@ -94,7 +94,7 @@ struct ContenteditableTextProjectionTests {
         TextRange(location: 79, length: 1),
         TextRange(location: Int.max, length: 1)
     ])
-    func rejectsInvalidEmptyOverflowingAndParagraphCrossingRanges(_ range: TextRange) throws {
+    func rejectsInvalidEmptyOverflowingAndParagraphCrossingRanges(_ range: ImrseCore.TextRange) throws {
         let projection = try fixture()
 
         #expect(projection.displayRange(for: range) == nil)

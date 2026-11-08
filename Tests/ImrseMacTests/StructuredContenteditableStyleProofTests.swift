@@ -382,7 +382,7 @@ struct StructuredContenteditableStyleProofTests {
         ContenteditableTextProjection(displayText: paragraphDisplayText, leafTexts: paragraphLeaves)
     }
 
-    private var sampleRange: TextRange {
+    private var sampleRange: ImrseCore.TextRange {
         TextRange(location: paragraphLeaves[0].utf16.count, length: paragraphLeaves[1].utf16.count)
     }
 
@@ -441,7 +441,7 @@ struct StructuredContenteditableStyleProofTests {
 
     private func styled(
         _ text: String,
-        runs: [(range: TextRange, font: Any, foreground: Any)]
+        runs: [(range: ImrseCore.TextRange, font: Any, foreground: Any)]
     ) -> NSAttributedString {
         let result = NSMutableAttributedString(string: text)
         for run in runs {
@@ -453,7 +453,7 @@ struct StructuredContenteditableStyleProofTests {
         return NSAttributedString(attributedString: result)
     }
 
-    private func styleRuns(count: Int) -> [(range: TextRange, font: Any, foreground: Any)] {
+    private func styleRuns(count: Int) -> [(range: ImrseCore.TextRange, font: Any, foreground: Any)] {
         (0..<count).map { index in
             (
                 range: TextRange(location: index, length: 1),
