@@ -1,3 +1,5 @@
+import AppKit
+import CoreFoundation
 import CoreGraphics
 import Foundation
 import ImrseCore
@@ -226,9 +228,21 @@ struct ContenteditableTextStyleProofTests {
             value: "unsupported",
             range: NSRange(location: 14, length: 5)
         )
+        let unknownBooleanAttribute = NSMutableAttributedString(attributedString: styled("target"))
+        unknownBooleanAttribute.addAttribute(
+            NSAttributedString.Key(rawValue: "AXUnknownBoolean"),
+            value: kCFBooleanTrue,
+            range: NSRange(location: 0, length: 6)
+        )
         #expect(ContenteditableTextStyleProof(
             originalValue: unknownAttributeValue,
             selectionRange: TextRange(location: 7, length: 6),
+            selectedText: "target",
+            replacement: "text"
+        ) == nil)
+        #expect(ContenteditableTextStyleProof(
+            originalValue: unknownBooleanAttribute,
+            selectionRange: TextRange(location: 0, length: 6),
             selectedText: "target",
             replacement: "text"
         ) == nil)
@@ -343,6 +357,152 @@ struct ContenteditableTextStyleProofTests {
         #expect(!proof.confirmsApplied(styled("replacement", font: mutableFont)))
     }
 
+    @Test(arguments: [false, true])
+    func reconstructsFontDictionaryBooleansAsCFBooleans(_ enabled: Bool) throws {
+        let font = fontDictionaryWithBoolean(enabled)
+        let original = styledWithFontDictionary("target", font: font)
+        let inputBoolean = try fontDictionaryLeaf(in: original)
+        #expect(CFGetTypeID(inputBoolean as CFTypeRef) == CFBooleanGetTypeID())
+        #expect(inputBoolean.boolValue == enabled)
+        let proof = try #require(ContenteditableTextStyleProof(
+            originalValue: original,
+            selectionRange: TextRange(location: 0, length: 6),
+            selectedText: "target",
+            replacement: "text"
+        ))
+
+        for value in [proof.originalValue, proof.expectedValue] {
+            let frozenFont = try #require(value.attribute(fontAttribute, at: 0, effectiveRange: nil) as? NSDictionary)
+            let frozenBoolean = try #require(frozenFont["enabled"] as? NSNumber)
+            #expect(CFGetTypeID(frozenBoolean) == CFBooleanGetTypeID())
+            #expect(frozenBoolean.boolValue == enabled)
+        }
+
+        let applied = styledWithFontDictionary("text", font: font)
+        let appliedBoolean = try fontDictionaryLeaf(in: applied)
+        #expect(CFGetTypeID(appliedBoolean as CFTypeRef) == CFBooleanGetTypeID())
+        #expect(appliedBoolean.boolValue == enabled)
+        #expect(proof.confirmsOriginal(original))
+        #expect(proof.confirmsApplied(applied))
+    }
+
+    @Test(arguments: [false, true])
+    func distinguishesFontDictionaryBooleansFromNumbers(_ enabled: Bool) throws {
+        let booleanFont = fontDictionaryWithBoolean(enabled)
+        let numericFont = NSDictionary(dictionary: ["enabled": NSNumber(value: enabled ? 1 : 0)])
+        let booleanInput = styledWithFontDictionary("target", font: booleanFont)
+        let numericInput = styledWithFontDictionary("target", font: numericFont)
+        let booleanInputValue = try fontDictionaryLeaf(in: booleanInput)
+        let numericInputValue = try fontDictionaryLeaf(in: numericInput)
+        #expect(CFGetTypeID(booleanInputValue as CFTypeRef) == CFBooleanGetTypeID())
+        #expect(booleanInputValue.boolValue == enabled)
+        #expect(CFGetTypeID(numericInputValue as CFTypeRef) == CFNumberGetTypeID())
+        #expect(CFGetTypeID(numericInputValue as CFTypeRef) != CFBooleanGetTypeID())
+        #expect(numericInputValue.intValue == (enabled ? 1 : 0))
+        let booleanProof = try #require(ContenteditableTextStyleProof(
+            originalValue: booleanInput,
+            selectionRange: TextRange(location: 0, length: 6),
+            selectedText: "target",
+            replacement: "text"
+        ))
+        let numericProof = try #require(ContenteditableTextStyleProof(
+            originalValue: numericInput,
+            selectionRange: TextRange(location: 0, length: 6),
+            selectedText: "target",
+            replacement: "text"
+        ))
+
+        let booleanActual = styledWithFontDictionary("text", font: booleanFont)
+        let numericActual = styledWithFontDictionary("text", font: numericFont)
+        let booleanActualValue = try fontDictionaryLeaf(in: booleanActual)
+        let numericActualValue = try fontDictionaryLeaf(in: numericActual)
+        #expect(CFGetTypeID(booleanActualValue as CFTypeRef) == CFBooleanGetTypeID())
+        #expect(booleanActualValue.boolValue == enabled)
+        #expect(CFGetTypeID(numericActualValue as CFTypeRef) == CFNumberGetTypeID())
+        #expect(CFGetTypeID(numericActualValue as CFTypeRef) != CFBooleanGetTypeID())
+        #expect(numericActualValue.intValue == (enabled ? 1 : 0))
+        #expect(booleanProof.confirmsApplied(booleanActual))
+        #expect(!booleanProof.confirmsApplied(numericActual))
+        #expect(numericProof.confirmsApplied(numericActual))
+        #expect(!numericProof.confirmsApplied(booleanActual))
+    }
+
+    @Test
+    func freezesMutableBooleanFontDictionaryKeysAndValues() throws {
+        let mutableKey = NSMutableString(string: "enabled")
+        let mutableFont = NSMutableDictionary()
+        mutableFont.setObject(kCFBooleanTrue, forKey: mutableKey as NSString)
+        let original = styledWithFontDictionary("target", font: mutableFont)
+        let inputBoolean = try fontDictionaryLeaf(in: original)
+        #expect(CFGetTypeID(inputBoolean as CFTypeRef) == CFBooleanGetTypeID())
+        #expect(inputBoolean.boolValue)
+        let proof = try #require(ContenteditableTextStyleProof(
+            originalValue: original,
+            selectionRange: TextRange(location: 0, length: 6),
+            selectedText: "target",
+            replacement: "text"
+        ))
+
+        mutableKey.setString("changed key")
+        mutableFont.removeObject(forKey: "enabled" as NSString)
+        mutableFont.setObject(kCFBooleanFalse, forKey: "changed key" as NSString)
+        mutableFont.setObject(kCFBooleanTrue, forKey: "added key" as NSString)
+
+        let frozenFont = fontDictionaryWithBoolean(true)
+        #expect(proof.originalValue.isEqual(to: styledWithFontDictionary("target", font: frozenFont)))
+        #expect(proof.expectedValue.isEqual(to: styledWithFontDictionary("text", font: frozenFont)))
+        #expect(proof.confirmsOriginal(styledWithFontDictionary("target", font: frozenFont)))
+        #expect(!proof.confirmsOriginal(styledWithFontDictionary("target", font: mutableFont)))
+        #expect(!proof.confirmsApplied(styledWithFontDictionary("text", font: mutableFont)))
+    }
+
+    @Test
+    func expectedAndInverseProofsRefuseFlippedFontDictionaryBooleans() throws {
+        let font = fontDictionaryWithBoolean(true)
+        let flippedFont = fontDictionaryWithBoolean(false)
+        let original = styledWithFontDictionary("before target after", font: font)
+        let originalBoolean = try fontDictionaryLeaf(in: original)
+        let flippedOriginal = styledWithFontDictionary("before target after", font: flippedFont)
+        let flippedOriginalBoolean = try fontDictionaryLeaf(in: flippedOriginal)
+        #expect(CFGetTypeID(originalBoolean as CFTypeRef) == CFBooleanGetTypeID())
+        #expect(originalBoolean.boolValue)
+        #expect(CFGetTypeID(flippedOriginalBoolean as CFTypeRef) == CFBooleanGetTypeID())
+        #expect(!flippedOriginalBoolean.boolValue)
+        let proof = try #require(ContenteditableTextStyleProof(
+            originalValue: original,
+            selectionRange: TextRange(location: 7, length: 6),
+            selectedText: "target",
+            replacement: "replacement"
+        ))
+        let inverse = try #require(proof.inverse(
+            selectionRange: TextRange(location: 7, length: 11),
+            selectedText: "replacement",
+            replacement: "target"
+        ))
+
+        let applied = styledWithFontDictionary("before replacement after", font: font)
+        let restored = styledWithFontDictionary("before target after", font: font)
+        let flippedApplied = styledWithFontDictionary("before replacement after", font: flippedFont)
+        let flippedRestored = styledWithFontDictionary("before target after", font: flippedFont)
+        for value in [applied, restored] {
+            let boolean = try fontDictionaryLeaf(in: value)
+            #expect(CFGetTypeID(boolean as CFTypeRef) == CFBooleanGetTypeID())
+            #expect(boolean.boolValue)
+        }
+        for value in [flippedApplied, flippedRestored] {
+            let boolean = try fontDictionaryLeaf(in: value)
+            #expect(CFGetTypeID(boolean as CFTypeRef) == CFBooleanGetTypeID())
+            #expect(!boolean.boolValue)
+        }
+        #expect(proof.confirmsApplied(applied))
+        #expect(!proof.confirmsApplied(flippedApplied))
+        #expect(!proof.confirmsOriginal(flippedRestored))
+        #expect(inverse.confirmsOriginal(applied))
+        #expect(inverse.confirmsApplied(restored))
+        #expect(!inverse.confirmsOriginal(flippedApplied))
+        #expect(!inverse.confirmsApplied(flippedRestored))
+    }
+
     @Test
     func inverseUsesFrozenStyleAndRequiresTheExactOriginalResult() throws {
         let mutableFont = NSMutableDictionary(dictionary: [
@@ -426,9 +586,13 @@ struct ContenteditableTextStyleProofTests {
 
         let tooManyEntries = NSMutableDictionary(dictionary: boundaryFont)
         tooManyEntries.setObject(NSNumber(value: 32), forKey: "extra" as NSString)
+        let tooManyBooleanEntries = NSMutableDictionary()
+        for index in 0..<33 {
+            tooManyBooleanEntries.setObject(kCFBooleanTrue, forKey: "trait\(index)" as NSString)
+        }
         let tooLongKey = NSDictionary(dictionary: [String(repeating: "k", count: 129): "value"])
         let tooLongValue = NSDictionary(dictionary: ["font": String(repeating: "v", count: 1_025)])
-        let invalidFonts: [Any] = [NSDictionary(), tooManyEntries, tooLongKey, tooLongValue]
+        let invalidFonts: [Any] = [NSDictionary(), tooManyEntries, tooManyBooleanEntries, tooLongKey, tooLongValue]
 
         for font in invalidFonts {
             #expect(ContenteditableTextStyleProof(
@@ -445,8 +609,12 @@ struct ContenteditableTextStyleProofTests {
         let nestedFont = NSDictionary(dictionary: [
             "font": NSDictionary(dictionary: ["family": "synthetic"])
         ])
+        let nestedBooleanFont = NSDictionary(dictionary: [
+            "trait": NSDictionary(dictionary: ["enabled": kCFBooleanTrue])
+        ])
         let unsupportedValues: [Any] = [
             nestedFont,
+            nestedBooleanFont,
             NSArray(object: "synthetic"),
             NSData(data: Data([0x01])),
             NSNull(),
@@ -592,6 +760,20 @@ struct ContenteditableTextStyleProofTests {
         NSAttributedString.Key(rawValue: "AXForegroundColor")
     }
 
+    private func fontDictionaryWithBoolean(_ enabled: Bool) -> NSDictionary {
+        let value: CFBoolean = enabled ? kCFBooleanTrue : kCFBooleanFalse
+        return NSDictionary(dictionary: ["enabled": value])
+    }
+
+    private func fontDictionaryLeaf(in value: NSAttributedString) throws -> NSNumber {
+        let font = try #require(value.attribute(fontAttribute, at: 0, effectiveRange: nil) as? NSDictionary)
+        return try #require(font["enabled"] as? NSNumber)
+    }
+
+    private func styledWithFontDictionary(_ string: String, font: NSDictionary) -> NSAttributedString {
+        TypePreservingFontDictionaryString(base: styled(string, font: nil), font: font)
+    }
+
     private func styled(
         _ string: String,
         font: Any? = "synthetic font",
@@ -603,5 +785,33 @@ struct ContenteditableTextStyleProofTests {
         if let foreground { attributes[foregroundAttribute] = foreground }
         if let background { attributes[NSAttributedString.Key(rawValue: "AXBackgroundColor")] = background }
         return NSAttributedString(string: string, attributes: attributes)
+    }
+}
+
+private final class TypePreservingFontDictionaryString: NSAttributedString {
+    private let base: NSAttributedString
+    private let font: NSDictionary
+    private let fontKey = NSAttributedString.Key("AXFont")
+
+    init(base: NSAttributedString, font: NSDictionary) {
+        self.base = base
+        self.font = font
+        super.init()
+    }
+
+    required init?(coder: NSCoder) { return nil }
+
+    required init?(pasteboardPropertyList propertyList: Any, ofType type: NSPasteboard.PasteboardType) { return nil }
+
+    override var string: String { base.string }
+    override var length: Int { base.length }
+
+    override func attributes(at location: Int, effectiveRange range: NSRangePointer?) -> [NSAttributedString.Key: Any] {
+        precondition(location >= 0 && location < base.length)
+        var baseRange = NSRange()
+        var result = base.attributes(at: location, effectiveRange: &baseRange)
+        result[fontKey] = font
+        range?.pointee = baseRange
+        return result
     }
 }

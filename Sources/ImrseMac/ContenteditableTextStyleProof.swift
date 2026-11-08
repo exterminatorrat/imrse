@@ -254,9 +254,13 @@ struct ContenteditableTextStyleProof {
     private enum FontDictionaryValue {
         case string(FrozenString)
         case number(FrozenNumber)
+        case boolean(Bool)
 
         init?(value: Any) {
-            if let string = ContenteditableTextStyleProof.frozenString(
+            if let number = value as? NSNumber,
+               CFGetTypeID(number) == CFBooleanGetTypeID() {
+                self = .boolean(number.boolValue)
+            } else if let string = ContenteditableTextStyleProof.frozenString(
                 value,
                 maximumUTF16Length: ContenteditableTextStyleProof.maximumStyleStringUTF16Length
             ) {
@@ -274,6 +278,8 @@ struct ContenteditableTextStyleProof {
                 return lhs == rhs
             case let (.number(lhs), .number(rhs)):
                 return lhs.matches(rhs)
+            case let (.boolean(lhs), .boolean(rhs)):
+                return lhs == rhs
             default:
                 return false
             }
@@ -283,6 +289,9 @@ struct ContenteditableTextStyleProof {
             switch self {
             case .string(let value): return value.string as NSString
             case .number(let value): return value.number
+            case .boolean(let value):
+                let boolean: CFBoolean = value ? kCFBooleanTrue : kCFBooleanFalse
+                return boolean
             }
         }
     }
