@@ -237,8 +237,6 @@ struct ContenteditableSpellingAnnotationTests {
         value annotation: Any,
         range: NSRange
     ) -> NSAttributedString {
-        let result = NSMutableAttributedString(attributedString: value)
-        result.addAttribute(markedMisspelledAttribute, value: annotation, range: range)
-        return result
+        TypePreservingAnnotationString(value, annotation: annotation, range: range)
     }
 }
