@@ -46,7 +46,7 @@ public final class MacSelectionAccess: SelectionAccess {
         let handle: TargetHandle
         let replacementRange: TextRange
         let focusedSelection: NativeSelection
-        let styleProof: ContenteditableTextStyleProof?
+        let styleProof: ContenteditableClipboardProof?
         let insertionProof: CaretInsertionProof?
     }
 
@@ -70,7 +70,7 @@ public final class MacSelectionAccess: SelectionAccess {
     private struct AppliedReplacement {
         let strategy: ReplacementStrategy
         let focusedSelection: NativeSelection
-        let styleProof: ContenteditableTextStyleProof?
+        let styleProof: ContenteditableClipboardProof?
     }
 
     private struct ClipboardDestination {
@@ -532,7 +532,7 @@ public final class MacSelectionAccess: SelectionAccess {
         _ undoTarget: UndoTarget,
         receipt: ReplacementReceipt,
         currentSelection: NativeSelection,
-        styleProof: ContenteditableTextStyleProof
+        styleProof: ContenteditableClipboardProof
     ) async throws {
         let target = undoTarget.handle
         guard let inverseProof = styleProof.inverse(
@@ -614,13 +614,8 @@ public final class MacSelectionAccess: SelectionAccess {
         )
 
         do {
-            guard let actual = try attributedWholeValue(
-                target.element,
-                matching: styleProof.originalText,
-                failure: .undoUnavailable
-            ),
-            styleProof.confirmsOriginal(actual),
-            inverseProof.confirmsApplied(actual),
+            guard try requireContenteditableStyleState(target, proof: styleProof, confirmsApplied: false),
+            try requireContenteditableStyleState(target, proof: inverseProof, confirmsApplied: true),
             sameSelection(try self.currentSelection(target, allowingEmpty: true), afterPaste)
             else {
                 throw ImrseError.undoUnavailable
@@ -1266,7 +1261,8 @@ public final class MacSelectionAccess: SelectionAccess {
             guard sameSelection(afterPreparation, before),
                   let value = try wholeValue(target.element, failure: .staleSelection),
                   (selectedTextFallbackBaseline ?? oldValue).map({ sameText(value, $0) }) ?? true,
-                  let clipboardText = substring(value, range: range),
+                  let displayRange = clipboardDisplayRange(range, proof: styleProof),
+                  let clipboardText = substring(value, range: displayRange),
                   sameText(clipboardText, expectedText)
             else {
                 throw ImrseError.staleSelection
@@ -1276,7 +1272,10 @@ public final class MacSelectionAccess: SelectionAccess {
             if selectedTextNoOpValidated { invalidateAfterUnverifiedWrite(target.id) }
             throw error
         }
-        guard let clipboardExpectedValue = replacing(clipboardValue, range: range, with: replacement) else {
+        guard let displayRange = clipboardDisplayRange(range, proof: styleProof),
+              let clipboardExpectedValue = replacing(clipboardValue, range: displayRange, with: replacement),
+              styleProof.map({ sameText(clipboardExpectedValue, $0.expectedText) }) ?? true
+        else {
             throw ImrseError.staleSelection
         }
         let afterPaste = try await paste(
@@ -1310,7 +1309,7 @@ public final class MacSelectionAccess: SelectionAccess {
         expectedSelection: NativeSelection,
         oldValue: String,
         expectedValue: String,
-        styleProof: ContenteditableTextStyleProof? = nil
+        styleProof: ContenteditableClipboardProof? = nil
     ) async throws -> NativeSelection {
         guard Self.eventPostingPermissionGranted else { throw ImrseError.permissionRequired }
         try requireTargetForeground(target)
@@ -1475,7 +1474,7 @@ public final class MacSelectionAccess: SelectionAccess {
 
     private func clipboardFallbackTargetIsEligible(
         _ target: TargetHandle,
-        styleProof: ContenteditableTextStyleProof? = nil
+        styleProof: ContenteditableClipboardProof? = nil
     ) -> Bool {
         let eligible: Bool
         if let styleProof {
@@ -1516,7 +1515,7 @@ public final class MacSelectionAccess: SelectionAccess {
         at range: TextRange,
         with replacement: String,
         expectedValue: String?
-    ) throws -> ContenteditableTextStyleProof? {
+    ) throws -> ContenteditableClipboardProof? {
         if clipboardFallbackTargetIsEligible(target) { return nil }
         guard let styleProof = try contenteditableClipboardStyleProof(
             target,
@@ -1538,45 +1537,73 @@ public final class MacSelectionAccess: SelectionAccess {
         at range: TextRange,
         with replacement: String,
         expectedValue: String?
-    ) throws -> ContenteditableTextStyleProof? {
-        guard try contenteditableClipboardTargetIsEligible(target),
-              let value = try wholeValue(target.element, failure: .replacementFailed),
-              expectedValue.map({ sameText(value, $0) }) ?? true,
-              let attributedValue = try attributedWholeValue(
+    ) throws -> ContenteditableClipboardProof? {
+        guard let value = try wholeValue(target.element, failure: .replacementFailed),
+              expectedValue.map({ sameText(value, $0) }) ?? true
+        else { return nil }
+        if try contenteditableClipboardTargetIsEligible(target) {
+            guard let attributedValue = try attributedWholeValue(
                 target.element,
                 matching: value,
                 failure: .replacementFailed
-              )
-        else {
-            return nil
+            ), let proof = ContenteditableTextStyleProof(
+                originalValue: attributedValue,
+                selectionRange: range,
+                selectedText: selectedText,
+                replacement: replacement
+            ) else { return nil }
+            return .uniform(proof)
         }
-        return ContenteditableTextStyleProof(
-            originalValue: attributedValue,
+        guard let snapshot = try structuredContenteditableSnapshot(target, matching: value),
+              try structuredSelectionCoordinatesMatch(
+                target,
+                range: range,
+                fieldRange: snapshot.markerRange,
+                canonicalLength: snapshot.projection.text.utf16.count
+              ),
+              let proof = ContenteditableTextStyleProof.Structured(
+            originalValue: snapshot.value,
+            projection: snapshot.projection,
             selectionRange: range,
             selectedText: selectedText,
             replacement: replacement
-        )
+        ) else { return nil }
+        return .structured(proof)
+    }
+
+    private func clipboardDisplayRange(_ range: TextRange, proof: ContenteditableClipboardProof?) -> TextRange? {
+        if case .structured(let structured)? = proof {
+            return structured.originalProjection.displayRange(for: range)
+        }
+        return range
     }
 
     private func requireContenteditableStyleState(
         _ target: TargetHandle,
-        proof: ContenteditableTextStyleProof,
+        proof: ContenteditableClipboardProof,
         confirmsApplied: Bool
     ) throws -> Bool {
-        guard try contenteditableClipboardTargetIsEligible(target) else { return false }
-        let expectedValue = confirmsApplied ? proof.expectedText : proof.originalText
-        guard let actual = try attributedWholeValue(
-            target.element,
-            matching: expectedValue,
-            failure: .staleSelection
-        ) else {
-            return false
+        switch proof {
+        case .uniform(let uniform):
+            guard try contenteditableClipboardTargetIsEligible(target),
+                  let actual = try attributedWholeValue(
+                    target.element,
+                    matching: confirmsApplied ? uniform.expectedText : uniform.originalText,
+                    failure: .staleSelection
+                  )
+            else { return false }
+            return confirmsApplied ? uniform.confirmsApplied(actual) : uniform.confirmsOriginal(actual)
+        case .structured(let structured):
+            let expected = confirmsApplied ? structured.expectedProjection : structured.originalProjection
+            guard let actual = try structuredContenteditableSnapshot(target, matching: expected.displayText),
+                  actual.projection == expected
+            else { return false }
+            return confirmsApplied ? structured.confirmsApplied(actual.value) : structured.confirmsOriginal(actual.value)
         }
-        return confirmsApplied ? proof.confirmsApplied(actual) : proof.confirmsOriginal(actual)
     }
 
     private func contenteditableClipboardTargetIsEligible(_ target: TargetHandle) throws -> Bool {
-        guard target.role == "AXTextArea",
+        guard try contenteditableRootIsEligible(target),
               ClipboardDirectStaticTextValidation.permits(
                 root: target.element,
                 readRole: { element in
@@ -1589,7 +1616,13 @@ public final class MacSelectionAccess: SelectionAccess {
                     try self.elementChildren(element, failure: .staleSelection)
                 },
                 sameElement: { self.sameElement($0, $1) }
-              ),
+              )
+        else { return false }
+        return true
+    }
+
+    private func contenteditableRootIsEligible(_ target: TargetHandle) throws -> Bool {
+        guard target.role == "AXTextArea",
               try booleanAttribute(target.element, kAXEnabledAttribute as String, failure: .staleSelection) == true,
               let editableAncestor = try elementAttribute(
                 target.element,
@@ -1617,14 +1650,147 @@ public final class MacSelectionAccess: SelectionAccess {
         return AXUIElementGetPid(element, &processID) == .success && Int32(processID) == expected
     }
 
-    private func elementChildren(_ element: AXUIElement, failure: ImrseError) throws -> [AXUIElement] {
+    private func structuredContenteditableProjection(
+        _ target: TargetHandle,
+        matching value: String
+    ) throws -> ContenteditableTextProjection? {
+        guard value.utf16.count <= ContenteditableTextStyleProof.maximumWholeValueUTF16Length,
+              try contenteditableRootIsEligible(target),
+              let currentValue = try wholeValue(target.element, failure: .staleSelection),
+              sameText(currentValue, value)
+        else { return nil }
+        return ClipboardStructuredTextValidation.projection(
+            root: target.element,
+            displayText: value,
+            readRole: { element in
+                guard let role = try self.stringAttribute(element, kAXRoleAttribute, failure: .staleSelection) else {
+                    throw ImrseError.staleSelection
+                }
+                return role
+            },
+            readChildren: { element in
+                try self.elementChildren(
+                    element,
+                    failure: .staleSelection,
+                    maximumCount: ClipboardStructuredTextValidation.maximumNodes
+                )
+            },
+            readText: { element in
+                guard let text = try self.stringAttribute(element, kAXValueAttribute, failure: .staleSelection),
+                      text.utf16.count <= ContenteditableTextStyleProof.maximumWholeValueUTF16Length
+                else { return nil }
+                return text
+            },
+            readParent: { try self.elementAttribute($0, kAXParentAttribute, failure: .staleSelection) },
+            belongsToProcess: { self.hasProcessID($0, equalTo: target.processID) },
+            sameElement: { self.sameElement($0, $1) }
+        )
+    }
+
+    private func structuredContenteditableSnapshot(
+        _ target: TargetHandle,
+        matching value: String
+    ) throws -> (projection: ContenteditableTextProjection, value: NSAttributedString, markerRange: AXTextMarkerRange)? {
+        guard let projection = try structuredContenteditableProjection(target, matching: value),
+              let markerRange = try parameterizedAttribute(
+                target.element,
+                "AXTextMarkerRangeForUIElement",
+                parameter: target.element,
+                failure: .staleSelection
+              ),
+              CFGetTypeID(markerRange) == AXTextMarkerRangeGetTypeID(),
+              let rawValue = try parameterizedAttribute(
+                target.element,
+                "AXAttributedStringForTextMarkerRange",
+                parameter: markerRange,
+                failure: .staleSelection
+              ),
+              CFGetTypeID(rawValue) == CFAttributedStringGetTypeID(),
+              let attributedValue = rawValue as? NSAttributedString,
+              attributedValue.length == projection.text.utf16.count,
+              sameText(attributedValue.string, projection.text),
+              try structuredContenteditableProjection(target, matching: value) == projection
+        else { return nil }
+        return (
+            projection,
+            NSAttributedString(attributedString: attributedValue),
+            unsafeDowncast(markerRange, to: AXTextMarkerRange.self)
+        )
+    }
+
+    private func structuredSelectionCoordinatesMatch(
+        _ target: TargetHandle,
+        range: TextRange,
+        fieldRange: AXTextMarkerRange,
+        canonicalLength: Int
+    ) throws -> Bool {
+        try configureAXMessaging(target.element)
+        var selectedRange: CFTypeRef?
+        let status = AXUIElementCopyAttributeValue(target.element, "AXSelectedTextMarkerRange" as CFString, &selectedRange)
+        guard status == .success,
+              let selectedRange,
+              CFGetTypeID(selectedRange) == AXTextMarkerRangeGetTypeID()
+        else { return false }
+        let selected = unsafeDowncast(selectedRange, to: AXTextMarkerRange.self)
+        guard let fieldStart = try textMarkerIndex(AXTextMarkerRangeCopyStartMarker(fieldRange), on: target.element),
+              let fieldEnd = try textMarkerIndex(AXTextMarkerRangeCopyEndMarker(fieldRange), on: target.element),
+              let selectedStart = try textMarkerIndex(AXTextMarkerRangeCopyStartMarker(selected), on: target.element),
+              let selectedEnd = try textMarkerIndex(AXTextMarkerRangeCopyEndMarker(selected), on: target.element),
+              fieldEnd >= fieldStart,
+              fieldEnd - fieldStart == canonicalLength,
+              selectedStart >= fieldStart,
+              selectedEnd >= selectedStart,
+              selectedEnd <= fieldEnd,
+              selectedStart - fieldStart == range.location,
+              selectedEnd - selectedStart == range.length
+        else { return false }
+        return true
+    }
+
+    private func textMarkerIndex(_ marker: AXTextMarker, on element: AXUIElement) throws -> Int? {
+        guard let value = try parameterizedAttribute(
+            element,
+            "AXIndexForTextMarker",
+            parameter: marker,
+            failure: .staleSelection
+        ), CFGetTypeID(value) == CFNumberGetTypeID()
+        else { return nil }
+        var index: Int64 = 0
+        guard CFNumberGetValue(unsafeDowncast(value, to: CFNumber.self), .sInt64Type, &index),
+              let result = Int(exactly: index), result >= 0
+        else { return nil }
+        return result
+    }
+
+    private func parameterizedAttribute(
+        _ element: AXUIElement,
+        _ attribute: String,
+        parameter: CFTypeRef,
+        failure: ImrseError
+    ) throws -> CFTypeRef? {
+        try configureAXMessaging(element)
+        var value: CFTypeRef?
+        let status = AXUIElementCopyParameterizedAttributeValue(element, attribute as CFString, parameter, &value)
+        if status == .attributeUnsupported || status == .parameterizedAttributeUnsupported
+            || status == .noValue || status == .notImplemented {
+            return nil
+        }
+        guard status == .success, let value else { throw self.failure(.axReadFailure, failure) }
+        return value
+    }
+
+    private func elementChildren(
+        _ element: AXUIElement,
+        failure: ImrseError,
+        maximumCount: Int = 1
+    ) throws -> [AXUIElement] {
         try configureAXMessaging(element)
         var value: CFTypeRef?
         let status = AXUIElementCopyAttributeValue(element, kAXChildrenAttribute as CFString, &value)
         guard status == .success,
               let value,
               CFGetTypeID(value) == CFArrayGetTypeID(),
-              CFArrayGetCount(unsafeDowncast(value, to: CFArray.self)) <= 1,
+              CFArrayGetCount(unsafeDowncast(value, to: CFArray.self)) <= maximumCount,
               let children = value as? [AXUIElement]
         else {
             throw failure

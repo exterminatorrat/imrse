@@ -10,6 +10,7 @@ struct ContenteditableTextStyleProof {
     private static let fontKey = NSAttributedString.Key("AXFont")
     private static let foregroundColorKey = NSAttributedString.Key("AXForegroundColor")
     private static let backgroundColorKey = NSAttributedString.Key("AXBackgroundColor")
+    private static let markedMisspelledKey = NSAttributedString.Key("AXMarkedMisspelled")
     private static let allowedKeys: Set<NSAttributedString.Key> = [fontKey, foregroundColorKey, backgroundColorKey]
     private static let maximumFontDictionaryEntries = 32
     private static let maximumFontDictionaryKeyUTF16Length = 128
@@ -40,13 +41,7 @@ struct ContenteditableTextStyleProof {
         let originalUTF16 = Array(originalString.utf16)
         guard originalUTF16.count == originalValue.length else { return nil }
 
-        var originalRun = NSRange(location: 0, length: 0)
-        let attributes = originalValue.attributes(at: 0, effectiveRange: &originalRun)
-        guard originalRun == NSRange(location: 0, length: originalValue.length),
-              let style = StyleSnapshot(attributes: attributes)
-        else {
-            return nil
-        }
+        guard let style = Self.uniformStyle(in: originalValue) else { return nil }
 
         self.init(
             originalTextUTF16: originalUTF16,
@@ -139,10 +134,30 @@ struct ContenteditableTextStyleProof {
             return false
         }
 
-        var actualRun = NSRange(location: 0, length: 0)
-        let attributes = actual.attributes(at: 0, effectiveRange: &actualRun)
-        return actualRun == NSRange(location: 0, length: actual.length)
-            && style.matches(attributes: attributes)
+        guard let actualStyle = uniformStyle(in: actual) else { return false }
+        return style.matches(actualStyle)
+    }
+
+    private static func uniformStyle(in value: NSAttributedString) -> StyleSnapshot? {
+        guard value.length > 0,
+              value.length <= maximumWholeValueUTF16Length,
+              let style = StyleSnapshot(attributes: value.attributes(at: 0, effectiveRange: nil))
+        else { return nil }
+
+        var index = 0
+        while index < value.length {
+            var run = NSRange(location: 0, length: 0)
+            let attributes = value.attributes(at: index, effectiveRange: &run)
+            guard run.location >= 0,
+                  run.location <= index,
+                  run.length > 0,
+                  run.length <= value.length - run.location,
+                  index < run.location + run.length,
+                  style.matches(attributes: attributes)
+            else { return nil }
+            index = run.location + run.length
+        }
+        return style
     }
 
     private static func frozenString(_ value: Any, maximumUTF16Length: Int) -> FrozenString? {
@@ -374,6 +389,10 @@ struct ContenteditableTextStyleProof {
         let backgroundColor: FrozenColor?
 
         init?(attributes: [NSAttributedString.Key: Any]) {
+            var attributes = attributes
+            if let annotation = attributes.removeValue(forKey: ContenteditableTextStyleProof.markedMisspelledKey) {
+                guard CFGetTypeID(annotation as CFTypeRef) == CFBooleanGetTypeID() else { return nil }
+            }
             guard attributes.keys.allSatisfy(ContenteditableTextStyleProof.allowedKeys.contains),
                   attributes.count == 2 || attributes.count == 3,
                   let fontValue = attributes[ContenteditableTextStyleProof.fontKey],
@@ -427,6 +446,378 @@ struct ContenteditableTextStyleProof {
                 string: String(decoding: textUTF16, as: UTF16.self),
                 attributes: attributes
             )
+        }
+    }
+
+    struct Structured {
+        private struct StyleRun {
+            let location: Int
+            let length: Int
+            let style: ContenteditableTextStyleProof.StyleSnapshot
+
+            var end: Int { location + length }
+        }
+
+        private static let maximumStyleRunCount = 128
+
+        let originalProjection: ContenteditableTextProjection
+        let expectedProjection: ContenteditableTextProjection
+
+        private let originalTextUTF16: [UInt16]
+        private let expectedTextUTF16: [UInt16]
+        private let originalStyleRuns: [StyleRun]
+        private let expectedStyleRuns: [StyleRun]
+
+        var originalText: String { originalProjection.displayText }
+        var expectedText: String { expectedProjection.displayText }
+
+        init?(
+            originalValue: NSAttributedString,
+            projection: ContenteditableTextProjection,
+            selectionRange: ImrseCore.TextRange,
+            selectedText: String,
+            replacement: String
+        ) {
+            let projectionTextUTF16 = Array(projection.text.utf16)
+            guard originalValue.length > 0,
+                  originalValue.length <= ContenteditableTextStyleProof.maximumWholeValueUTF16Length,
+                  originalValue.length == projectionTextUTF16.count
+            else {
+                return nil
+            }
+
+            let originalTextUTF16 = Array(originalValue.string.utf16)
+            guard originalTextUTF16.count == originalValue.length,
+                  originalTextUTF16.elementsEqual(projectionTextUTF16),
+                  let originalStyleRuns = Self.frozenStyleRuns(in: originalValue)
+            else {
+                return nil
+            }
+
+            self.init(
+                originalProjection: projection,
+                originalTextUTF16: originalTextUTF16,
+                originalStyleRuns: originalStyleRuns,
+                selectionRange: selectionRange,
+                selectedText: selectedText,
+                replacement: replacement
+            )
+        }
+
+        func confirmsOriginal(_ actual: NSAttributedString) -> Bool {
+            Self.confirms(actual, textUTF16: originalTextUTF16, styleRuns: originalStyleRuns)
+        }
+
+        func confirmsApplied(_ actual: NSAttributedString) -> Bool {
+            Self.confirms(actual, textUTF16: expectedTextUTF16, styleRuns: expectedStyleRuns)
+        }
+
+        func inverse(
+            selectionRange: ImrseCore.TextRange,
+            selectedText: String,
+            replacement: String
+        ) -> Self? {
+            guard let inverse = Self(
+                originalProjection: expectedProjection,
+                originalTextUTF16: expectedTextUTF16,
+                originalStyleRuns: expectedStyleRuns,
+                selectionRange: selectionRange,
+                selectedText: selectedText,
+                replacement: replacement
+            ),
+            inverse.expectedProjection == originalProjection,
+            inverse.expectedTextUTF16.elementsEqual(originalTextUTF16),
+            Self.styleRunsMatch(inverse.expectedStyleRuns, originalStyleRuns)
+            else {
+                return nil
+            }
+            return inverse
+        }
+
+        private init?(
+            originalProjection: ContenteditableTextProjection,
+            originalTextUTF16: [UInt16],
+            originalStyleRuns: [StyleRun],
+            selectionRange: ImrseCore.TextRange,
+            selectedText: String,
+            replacement: String
+        ) {
+            let projectionTextUTF16 = Array(originalProjection.text.utf16)
+            guard !selectedText.isEmpty,
+                  !replacement.isEmpty,
+                  !originalTextUTF16.isEmpty,
+                  originalTextUTF16.count <= ContenteditableTextStyleProof.maximumWholeValueUTF16Length,
+                  originalTextUTF16.elementsEqual(projectionTextUTF16),
+                  Self.hasCompleteCoverage(originalStyleRuns, length: originalTextUTF16.count),
+                  UTF16SelectionRange.isValid(selectionRange),
+                  selectionRange.length > 0
+            else {
+                return nil
+            }
+
+            let originalString = String(decoding: originalTextUTF16, as: UTF16.self)
+            guard let context = UTF16SelectionRange.substring(originalString, range: selectionRange),
+                  context.utf16.elementsEqual(selectedText.utf16),
+                  let selectedStyle = Self.uniformStyle(
+                    in: selectionRange,
+                    styleRuns: originalStyleRuns
+                  ),
+                  let expectedProjection = originalProjection.replacing(
+                    range: selectionRange,
+                    with: replacement
+                  )
+            else {
+                return nil
+            }
+
+            let replacementUTF16 = Array(replacement.utf16)
+            let retainedLength = originalTextUTF16.count - selectionRange.length
+            guard !replacementUTF16.isEmpty,
+                  replacementUTF16.count <= ContenteditableTextStyleProof.maximumWholeValueUTF16Length - retainedLength
+            else {
+                return nil
+            }
+
+            let expectedLength = retainedLength + replacementUTF16.count
+            var expectedTextUTF16: [UInt16] = []
+            expectedTextUTF16.reserveCapacity(expectedLength)
+            expectedTextUTF16.append(contentsOf: originalTextUTF16[..<selectionRange.location])
+            expectedTextUTF16.append(contentsOf: replacementUTF16)
+            expectedTextUTF16.append(contentsOf: originalTextUTF16[(selectionRange.location + selectionRange.length)...])
+
+            guard expectedTextUTF16.elementsEqual(expectedProjection.text.utf16),
+                  let expectedStyleRuns = Self.replacing(
+                    originalStyleRuns,
+                    sourceLength: originalTextUTF16.count,
+                    range: selectionRange,
+                    replacementLength: replacementUTF16.count,
+                    expectedLength: expectedLength,
+                    with: selectedStyle
+                  )
+            else {
+                return nil
+            }
+
+            self.originalProjection = originalProjection
+            self.expectedProjection = expectedProjection
+            self.originalTextUTF16 = originalTextUTF16
+            self.expectedTextUTF16 = expectedTextUTF16
+            self.originalStyleRuns = originalStyleRuns
+            self.expectedStyleRuns = expectedStyleRuns
+        }
+
+        private static func frozenStyleRuns(in value: NSAttributedString) -> [StyleRun]? {
+            guard value.length > 0,
+                  value.length <= ContenteditableTextStyleProof.maximumWholeValueUTF16Length
+            else {
+                return nil
+            }
+
+            var runs: [StyleRun] = []
+            var effectiveRangeCount = 0
+            var index = 0
+            while index < value.length {
+                var run = NSRange(location: 0, length: 0)
+                let attributes = value.attributes(at: index, effectiveRange: &run)
+                guard effectiveRangeCount < maximumStyleRunCount,
+                      run.location >= 0,
+                      run.location <= index,
+                      run.length > 0,
+                      run.length <= value.length - run.location,
+                      index < run.location + run.length,
+                      let style = ContenteditableTextStyleProof.StyleSnapshot(attributes: attributes),
+                      appendCanonicalRun(
+                        location: index,
+                        length: run.location + run.length - index,
+                        style: style,
+                        to: &runs
+                      )
+                else {
+                    return nil
+                }
+                effectiveRangeCount += 1
+                index = run.location + run.length
+            }
+
+            return hasCompleteCoverage(runs, length: value.length) ? runs : nil
+        }
+
+        private static func appendCanonicalRun(
+            location: Int,
+            length: Int,
+            style: ContenteditableTextStyleProof.StyleSnapshot,
+            to runs: inout [StyleRun]
+        ) -> Bool {
+            let maximumLength = ContenteditableTextStyleProof.maximumWholeValueUTF16Length
+            guard location >= 0,
+                  location <= maximumLength,
+                  length > 0,
+                  length <= maximumLength - location
+            else {
+                return false
+            }
+
+            if let previous = runs.last {
+                guard previous.end == location else { return false }
+                if previous.style.matches(style) {
+                    runs[runs.count - 1] = StyleRun(
+                        location: previous.location,
+                        length: previous.length + length,
+                        style: previous.style
+                    )
+                    return true
+                }
+            } else if location != 0 {
+                return false
+            }
+
+            guard runs.count < maximumStyleRunCount else { return false }
+            runs.append(StyleRun(location: location, length: length, style: style))
+            return true
+        }
+
+        private static func hasCompleteCoverage(_ runs: [StyleRun], length: Int) -> Bool {
+            guard length > 0,
+                  !runs.isEmpty,
+                  runs[0].location == 0
+            else {
+                return false
+            }
+
+            var nextLocation = 0
+            for run in runs {
+                guard run.location == nextLocation,
+                      run.length > 0,
+                      run.length <= length - nextLocation
+                else {
+                    return false
+                }
+                nextLocation += run.length
+            }
+            return nextLocation == length
+        }
+
+        private static func uniformStyle(
+            in range: ImrseCore.TextRange,
+            styleRuns: [StyleRun]
+        ) -> ContenteditableTextStyleProof.StyleSnapshot? {
+            let end = range.location + range.length
+            var coveredUntil = range.location
+            var selectedStyle: ContenteditableTextStyleProof.StyleSnapshot?
+
+            for run in styleRuns {
+                let runEnd = run.end
+                guard run.location < end, runEnd > range.location else { continue }
+
+                let overlapStart = max(run.location, range.location)
+                let overlapEnd = min(runEnd, end)
+                guard overlapStart == coveredUntil else { return nil }
+                if let selectedStyle {
+                    guard selectedStyle.matches(run.style) else { return nil }
+                } else {
+                    selectedStyle = run.style
+                }
+                coveredUntil = overlapEnd
+            }
+
+            guard coveredUntil == end else { return nil }
+            return selectedStyle
+        }
+
+        private static func replacing(
+            _ sourceRuns: [StyleRun],
+            sourceLength: Int,
+            range: ImrseCore.TextRange,
+            replacementLength: Int,
+            expectedLength: Int,
+            with style: ContenteditableTextStyleProof.StyleSnapshot
+        ) -> [StyleRun]? {
+            let maximumLength = ContenteditableTextStyleProof.maximumWholeValueUTF16Length
+            guard range.location >= 0,
+                  range.length > 0,
+                  range.location <= sourceLength,
+                  range.length <= sourceLength - range.location
+            else {
+                return nil
+            }
+            let retainedLength = sourceLength - range.length
+            guard replacementLength > 0,
+                  replacementLength <= maximumLength - retainedLength,
+                  expectedLength == retainedLength + replacementLength
+            else {
+                return nil
+            }
+
+            let selectionEnd = range.location + range.length
+            var runs: [StyleRun] = []
+
+            for run in sourceRuns where run.location < range.location {
+                let retainedEnd = min(run.end, range.location)
+                guard retainedEnd > run.location,
+                      appendCanonicalRun(
+                        location: run.location,
+                        length: retainedEnd - run.location,
+                        style: run.style,
+                        to: &runs
+                      )
+                else {
+                    return nil
+                }
+            }
+
+            guard appendCanonicalRun(
+                location: range.location,
+                length: replacementLength,
+                style: style,
+                to: &runs
+            ) else {
+                return nil
+            }
+
+            for run in sourceRuns where run.end > selectionEnd {
+                let retainedStart = max(run.location, selectionEnd)
+                let shiftedLocation = range.location + replacementLength + retainedStart - selectionEnd
+                guard appendCanonicalRun(
+                    location: shiftedLocation,
+                    length: run.end - retainedStart,
+                    style: run.style,
+                    to: &runs
+                ) else {
+                    return nil
+                }
+            }
+
+            guard hasCompleteCoverage(runs, length: expectedLength) else { return nil }
+            return runs
+        }
+
+        private static func styleRunsMatch(_ lhs: [StyleRun], _ rhs: [StyleRun]) -> Bool {
+            guard lhs.count == rhs.count else { return false }
+            for (left, right) in zip(lhs, rhs) {
+                guard left.location == right.location,
+                      left.length == right.length,
+                      left.style.matches(right.style)
+                else {
+                    return false
+                }
+            }
+            return true
+        }
+
+        private static func confirms(
+            _ actual: NSAttributedString,
+            textUTF16: [UInt16],
+            styleRuns: [StyleRun]
+        ) -> Bool {
+            guard actual.length > 0,
+                  actual.length <= ContenteditableTextStyleProof.maximumWholeValueUTF16Length,
+                  actual.length == textUTF16.count,
+                  textUTF16.elementsEqual(actual.string.utf16),
+                  let actualStyleRuns = frozenStyleRuns(in: actual)
+            else {
+                return false
+            }
+            return styleRunsMatch(styleRuns, actualStyleRuns)
         }
     }
 }
