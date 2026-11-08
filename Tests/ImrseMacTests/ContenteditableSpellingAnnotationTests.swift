@@ -25,6 +25,8 @@ struct ContenteditableSpellingAnnotationTests {
 
         #expect(originalText.utf16.count == 29)
         #expect(appliedText.utf16.count == 34)
+        let annotation = try #require(applied.attribute(markedMisspelledAttribute, at: 15, effectiveRange: nil))
+        #expect(CFGetTypeID(annotation as CFTypeRef) == CFBooleanGetTypeID())
         #expect(proof.confirmsApplied(applied))
         let inverse = try #require(proof.inverse(
             selectionRange: TextRange(location: 15, length: 11),
