@@ -320,6 +320,28 @@ class PackageLocalCandidateTests(unittest.TestCase):
             with self.assertRaisesRegex(PackageError, "C runtime"):
                 packager.validate_runtime_symbols(ROOT / "unused-binary")
 
+    def test_runtime_module_validation_allows_tooling_but_requires_app_runtime(self):
+        build_tool_modules = {"ArgumentParser", "ArgumentParserToolInfo"}
+        expected_runtime_modules = {
+            module
+            for dependency in RUNTIME_DEPENDENCIES
+            if dependency[0] != "swift-argument-parser"
+            for module in dependency[3]
+        }
+        self.assertTrue(build_tool_modules.isdisjoint(expected_runtime_modules))
+        with patch.object(packager, "runtime_modules_from_binary", return_value=expected_runtime_modules):
+            self.assertEqual(
+                packager.validate_runtime_modules(ROOT / "unused-binary"),
+                expected_runtime_modules,
+            )
+        with patch.object(
+            packager,
+            "runtime_modules_from_binary",
+            return_value=expected_runtime_modules - {"MLX"},
+        ):
+            with self.assertRaisesRegex(PackageError, "MLX"):
+                packager.validate_runtime_modules(ROOT / "unused-binary")
+
     def test_source_input_copy_is_bound_to_clean_commit_and_tree_without_absolute_paths(self):
         with tempfile.TemporaryDirectory() as temp:
             build_root = Path(temp) / "isolated-build"

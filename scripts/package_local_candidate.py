@@ -91,6 +91,11 @@ RUNTIME_DEPENDENCIES = (
 C_RUNTIME_DEPENDENCIES = (
     ("yyjson", "0.12.0", "8b4a38dc994a110abaec8a400615567bd996105f", ("_yyjson_read_opts",), "yyjson-LICENSE"),
 )
+BUILD_TOOL_ONLY_DEPENDENCIES = frozenset({"swift-argument-parser"})
+APP_RUNTIME_DEPENDENCIES = tuple(
+    dependency for dependency in RUNTIME_DEPENDENCIES
+    if dependency[0] not in BUILD_TOOL_ONLY_DEPENDENCIES
+)
 MLX_CORE_LICENSE = "mlx-core-LICENSE"
 FORBIDDEN_SUFFIXES = {".bin", ".gguf", ".ggml", ".safetensors", ".onnx", ".pt", ".pth"}
 FORBIDDEN_FILE_NAMES = {"config.json", "credentials.json", "provider-config.json"}
@@ -780,14 +785,14 @@ def runtime_modules_from_binary(binary, architecture="arm64"):
     if not symbols:
         raise PackageError(f"could not read Swift symbol modules from the {architecture} executable")
     demangled = run(["xcrun", "swift-demangle"], input_text="\n".join(symbols))
-    expected = {module for dependency in RUNTIME_DEPENDENCIES for module in dependency[3]}
+    expected = {module for dependency in APP_RUNTIME_DEPENDENCIES for module in dependency[3]}
     lines = demangled.splitlines()
     return {module for module in expected if any(re.search(rf"\b{re.escape(module)}\.", line) for line in lines)}
 
 
 def validate_runtime_modules(binary, architecture="arm64"):
     observed = runtime_modules_from_binary(binary, architecture)
-    expected = {module for dependency in RUNTIME_DEPENDENCIES for module in dependency[3]}
+    expected = {module for dependency in APP_RUNTIME_DEPENDENCIES for module in dependency[3]}
     missing = sorted(expected - observed)
     if missing:
         raise PackageError(f"{architecture} executable is missing expected runtime module symbols: {', '.join(missing)}")
@@ -1845,7 +1850,7 @@ def candidate_manifest(root, source, source_tree_hash, bundle, archive_hash, arc
     validate_app_version_metadata(candidate_info, source_info)
     pins = read_pins(root)
     runtime = []
-    for identity, _, _, modules, license_name in RUNTIME_DEPENDENCIES:
+    for identity, _, _, modules, license_name in APP_RUNTIME_DEPENDENCIES:
         license_path = bundle / "Contents/Resources/ThirdPartyLicenses" / license_name
         runtime.append({
             "package": identity,
