@@ -6,6 +6,74 @@ import CoreGraphics
 import Foundation
 import ImrseCore
 
+enum SelectionTargetContextValidation {
+    enum Document: Equatable {
+        case unavailable
+        case value([UInt16])
+        case malformed
+    }
+
+    enum DocumentRead: Equatable {
+        case context(Document)
+        case failed(SelectionFailureReason)
+    }
+
+    static let maximumDocumentUTF16Length = 4_096
+
+    static func documentRead(status: AXError, value: CFTypeRef?) -> DocumentRead {
+        if status == .noValue {
+            return value == nil ? .context(.unavailable) : .failed(.documentContextUnavailable)
+        }
+        guard status == .success else {
+            return .failed(status == .attributeUnsupported ? .documentContextUnavailable : .axReadFailure)
+        }
+        guard let value, let document = value as? String else {
+            return .failed(.documentContextUnavailable)
+        }
+        let context = self.document(document)
+        guard context != .malformed else { return .failed(.documentContextUnavailable) }
+        return .context(context)
+    }
+
+    static func document(_ value: String) -> Document {
+        var utf16: [UInt16] = []
+        for unit in value.utf16 {
+            guard utf16.count < maximumDocumentUTF16Length else { return .malformed }
+            utf16.append(unit)
+        }
+        guard !utf16.isEmpty else { return .malformed }
+        return .value(utf16)
+    }
+
+    static func failureReason<Window>(
+        capturedWindow: Window,
+        capturedDocument: Document,
+        currentWindow: Window?,
+        intent: SelectionEditIntent,
+        sameWindow: (Window, Window) -> Bool,
+        isValidWindow: (Window) throws -> Bool,
+        readDocument: (Window) throws -> Document
+    ) throws -> SelectionFailureReason? {
+        guard let currentWindow else {
+            return intent == .insertAtCaret ? .caretProofUnavailable : .windowContextUnavailable
+        }
+        guard sameWindow(capturedWindow, currentWindow), try isValidWindow(currentWindow) else {
+            return intent == .insertAtCaret ? .caretProofUnavailable : .windowContextChanged
+        }
+        let currentDocument = try readDocument(currentWindow)
+        switch (capturedDocument, currentDocument) {
+        case (.malformed, _), (_, .malformed):
+            return .documentContextUnavailable
+        case (.unavailable, .unavailable):
+            return nil
+        case let (.value(captured), .value(current)) where captured.elementsEqual(current):
+            return nil
+        default:
+            return .documentContextChanged
+        }
+    }
+}
+
 @MainActor
 public final class MacSelectionAccess: SelectionAccess {
     private typealias TextRange = ImrseCore.TextRange
@@ -25,7 +93,8 @@ public final class MacSelectionAccess: SelectionAccess {
         let processID: Int32
         let role: String
         let intent: SelectionEditIntent
-        let insertionWindow: AXUIElement?
+        let window: AXUIElement
+        let document: SelectionTargetContextValidation.Document
         let application: AXUIElement
         let element: AXUIElement
     }
@@ -172,7 +241,6 @@ public final class MacSelectionAccess: SelectionAccess {
         }
         guard let text = selected else { throw failure(.selectedTextUnavailable, .noSelection) }
         let insertionProof: CaretInsertionProof?
-        let insertionWindow: AXUIElement?
         if inserting {
             guard canReadValue, range.length == 0, text.isEmpty else {
                 throw failure(.caretProofUnavailable, .insertionUnavailable)
@@ -192,15 +260,10 @@ public final class MacSelectionAccess: SelectionAccess {
                 composition: composition
             ) else { throw failure(.caretProofUnavailable, .insertionUnavailable) }
             insertionProof = proof
-            guard let window = try elementAttribute(element, kAXWindowAttribute, failure: .insertionUnavailable),
-                  hasProcessID(window, equalTo: processID),
-                  try stringAttribute(window, kAXRoleAttribute, failure: .insertionUnavailable) == (kAXWindowRole as String)
-            else { throw failure(.caretProofUnavailable, .insertionUnavailable) }
-            insertionWindow = window
         } else {
             insertionProof = nil
-            insertionWindow = nil
         }
+        let windowContext = try captureWindowContext(for: element, processID: processID, intent: intent)
 
         let applicationID = runningApplication.bundleIdentifier ?? "pid:\(processID)"
         let snapshot = SelectionSnapshot(
@@ -218,7 +281,8 @@ public final class MacSelectionAccess: SelectionAccess {
             processID: processID,
             role: role,
             intent: intent,
-            insertionWindow: insertionWindow,
+            window: windowContext.window,
+            document: windowContext.document,
             application: application,
             element: element
         )
@@ -801,6 +865,27 @@ public final class MacSelectionAccess: SelectionAccess {
         return selection
     }
 
+    private func captureWindowContext(
+        for element: AXUIElement,
+        processID: Int32,
+        intent: SelectionEditIntent
+    ) throws -> (window: AXUIElement, document: SelectionTargetContextValidation.Document) {
+        let failureReason: SelectionFailureReason = intent == .insertAtCaret
+            ? .caretProofUnavailable
+            : .windowContextUnavailable
+        let error: ImrseError = intent == .insertAtCaret ? .insertionUnavailable : .noSelection
+        guard let window = try elementAttribute(element, kAXWindowAttribute, failure: error),
+              let windowProcessID = processIdentifier(of: window),
+              windowProcessID == processID,
+              let role = try stringAttribute(window, kAXRoleAttribute, failure: error),
+              role == (kAXWindowRole as String)
+        else {
+            throw failure(failureReason, error)
+        }
+        let document = try documentContext(window, failure: error)
+        return (window, document)
+    }
+
     private func validateSelectionTarget(_ target: TargetHandle) throws {
         guard Self.accessibilityPermissionGranted else { throw ImrseError.permissionRequired }
         guard !IsSecureEventInputEnabled(), try !isSecure(target.element, in: target.application) else {
@@ -816,12 +901,23 @@ public final class MacSelectionAccess: SelectionAccess {
         guard try stringAttribute(target.element, kAXRoleAttribute, failure: .targetLost) == target.role else {
             throw failure(.roleChanged, .staleSelection)
         }
+        let currentWindow = try elementAttribute(target.element, kAXWindowAttribute, failure: .staleSelection)
+        if let reason = try SelectionTargetContextValidation.failureReason(
+            capturedWindow: target.window,
+            capturedDocument: target.document,
+            currentWindow: currentWindow,
+            intent: target.intent,
+            sameWindow: { self.sameElement($0, $1) },
+            isValidWindow: { window in
+                guard self.processIdentifier(of: window) == target.processID else { return false }
+                return try self.stringAttribute(window, kAXRoleAttribute, failure: .staleSelection)
+                    == (kAXWindowRole as String)
+            },
+            readDocument: { window in try self.documentContext(window, failure: .staleSelection) }
+        ) {
+            throw failure(reason, .staleSelection)
+        }
         if target.intent == .insertAtCaret {
-            guard let boundWindow = target.insertionWindow,
-                  let currentWindow = try elementAttribute(target.element, kAXWindowAttribute, failure: .staleSelection),
-                  hasProcessID(currentWindow, equalTo: target.processID),
-                  sameElement(boundWindow, currentWindow)
-            else { throw failure(.caretProofUnavailable, .staleSelection) }
             guard supportsPlainTextValueReplacement(target.element, role: target.role) else {
                 throw failure(.caretProofUnavailable, .insertionUnavailable)
             }
@@ -832,6 +928,29 @@ public final class MacSelectionAccess: SelectionAccess {
                     .insertionUnavailable
                 )
             }
+        }
+    }
+
+    private func documentContext(
+        _ window: AXUIElement,
+        failure error: ImrseError
+    ) throws -> SelectionTargetContextValidation.Document {
+        try configureAXMessaging(window)
+        var attributes: CFArray?
+        let attributesStatus = AXUIElementCopyAttributeNames(window, &attributes)
+        guard attributesStatus == .success,
+              let attributes = attributes as? [String]
+        else {
+            throw failure(.axReadFailure, error)
+        }
+        guard attributes.contains(kAXDocumentAttribute as String) else { return .unavailable }
+        var value: CFTypeRef?
+        let status = AXUIElementCopyAttributeValue(window, kAXDocumentAttribute as CFString, &value)
+        switch SelectionTargetContextValidation.documentRead(status: status, value: value) {
+        case let .context(document):
+            return document
+        case let .failed(reason):
+            throw failure(reason, error)
         }
     }
 
@@ -1646,8 +1765,13 @@ public final class MacSelectionAccess: SelectionAccess {
     }
 
     private func hasProcessID(_ element: AXUIElement, equalTo expected: Int32) -> Bool {
+        processIdentifier(of: element) == expected
+    }
+
+    private func processIdentifier(of element: AXUIElement) -> Int32? {
         var processID: pid_t = 0
-        return AXUIElementGetPid(element, &processID) == .success && Int32(processID) == expected
+        guard AXUIElementGetPid(element, &processID) == .success else { return nil }
+        return Int32(processID)
     }
 
     private func structuredContenteditableProjection(

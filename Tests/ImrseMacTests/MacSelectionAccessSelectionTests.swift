@@ -71,6 +71,172 @@ final class MacSelectionAccessSelectionTests: XCTestCase {
         XCTAssertEqual(focusReads, 0)
     }
 
+    @MainActor
+    func testWindowContextRefusalSkipsDocumentReadAndMutation() throws {
+        let captured = WindowFixture(id: 7, processID: 42, role: "AXWindow")
+        let scenarios: [(WindowFixture?, SelectionFailureReason)] = [
+            (nil, .windowContextUnavailable),
+            (WindowFixture(id: 7, processID: 43, role: "AXWindow"), .windowContextChanged),
+            (WindowFixture(id: 8, processID: 42, role: "AXWindow"), .windowContextChanged),
+            (WindowFixture(id: 7, processID: 42, role: "AXGroup"), .windowContextChanged)
+        ]
+
+        for (current, expectedReason) in scenarios {
+            var documentReads = 0
+            var mutations = 0
+            let reason = try SelectionTargetContextValidation.failureReason(
+                capturedWindow: captured,
+                capturedDocument: .unavailable,
+                currentWindow: current,
+                intent: .replaceSelection,
+                sameWindow: { $0.id == $1.id },
+                isValidWindow: { $0.processID == 42 && $0.role == "AXWindow" },
+                readDocument: { _ in documentReads += 1; return .unavailable }
+            )
+
+            XCTAssertEqual(reason, expectedReason)
+            XCTAssertEqual(documentReads, 0)
+            XCTAssertThrowsError(try VerifiedAction.perform(
+                verify: {
+                    guard reason == nil else { throw ImrseError.staleSelection }
+                },
+                action: { mutations += 1 }
+            )) { error in
+                XCTAssertEqual(error as? ImrseError, .staleSelection)
+            }
+            XCTAssertEqual(mutations, 0)
+        }
+
+        let insertionReason = try SelectionTargetContextValidation.failureReason(
+            capturedWindow: captured,
+            capturedDocument: .unavailable,
+            currentWindow: nil,
+            intent: .insertAtCaret,
+            sameWindow: { $0.id == $1.id },
+            isValidWindow: { _ in XCTFail("Missing windows must be rejected first"); return false },
+            readDocument: { _ in XCTFail("Missing windows must not read documents"); return .unavailable }
+        )
+        XCTAssertEqual(insertionReason, .caretProofUnavailable)
+    }
+
+    func testValidWindowContextReadsDocumentOnlyAfterIdentityPidAndRolePass() throws {
+        let captured = WindowFixture(id: 7, processID: 42, role: "AXWindow")
+        var events: [String] = []
+        let reason = try SelectionTargetContextValidation.failureReason(
+            capturedWindow: captured,
+            capturedDocument: .unavailable,
+            currentWindow: captured,
+            intent: .replaceSelection,
+            sameWindow: { $0.id == $1.id },
+            isValidWindow: { events.append("window"); return $0.processID == 42 && $0.role == "AXWindow" },
+            readDocument: { _ in events.append("document"); return .unavailable }
+        )
+
+        XCTAssertNil(reason)
+        XCTAssertEqual(events, ["window", "document"])
+    }
+
+    func testMissingDocumentVersionOnlyAllowsNilToNil() throws {
+        XCTAssertNil(try targetContextFailure())
+        XCTAssertEqual(
+            try targetContextFailure(capturedDocument: SelectionTargetContextValidation.document("document-A")),
+            .documentContextChanged
+        )
+        XCTAssertEqual(
+            try targetContextFailure(currentDocument: SelectionTargetContextValidation.document("document-A")),
+            .documentContextChanged
+        )
+    }
+
+    func testTargetContextRequiresExactDocumentUTF16WhenAvailable() throws {
+        XCTAssertNil(try targetContextFailure(
+            capturedDocument: SelectionTargetContextValidation.document("document-😀"),
+            currentDocument: SelectionTargetContextValidation.document("document-😀")
+        ))
+        XCTAssertEqual(
+            try targetContextFailure(
+                capturedDocument: SelectionTargetContextValidation.document("document-A"),
+                currentDocument: SelectionTargetContextValidation.document("document-B")
+            ),
+            .documentContextChanged
+        )
+        XCTAssertEqual(
+            try targetContextFailure(
+                capturedDocument: SelectionTargetContextValidation.document("é"),
+                currentDocument: SelectionTargetContextValidation.document("e\u{0301}")
+            ),
+            .documentContextChanged
+        )
+        XCTAssertEqual(
+            try targetContextFailure(currentDocument: .malformed),
+            .documentContextUnavailable
+        )
+    }
+
+    func testDocumentAttributeDecodingHandlesNoValueMalformedValuesAndReadErrors() {
+        XCTAssertEqual(
+            SelectionTargetContextValidation.documentRead(status: .noValue, value: nil),
+            .context(.unavailable)
+        )
+        XCTAssertEqual(
+            SelectionTargetContextValidation.documentRead(status: .noValue, value: "unexpected" as CFString),
+            .failed(.documentContextUnavailable)
+        )
+        XCTAssertEqual(
+            SelectionTargetContextValidation.documentRead(status: .success, value: kCFBooleanTrue),
+            .failed(.documentContextUnavailable)
+        )
+        XCTAssertEqual(
+            SelectionTargetContextValidation.documentRead(status: .success, value: nil),
+            .failed(.documentContextUnavailable)
+        )
+        XCTAssertEqual(
+            SelectionTargetContextValidation.documentRead(status: .success, value: String(
+                repeating: "x",
+                count: SelectionTargetContextValidation.maximumDocumentUTF16Length + 1
+            ) as CFString),
+            .failed(.documentContextUnavailable)
+        )
+        XCTAssertEqual(
+            SelectionTargetContextValidation.documentRead(status: .cannotComplete, value: nil),
+            .failed(.axReadFailure)
+        )
+        XCTAssertEqual(
+            SelectionTargetContextValidation.documentRead(status: .success, value: "document-😀" as CFString),
+            .context(.value(Array("document-😀".utf16)))
+        )
+    }
+
+    @MainActor
+    func testDocumentReadErrorPropagatesBeforeMutationAuthority() {
+        let captured = WindowFixture(id: 7, processID: 42, role: "AXWindow")
+        var documentReads = 0
+        var mutations = 0
+
+        XCTAssertThrowsError(try VerifiedAction.perform(
+            verify: {
+                _ = try SelectionTargetContextValidation.failureReason(
+                    capturedWindow: captured,
+                    capturedDocument: .unavailable,
+                    currentWindow: captured,
+                    intent: .replaceSelection,
+                    sameWindow: { $0.id == $1.id },
+                    isValidWindow: { $0.processID == 42 && $0.role == "AXWindow" },
+                    readDocument: { _ in
+                        documentReads += 1
+                        throw TestError.documentReadFailed
+                    }
+                )
+            },
+            action: { mutations += 1 }
+        )) { error in
+            XCTAssertEqual(error as? TestError, .documentReadFailed)
+        }
+
+        XCTAssertEqual(documentReads, 1)
+        XCTAssertEqual(mutations, 0)
+    }
+
     func testSelectionReadReasonsDistinguishMissingInvalidAndEmptyRanges() {
         XCTAssertEqual(SelectionReadValidation.rangeFailure(nil, allowingEmpty: false), .selectedRangeUnavailable)
         XCTAssertEqual(SelectionReadValidation.rangeFailure(.init(location: -1, length: 1), allowingEmpty: false), .invalidSelectedRange)
@@ -464,13 +630,36 @@ final class MacSelectionAccessSelectionTests: XCTestCase {
         )
     }
 
+    private func targetContextFailure(
+        capturedDocument: SelectionTargetContextValidation.Document = .unavailable,
+        currentDocument: SelectionTargetContextValidation.Document = .unavailable
+    ) throws -> SelectionFailureReason? {
+        let window = WindowFixture(id: 7, processID: 42, role: "AXWindow")
+        return try SelectionTargetContextValidation.failureReason(
+            capturedWindow: window,
+            capturedDocument: capturedDocument,
+            currentWindow: window,
+            intent: .replaceSelection,
+            sameWindow: { $0.id == $1.id },
+            isValidWindow: { $0.processID == 42 && $0.role == "AXWindow" },
+            readDocument: { _ in currentDocument }
+        )
+    }
+
     private struct Target {
         let id: Int
+    }
+
+    private struct WindowFixture {
+        let id: Int
+        let processID: Int32
+        let role: String
     }
 
     private enum TestError: Error, Equatable {
         case focusReadFailed
         case manualAccessibilityRequestFailed
         case staleTarget
+        case documentReadFailed
     }
 }

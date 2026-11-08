@@ -32,6 +32,10 @@ public enum SelectionFailureReason: String, Equatable, Sendable {
     case foregroundApplicationChanged
     case focusedElementChanged
     case roleChanged
+    case windowContextUnavailable
+    case windowContextChanged
+    case documentContextUnavailable
+    case documentContextChanged
     case rangeChanged
     case textChanged
     case axMessagingFailure
