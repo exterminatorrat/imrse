@@ -4,6 +4,13 @@ on:
   pull_request:
   workflow_dispatch:
     inputs:
+      mode:
+        description: Verify the default jobs or run the exact hosted combined build
+        type: choice
+        options:
+          - verify
+          - hosted-combined-535b7f8
+        default: verify
       qualification_only:
         description: Observe the hosted Mac without resolving or building packages
         type: boolean
@@ -12,7 +19,7 @@ permissions:
   contents: read
 jobs:
   namespace-qualification:
-    if: ${{ github.event_name != 'workflow_dispatch' || !inputs.qualification_only }}
+    if: ${{ github.event_name != 'workflow_dispatch' || (inputs.mode == 'verify' && !inputs.qualification_only) }}
     runs-on: namespace-profile-imrse
     timeout-minutes: 3
     steps:
@@ -24,7 +31,7 @@ jobs:
           docker version --format '{{.Server.Os}}/{{.Server.Arch}}'
           docker run --rm --pull=always alpine:3.21 uname -sm
   portable:
-    if: ${{ github.event_name != 'workflow_dispatch' || !inputs.qualification_only }}
+    if: ${{ github.event_name != 'workflow_dispatch' || (inputs.mode == 'verify' && !inputs.qualification_only) }}
     needs: namespace-qualification
     runs-on: namespace-profile-imrse
     container: swift:6.2
@@ -35,7 +42,7 @@ jobs:
       - run: swift test -Xswiftc -warnings-as-errors
       - run: swift test --package-path pill-kit/native -Xswiftc -warnings-as-errors
   native:
-    if: ${{ github.event_name != 'workflow_dispatch' || !inputs.qualification_only }}
+    if: ${{ github.event_name != 'workflow_dispatch' || (inputs.mode == 'verify' && !inputs.qualification_only) }}
     runs-on: macos-15
     env:
       DEVELOPER_DIR: /Applications/Xcode_26.3.app/Contents/Developer
@@ -48,7 +55,7 @@ jobs:
       - run: swift test --package-path pill-kit/native -Xswiftc -warnings-as-errors
       - run: python3 pill-kit/scripts/verify-assets.py
   package:
-    if: ${{ github.event_name != 'workflow_dispatch' || !inputs.qualification_only }}
+    if: ${{ github.event_name != 'workflow_dispatch' || (inputs.mode == 'verify' && !inputs.qualification_only) }}
     runs-on: macos-26
     env:
       DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
@@ -72,7 +79,7 @@ jobs:
         env:
           IMRSE_DIST_DIR: ${{ runner.temp }}/imrse-ci-package-validation
   design:
-    if: ${{ github.event_name != 'workflow_dispatch' || !inputs.qualification_only }}
+    if: ${{ github.event_name != 'workflow_dispatch' || (inputs.mode == 'verify' && !inputs.qualification_only) }}
     needs: namespace-qualification
     runs-on: namespace-profile-imrse
     defaults:
@@ -98,7 +105,7 @@ jobs:
           name: visual-states
           path: pill-kit/web/test-results
   hosted-macos-qualification:
-    if: ${{ github.event_name == 'workflow_dispatch' && inputs.qualification_only }}
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.mode == 'verify' && inputs.qualification_only }}
     runs-on: xcode-27
     timeout-minutes: 5
     env:
@@ -187,3 +194,39 @@ jobs:
           name: imrse-hosted-qualification-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/imrse-hosted-qualification/qualification.json
           if-no-files-found: error
+
+  hosted-combined-build:
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.mode == 'hosted-combined-535b7f8' }}
+    runs-on: xcode-27
+    timeout-minutes: 90
+    steps:
+      - name: Check out control revision
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.sha }}
+          path: control
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Check out exact build source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: 535b7f85720b2e53c60604e8b7c8abfb4e97ca4b
+          path: source
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Run exact combined build under bounded scope
+        shell: bash
+        env:
+          PYTHONDONTWRITEBYTECODE: "1"
+          PYTHONNOUSERSITE: "1"
+        run: |
+          set -euo pipefail
+          EVIDENCE="$RUNNER_TEMP/imrse-hosted-combined-535b7f8-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          test ! -e "$EVIDENCE"
+          /usr/bin/python3 "$GITHUB_WORKSPACE/control/.github/hosted/hosted_combined_scoped_build.py" \
+            --control "$GITHUB_WORKSPACE/control" \
+            --source "$GITHUB_WORKSPACE/source" \
+            --evidence "$EVIDENCE" \
+            --control-commit "$GITHUB_SHA" \
+            --source-commit 535b7f85720b2e53c60604e8b7c8abfb4e97ca4b \
+            --source-tree 711a36772737488bb99ffd3a00cbce277be68a68
