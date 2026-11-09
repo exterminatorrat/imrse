@@ -159,7 +159,13 @@ jobs:
               if pressure != '1' or not used or float(used[1]) != 0:
                   failures.append('normal-pressure-zero-swap')
               filesystem = os.statvfs(root)
-              volume = plistlib.loads(subprocess.check_output(['/usr/sbin/diskutil', 'info', '-plist', str(root)], timeout=30))
+              disk_rows = subprocess.check_output(['/bin/df', '-P', str(root)], text=True, timeout=30).splitlines()
+              if len(disk_rows) != 2:
+                  raise ValueError('filesystem-device-unavailable')
+              device = disk_rows[1].split()[0]
+              if not re.fullmatch(r'/dev/disk[0-9]+(?:s[0-9]+)*', device):
+                  raise ValueError('filesystem-device-invalid')
+              volume = plistlib.loads(subprocess.check_output(['/usr/sbin/diskutil', 'info', '-plist', device], timeout=30))
               reference = volume['APFSContainerReference']
               containers = plistlib.loads(subprocess.check_output(['/usr/sbin/diskutil', 'apfs', 'list', '-plist', reference], timeout=30))
               container = next(item for item in containers['Containers'] if item['ContainerReference'] == reference)
