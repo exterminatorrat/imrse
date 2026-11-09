@@ -459,6 +459,103 @@ final class TransformationEngineTests: XCTestCase {
         XCTAssertNil(engine.diagnostics.error)
     }
 
+    func testComposedSelectionWithDecomposedOutputIsReplacedExactly() async {
+        let composed = "caf\u{00E9}"
+        let decomposed = "cafe\u{0301}"
+        XCTAssertNotEqual(Array(composed.utf16), Array(decomposed.utf16))
+        let target = snapshot(
+            text: composed,
+            range: ImrseCore.TextRange(location: 4, length: composed.utf16.count)
+        )
+        let access = StubSelectionAccess(target: target)
+        let engine = TransformationEngine(
+            selectionAccess: access,
+            textProvider: ScriptedTextProvider(fragments: ["cafe", "\u{0301}"])
+        )
+        engine.invoke()
+        engine.submit(instruction: "", provider: providerConfiguration)
+
+        await waitForState(engine, .succeeded(unchanged: false))
+
+        XCTAssertEqual(engine.diagnostics.replacement, "replaced")
+        XCTAssertTrue(engine.canUndo)
+        XCTAssertEqual(access.replacedText.count, 1)
+        XCTAssertEqual(access.replacedText.first.map { Array($0.utf16) }, Array(decomposed.utf16))
+
+        await engine.undo()
+
+        XCTAssertEqual(engine.state, .succeeded(unchanged: false))
+        XCTAssertEqual(engine.diagnostics.replacement, "undone")
+        XCTAssertEqual(access.undoCount, 1)
+        let receipt = access.undoReceipts.last
+        XCTAssertEqual(receipt?.target.id, target.id)
+        XCTAssertEqual(receipt.map { Array($0.target.text.utf16) }, Array(composed.utf16))
+        XCTAssertEqual(receipt.map { Array($0.replacement.utf16) }, Array(decomposed.utf16))
+    }
+
+    func testDecomposedSelectionWithComposedOutputIsReplacedExactly() async {
+        let decomposed = "cafe\u{0301}"
+        let composed = "caf\u{00E9}"
+        XCTAssertNotEqual(Array(decomposed.utf16), Array(composed.utf16))
+        let target = snapshot(
+            text: decomposed,
+            range: ImrseCore.TextRange(location: 7, length: decomposed.utf16.count)
+        )
+        let access = StubSelectionAccess(target: target)
+        let engine = TransformationEngine(
+            selectionAccess: access,
+            textProvider: ScriptedTextProvider(fragments: ["caf\u{00E9}"])
+        )
+        engine.invoke()
+        engine.submit(instruction: "", provider: providerConfiguration)
+
+        await waitForState(engine, .succeeded(unchanged: false))
+
+        XCTAssertEqual(engine.diagnostics.replacement, "replaced")
+        XCTAssertTrue(engine.canUndo)
+        XCTAssertEqual(access.replacedText.count, 1)
+        XCTAssertEqual(access.replacedText.first.map { Array($0.utf16) }, Array(composed.utf16))
+
+        await engine.undo()
+
+        XCTAssertEqual(engine.state, .succeeded(unchanged: false))
+        XCTAssertEqual(engine.diagnostics.replacement, "undone")
+        XCTAssertEqual(access.undoCount, 1)
+        let receipt = access.undoReceipts.last
+        XCTAssertEqual(receipt?.target.id, target.id)
+        XCTAssertEqual(receipt.map { Array($0.target.text.utf16) }, Array(decomposed.utf16))
+        XCTAssertEqual(receipt.map { Array($0.replacement.utf16) }, Array(composed.utf16))
+    }
+
+    func testExactIdenticalNormalizedOutputKeepsUnchangedNoOpWithoutReceipt() async {
+        let text = "cafe\u{0301}"
+        let target = snapshot(
+            text: text,
+            range: ImrseCore.TextRange(location: 2, length: text.utf16.count)
+        )
+        let access = StubSelectionAccess(target: target)
+        let engine = TransformationEngine(
+            selectionAccess: access,
+            textProvider: ScriptedTextProvider(fragments: ["cafe", "\u{0301}"])
+        )
+        engine.invoke()
+        engine.submit(instruction: "", provider: providerConfiguration)
+
+        await waitForState(engine, .succeeded(unchanged: true))
+
+        XCTAssertEqual(engine.diagnostics.replacement, "unchanged")
+        XCTAssertNil(engine.diagnostics.error)
+        XCTAssertFalse(engine.canUndo)
+        XCTAssertTrue(access.replacedText.isEmpty)
+        XCTAssertTrue(access.undoReceipts.isEmpty)
+
+        await engine.undo()
+
+        XCTAssertEqual(engine.state, .failed(.undoUnavailable))
+        XCTAssertEqual(access.undoCount, 0)
+        XCTAssertTrue(access.undoReceipts.isEmpty)
+    }
+
     func testEmptyDeltasDoNotChangeACompletedResponse() async {
         let access = StubSelectionAccess(target: snapshot(text: "original"))
         let provider = ScriptedTextProvider(fragments: Array(repeating: "", count: 2_000) + ["rewritten"])

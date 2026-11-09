@@ -236,7 +236,7 @@ public final class TransformationEngine {
             try Self.validateOutput(output, utf8Length: outputLength)
             responseMetadata = pendingResponseMetadata
             pendingResponseMetadata = nil
-            if output == target.text {
+            if output.utf16.elementsEqual(target.text.utf16) {
                 finish(operationID, unchanged: true)
                 return
             }

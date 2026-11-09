@@ -337,6 +337,10 @@ enum ClipboardFallbackNoOpValidation {
 }
 
 enum SelectedTextReplacementValidation {
+    static func permitsRangeOnlyConfirmation(expectedValue: String?) -> Bool {
+        expectedValue == nil
+    }
+
     static func confirms(
         afterValue: String?,
         expectedValue: String?,
@@ -345,12 +349,12 @@ enum SelectedTextReplacementValidation {
         replacementRange: ImrseCore.TextRange,
         replacement: String
     ) -> Bool {
-        if let afterValue, let expectedValue,
-           afterValue.utf16.elementsEqual(expectedValue.utf16) {
-            return true
+        if permitsRangeOnlyConfirmation(expectedValue: expectedValue) {
+            return afterRange == replacementRange
+                && afterText.utf16.elementsEqual(replacement.utf16)
         }
-        return afterRange == replacementRange
-            && afterText.utf16.elementsEqual(replacement.utf16)
+        guard let afterValue, let expectedValue else { return false }
+        return afterValue.utf16.elementsEqual(expectedValue.utf16)
     }
 }
 

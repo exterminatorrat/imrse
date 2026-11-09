@@ -1228,7 +1228,9 @@ public final class MacSelectionAccess: SelectionAccess {
                         selectedTextOutcome = .confirmedApplied(
                             AppliedReplacement(strategy: .selectedText, focusedSelection: after, styleProof: nil)
                         )
-                    } else if UTF16SelectionRange.isCollapsedCaret(
+                    } else if SelectedTextReplacementValidation.permitsRangeOnlyConfirmation(
+                        expectedValue: expectedValue
+                    ), UTF16SelectionRange.isCollapsedCaret(
                         after.range,
                         selectedText: after.text,
                         atEndOf: replacementRange
