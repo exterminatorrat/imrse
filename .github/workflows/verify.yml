@@ -3,10 +3,16 @@ on:
   push:
   pull_request:
   workflow_dispatch:
+    inputs:
+      qualification_only:
+        description: Observe the hosted Mac without resolving or building packages
+        type: boolean
+        default: false
 permissions:
   contents: read
 jobs:
   namespace-qualification:
+    if: ${{ github.event_name != 'workflow_dispatch' || !inputs.qualification_only }}
     runs-on: namespace-profile-imrse
     timeout-minutes: 3
     steps:
@@ -18,6 +24,7 @@ jobs:
           docker version --format '{{.Server.Os}}/{{.Server.Arch}}'
           docker run --rm --pull=always alpine:3.21 uname -sm
   portable:
+    if: ${{ github.event_name != 'workflow_dispatch' || !inputs.qualification_only }}
     needs: namespace-qualification
     runs-on: namespace-profile-imrse
     container: swift:6.2
@@ -28,6 +35,7 @@ jobs:
       - run: swift test -Xswiftc -warnings-as-errors
       - run: swift test --package-path pill-kit/native -Xswiftc -warnings-as-errors
   native:
+    if: ${{ github.event_name != 'workflow_dispatch' || !inputs.qualification_only }}
     runs-on: macos-15
     env:
       DEVELOPER_DIR: /Applications/Xcode_26.3.app/Contents/Developer
@@ -40,6 +48,7 @@ jobs:
       - run: swift test --package-path pill-kit/native -Xswiftc -warnings-as-errors
       - run: python3 pill-kit/scripts/verify-assets.py
   package:
+    if: ${{ github.event_name != 'workflow_dispatch' || !inputs.qualification_only }}
     runs-on: macos-26
     env:
       DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
@@ -63,6 +72,7 @@ jobs:
         env:
           IMRSE_DIST_DIR: ${{ runner.temp }}/imrse-ci-package-validation
   design:
+    if: ${{ github.event_name != 'workflow_dispatch' || !inputs.qualification_only }}
     needs: namespace-qualification
     runs-on: namespace-profile-imrse
     defaults:
@@ -87,3 +97,87 @@ jobs:
         with:
           name: visual-states
           path: pill-kit/web/test-results
+  hosted-macos-qualification:
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.qualification_only }}
+    runs-on: xcode-27
+    timeout-minutes: 5
+    env:
+      PYTHONDONTWRITEBYTECODE: "1"
+      TARGET_SOURCE_COMMIT: f391c1815ddbbe41feeaf5d80a510ca76799aab4
+      TARGET_SOURCE_TREE: 1c16fa2ef9f5145b18795f9f74740bcd37c5bbd2
+    steps:
+      - name: Observe hosted Mac prerequisites without checking out or building source
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          import plistlib
+          import re
+          import subprocess
+          import sys
+
+          root = Path(os.environ['RUNNER_TEMP']) / 'imrse-hosted-qualification'
+          root.mkdir(mode=0o700)
+          report = dict(mode='metadata-only', buildPerformed=False, targetSourceVerifiedOnRunner=False, targetSourceCommit=os.environ['TARGET_SOURCE_COMMIT'], targetSourceTree=os.environ['TARGET_SOURCE_TREE'], workflowSHA=os.environ['GITHUB_SHA'], workflowRef=os.environ['GITHUB_WORKFLOW_REF'], runID=os.environ['GITHUB_RUN_ID'], runAttempt=os.environ['GITHUB_RUN_ATTEMPT'], runnerOS=os.environ['RUNNER_OS'], runnerArch=os.environ['RUNNER_ARCH'], imageVersion=os.environ.get('ImageVersion'))
+          failures = []
+
+          def observe(name, arguments):
+              value = subprocess.run(arguments, cwd=root, capture_output=True, text=True, timeout=30)
+              report[name] = dict(exitCode=value.returncode, stdout=value.stdout.strip(), stderr=value.stderr.strip())
+              if value.returncode:
+                  failures.append(name)
+              return value.stdout.strip()
+
+          try:
+              if observe('architecture', ['/usr/bin/uname', '-sm']) != 'Darwin arm64':
+                  failures.append('darwin-arm64')
+              os_version = observe('osVersion', ['/usr/bin/sw_vers', '-productVersion'])
+              observe('developerDirectory', ['/usr/bin/xcode-select', '-p'])
+              xcode = observe('xcodeVersion', ['/usr/bin/xcodebuild', '-version'])
+              swift = observe('swiftVersion', ['/usr/bin/xcrun', 'swift', '--version'])
+              sdk = observe('sdkVersion', ['/usr/bin/xcrun', '--sdk', 'macosx', '--show-sdk-version'])
+              observe('sdkPath', ['/usr/bin/xcrun', '--sdk', 'macosx', '--show-sdk-path'])
+              swift_version = re.search(r'Swift version (\d+)\.(\d+)', swift)
+              xcode_version = re.search(r'^Xcode (\d+)', xcode)
+              if not xcode_version or int(xcode_version[1]) < 27:
+                  failures.append('xcode-27')
+              if not swift_version or int(swift_version[1]) != 6 or int(swift_version[2]) < 4:
+                  failures.append('swift-6.4-or-newer-6.x')
+              if int(os_version.split('.')[0]) < 27 or int(sdk.split('.')[0]) < 27:
+                  failures.append('macos-and-sdk-27')
+              help_text = observe('swiftBuildHelp', ['/usr/bin/xcrun', 'swift', 'build', '--help'])
+              report['requiredBuildFlags'] = {flag: flag in help_text for flag in ['--disable-experimental-prebuilts', '--only-use-versions-from-resolved-file', '--build-system', '--jobs', '--skip-update']}
+              if not all(report['requiredBuildFlags'].values()) or 'swiftbuild' not in help_text:
+                  failures.append('source-only-build-options')
+              observe('metalVersion', ['/usr/bin/xcrun', '--sdk', 'macosx', 'metal', '--version'])
+              pressure = observe('memoryPressure', ['/usr/sbin/sysctl', '-n', 'kern.memorystatus_vm_pressure_level'])
+              observe('physicalMemoryBytes', ['/usr/sbin/sysctl', '-n', 'hw.memsize'])
+              swap = observe('swapUsage', ['/usr/sbin/sysctl', '-n', 'vm.swapusage'])
+              used = re.search(r'used\s*=\s*([0-9.]+)([KMG])', swap)
+              if pressure != '1' or not used or float(used[1]) != 0:
+                  failures.append('normal-pressure-zero-swap')
+              filesystem = os.statvfs(root)
+              volume = plistlib.loads(subprocess.check_output(['/usr/sbin/diskutil', 'info', '-plist', str(root)], timeout=30))
+              reference = volume['APFSContainerReference']
+              containers = plistlib.loads(subprocess.check_output(['/usr/sbin/diskutil', 'apfs', 'list', '-plist', reference], timeout=30))
+              container = next(item for item in containers['Containers'] if item['ContainerReference'] == reference)
+              report['capacity'] = dict(filesystemAvailableBytes=filesystem.f_bavail * filesystem.f_frsize, actualAPFSFreeBytes=container['CapacityFree'], containerReference=reference, containerUUID=container['APFSContainerUUID'], startingTargetBytes=16 * 1024**3)
+              if min(report['capacity']['filesystemAvailableBytes'], report['capacity']['actualAPFSFreeBytes']) < report['capacity']['startingTargetBytes']:
+                  failures.append('starting-disk-capacity')
+          except Exception as error:
+              failures.append(type(error).__name__ + ': ' + str(error))
+          report['failures'] = failures
+          report['qualifiedForBuildPreparation'] = not failures
+          report['limitations'] = ['No source checkout, dependency resolution, compilation, app launch, signing or installation occurred.', 'Target source identity is a requested binding, not source validation on this runner.', 'A future build uses a fresh VM and requires fresh admission and toolchain/provenance review; this is not app qualification.']
+          (root / 'qualification.json').write_text(json.dumps(report, sort_keys=True, indent=2) + '\n')
+          print(json.dumps(report, sort_keys=True, indent=2))
+          sys.exit(bool(failures))
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: imrse-hosted-qualification-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/imrse-hosted-qualification/qualification.json
+          if-no-files-found: error
