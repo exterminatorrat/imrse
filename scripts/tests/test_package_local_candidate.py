@@ -1808,7 +1808,36 @@ class PackageLocalCandidateTests(unittest.TestCase):
         self.assertIn("plutil -lint Resources/Info.plist", package_job)
         self.assertIn("python3 -m unittest discover -s scripts/tests -p 'test_package_local_candidate.py' -v", package_job)
         self.assertIn("./scripts/build-app.sh", package_job)
-        self.assertNotIn("upload-artifact", package_job)
+        self.assertIn("IMRSE_EXPECTED_SOURCE_COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}", package_job)
+        self.assertIn("ref: ${{ github.event.pull_request.head.sha || github.sha }}", package_job)
+        build_steps, retention_step, artifact_steps = package_job.partition(
+            "      - name: Retain the exact unsigned test application\n"
+        )
+        self.assertTrue(retention_step)
+        self.assertNotIn("upload-artifact", build_steps)
+        self.assertIn("./scripts/build-app.sh", build_steps)
+        self.assertEqual(artifact_steps, "\n".join([
+            "        run: |",
+            "          python3 scripts/retain_ci_test_app.py \\",
+            "            --source-root . \\",
+            '            --expected-commit "$IMRSE_EXPECTED_SOURCE_COMMIT" \\',
+            '            --app "$RUNNER_TEMP/imrse-ci-package-validation/imrse.app" \\',
+            '            --output-dir "$RUNNER_TEMP/imrse-ci-test-app" \\',
+            '            --run-id "$GITHUB_RUN_ID" \\',
+            '            --run-attempt "$GITHUB_RUN_ATTEMPT"',
+            "      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02",
+            "        with:",
+            "          name: imrse-ci-test-app-${{ github.run_id }}-${{ github.run_attempt }}",
+            "          retention-days: 7",
+            "          if-no-files-found: error",
+            "          path: |",
+            "            ${{ runner.temp }}/imrse-ci-test-app/imrse-ci-test-app-arm64.tar.gz",
+            "            ${{ runner.temp }}/imrse-ci-test-app/ci-test-app-manifest.json",
+            "            ${{ runner.temp }}/imrse-ci-test-app/SHA256SUMS",
+        ]))
+        self.assertNotIn("IMRSE_RELEASE", package_job)
+        self.assertNotIn("gh release", package_job)
+        self.assertNotIn("if: always()", package_job)
         self.assertNotIn("continue-on-error", package_job)
 
     def test_ci_python_bytecode_suppression_keeps_fresh_source_clone_clean(self):
