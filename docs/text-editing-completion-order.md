@@ -1,5 +1,19 @@
 # Cross-app text editing: agent continuation and completion order
 
+## Active delivery goal — 2026-11-10
+
+Finish Harry's reported failures: imrse must capture the actual selected text, apply the generated result in that original field, insert at an explicitly requested caret, and handle configured provider requests and failures correctly. Deliver one combined test application built from all intended source corrections so Harry can test it across applications. Source changes, static checks, compiled tests, delivered artifacts and user acceptance are separate milestones; none substitutes for the next.
+
+Keep this finite delivery loop active until completion or a concrete access, safety or product decision blocks it:
+
+1. Fix remaining demonstrated selection, replacement, insertion and provider defects in source, with focused regressions. Continue independent source work while an execution dependency is blocked.
+2. Reconcile the relevant PRs into one exact-source candidate, run the focused tests and required CI, and fix real failures without weakening coverage or identity/content/Undo guards.
+3. Build and verify the matching combined test application, preserve the persistent permission identity, and give Harry the application with its source identity and honest remaining compatibility limits.
+4. Wait for Harry to test that exact application. If he reports a failure, diagnose it and return to the source fix; do not call the delivery complete or silently substitute a newer artifact.
+5. After Harry confirms that testing is good, merge the relevant reviewed PRs with passing required checks and a clean merge state. Deferred preview UI PRs and unrelated work are not part of this delivery.
+
+Runner setup, new build-controller projects, broad optimization and unrelated cleanup are out of scope. Supporting work is justified only when it directly removes a demonstrated blocker to a fix, required verification or the test build. Existing execution, privacy, permission, source-continuity and resource-safety boundaries remain in force; name an actual blocker instead of replacing this goal with more tooling.
+
 ## Goal and current boundary
 
 Harry's goal is that imrse works across ordinary text fields, not merely that Undo is repaired. Selected replacement in the original field is primary. Explicit caret insertion is a separate intent and milestone. Preserve the existing instruction/preset → generation → direct Apply interaction.
