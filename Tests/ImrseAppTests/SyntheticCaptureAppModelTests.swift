@@ -362,6 +362,7 @@ final class SyntheticCaptureAppModelDiagnosticTests: XCTestCase {
     private func makeModel(
         access: MacSelectionAccess,
         monitor: SyntheticTestShortcutMonitor,
+        provider: any TextProvider = SyntheticCaptureProviderTripwire(),
         deadlineWaiter: (@MainActor (ContinuousClock.Instant) async throws -> Void)? = nil
     ) throws -> AppModel {
         let providerConfiguration = ProviderConfiguration(
@@ -374,7 +375,7 @@ final class SyntheticCaptureAppModelDiagnosticTests: XCTestCase {
         )
         return try XCTUnwrap(AppModel(
             debugSyntheticCaptureAccess: access,
-            textProvider: SyntheticCaptureProviderTripwire(),
+            textProvider: provider,
             configuration: AppConfiguration(
                 providers: [providerConfiguration],
                 selectedProviderID: providerConfiguration.id
