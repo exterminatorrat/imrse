@@ -685,9 +685,11 @@ def check_control(control, expected_commit, environment):
     for marker in ("runs-on: xcode-27", "timeout-minutes: 90", "inputs.mode == 'hosted-combined-535b7f8'"):
         if marker not in job_text:
             raise ScopeError("control-job-marker:" + marker)
-    for forbidden in ("actions/upload-artifact", "retention-days"):
-        if forbidden in job_text:
-            raise ScopeError("control-workflow-forbidden:" + forbidden)
+    if job_text.count("actions/upload-artifact@") != 2 or job_text.count("actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02") != 2 or re.findall(r"^\s+retention-days: (\d+)\s*$", job_text, re.MULTILINE) != ["7", "7"]:
+        raise ScopeError("control-delivery-policy")
+    exporter = control / ".github/hosted/export_hosted_combined.py"
+    if exporter.is_symlink() or not exporter.is_file():
+        raise ScopeError("control-exporter")
     if job_text.count("actions/checkout@11d5960a326750d5838078e36cf38b85af677262") != 2:
         raise ScopeError("control-workflow-checkout-count")
     return {
@@ -696,6 +698,7 @@ def check_control(control, expected_commit, environment):
         "clean": True,
         "workflowSHA256": sha256_file(workflow),
         "helperSHA256": sha256_file(helper),
+        "exporterSHA256": sha256_file(exporter),
     }
 
 
@@ -1198,9 +1201,11 @@ def prepare_evidence(evidence):
     (evidence / "home/gitconfig").chmod(0o600)
 
 
-def check_resources(io, floor, label):
+def check_resources(io, floor, label, admissions=None):
     sample = io.resources()
     issues = evaluate_resources(sample, floor)
+    if admissions is not None:
+        admissions.append({"phase": label, "resources": sample, "requiredFloorBytes": floor, "issues": issues})
     if issues:
         raise ScopeError(label + ":" + ",".join(issues))
     return sample
@@ -1435,7 +1440,7 @@ def main(argv=None):
             "Process start identity uses ps lstart at one-second resolution; a PID reused within the same second with an identical lstart is indistinguishable.",
             "Signals are group-only through the retained direct leader's private session/group; no census PID is ever signalled. A known descendant that escapes the private group/session makes the phase incomplete and is never chased or killed.",
             "Metadata helpers use the same retained-leader group lifecycle; a metadata helper that escapes the private group/session is outside the observed guarantee.",
-            "No artifact publication or upload is performed; logs and result files remain on the runner.",
+            "Only an allowlisted public receipt and log summary are exported; raw logs and result files remain on the runner. The workflow retains the sanitized receipts and any successfully validated unsigned app for seven days.",
         ],
     }
     io = None
@@ -1456,7 +1461,7 @@ def main(argv=None):
         result["control"] = check_control(control, args.control_commit, environment)
         result["source"] = check_source(source, args.source_commit, args.source_tree, environment)
         result["toolchain"] = check_toolchain(environment)
-        result["admissions"].append({"phase": "pre-dependency", "resources": check_resources(io, INITIAL_FLOOR, "pre-dependency")})
+        check_resources(io, INITIAL_FLOOR, "pre-dependency", result["admissions"])
         check_no_products(evidence)
         resolve = run_phase(
             io,
@@ -1486,7 +1491,7 @@ def main(argv=None):
         result["toolchain"] = check_toolchain(environment)
         verify_dependencies(source, evidence, environment)
         check_module_caches(evidence)
-        result["admissions"].append({"phase": "pre-compiler", "resources": check_resources(io, INITIAL_FLOOR, "pre-compiler")})
+        check_resources(io, INITIAL_FLOOR, "pre-compiler", result["admissions"])
         build = run_phase(
             io,
             "build",
@@ -1500,7 +1505,7 @@ def main(argv=None):
         result["phases"].append(build.to_dict())
         if not build.ok():
             raise ScopeError("build-not-ok:" + str(build.primaryFailure))
-        result["admissions"].append({"phase": "post-build", "resources": check_resources(io, RUNTIME_FLOOR, "post-build")})
+        check_resources(io, RUNTIME_FLOOR, "post-build", result["admissions"])
         result["product"] = post_build_checks(source, evidence, args.source_commit, args.source_tree, environment)
         retention = run_phase(
             io,
@@ -1539,7 +1544,7 @@ def main(argv=None):
             write_json(evidence / "hosted-combined-result.json", result)
         except OSError:
             pass
-    print(json.dumps({"status": result["status"], "failure": result.get("failure"), "phases": [{"name": phase["name"], "ok": phase["primaryFailure"] is None and not phase["cleanupFailures"] and phase["closure"].get("complete") and not phase["resourceViolations"]} for phase in result["phases"]]}, sort_keys=True))
+    print(json.dumps({"status": result["status"], "failureRecorded": result.get("failure") is not None, "phases": [{"name": phase["name"], "ok": phase["primaryFailure"] is None and not phase["cleanupFailures"] and phase["closure"].get("complete") and not phase["resourceViolations"]} for phase in result["phases"]]}, sort_keys=True))
     return 0 if result["status"] == "passed" else 1
 
 

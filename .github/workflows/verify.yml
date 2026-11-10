@@ -215,6 +215,7 @@ jobs:
           fetch-depth: 1
           persist-credentials: false
       - name: Run exact combined build under bounded scope
+        id: build
         shell: bash
         env:
           PYTHONDONTWRITEBYTECODE: "1"
@@ -230,3 +231,42 @@ jobs:
             --control-commit "$GITHUB_SHA" \
             --source-commit 535b7f85720b2e53c60604e8b7c8abfb4e97ca4b \
             --source-tree 711a36772737488bb99ffd3a00cbce277be68a68
+      - name: Export bounded public receipts and any validated unsigned app
+        id: export
+        if: always()
+        timeout-minutes: 2
+        shell: bash
+        env:
+          PYTHONDONTWRITEBYTECODE: "1"
+          PYTHONNOUSERSITE: "1"
+        run: |
+          set -euo pipefail
+          /usr/bin/python3 "$GITHUB_WORKSPACE/control/.github/hosted/export_hosted_combined.py" \
+            --evidence "$RUNNER_TEMP/imrse-hosted-combined-535b7f8-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" \
+            --output "$RUNNER_TEMP/imrse-hosted-public-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" \
+            --control-commit "$GITHUB_SHA" \
+            --run-id "$GITHUB_RUN_ID" \
+            --run-attempt "$GITHUB_RUN_ATTEMPT"
+      - name: Retain sanitized build receipts and log summary
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: imrse-hosted-receipts-${{ github.run_id }}-${{ github.run_attempt }}
+          retention-days: 7
+          if-no-files-found: error
+          include-hidden-files: false
+          path: |
+            ${{ runner.temp }}/imrse-hosted-public-${{ github.run_id }}-${{ github.run_attempt }}/receipts/hosted-combined-receipt.json
+            ${{ runner.temp }}/imrse-hosted-public-${{ github.run_id }}-${{ github.run_attempt }}/receipts/build-summary.txt
+      - name: Retain the validated unsigned app
+        if: ${{ success() && steps.build.outcome == 'success' && steps.export.outcome == 'success' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: imrse-unsigned-app-${{ github.run_id }}-${{ github.run_attempt }}
+          retention-days: 7
+          if-no-files-found: error
+          include-hidden-files: false
+          path: |
+            ${{ runner.temp }}/imrse-hosted-public-${{ github.run_id }}-${{ github.run_attempt }}/app/imrse-ci-test-app-arm64.tar.gz
+            ${{ runner.temp }}/imrse-hosted-public-${{ github.run_id }}-${{ github.run_attempt }}/app/ci-test-app-manifest.json
+            ${{ runner.temp }}/imrse-hosted-public-${{ github.run_id }}-${{ github.run_attempt }}/app/SHA256SUMS
