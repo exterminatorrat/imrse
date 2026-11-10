@@ -225,11 +225,12 @@ public final class MacSelectionAccess: SelectionAccess {
         }
         let canReadValue = supportsPlainTextValueReplacement(element, role: role)
         let inserting = intent == .insertAtCaret
-        let selectedRange = try rangeAttribute(element, kAXSelectedTextRangeAttribute, failure: .noSelection)
+        let captureError: ImrseError = inserting ? .insertionUnavailable : .noSelection
+        let selectedRange = try rangeAttribute(element, kAXSelectedTextRangeAttribute, failure: captureError)
         if let reason = SelectionReadValidation.rangeFailure(selectedRange, allowingEmpty: inserting) {
-            throw failure(reason, .noSelection)
+            throw failure(reason, captureError)
         }
-        guard let range = selectedRange else { throw failure(.selectedRangeUnavailable, .noSelection) }
+        guard let range = selectedRange else { throw failure(.selectedRangeUnavailable, captureError) }
         let selected: String?
         if inserting {
             selected = try stringAttribute(element, kAXSelectedTextAttribute, failure: .insertionUnavailable)
@@ -237,9 +238,9 @@ public final class MacSelectionAccess: SelectionAccess {
             selected = try selectedText(element, range: range, failure: .noSelection, allowValueFallback: canReadValue)
         }
         if let reason = SelectionReadValidation.textFailure(selected, range: range, allowingEmpty: inserting) {
-            throw failure(reason, .noSelection)
+            throw failure(reason, captureError)
         }
-        guard let text = selected else { throw failure(.selectedTextUnavailable, .noSelection) }
+        guard let text = selected else { throw failure(.selectedTextUnavailable, captureError) }
         let insertionProof: CaretInsertionProof?
         if inserting {
             guard canReadValue, range.length == 0, text.isEmpty else {
@@ -471,7 +472,8 @@ public final class MacSelectionAccess: SelectionAccess {
             self.undoTarget = nil
             lastFailureReason = nil
         } catch let error as ImrseError {
-            if error == .staleSelection || error == .secureInput || error == .targetLost || error == .undoUnavailable {
+            if error == .staleSelection || error == .secureInput || error == .targetLost
+                || error == .undoUnavailable || error == .insertionUnavailable {
                 self.undoTarget = nil
                 throw ImrseError.undoUnavailable
             }
@@ -488,24 +490,37 @@ public final class MacSelectionAccess: SelectionAccess {
         currentSelection: NativeSelection
     ) async throws {
         let target = undoTarget.handle
-        guard let currentValue = try wholeValue(target.element, failure: .undoUnavailable),
-              let restoredValue = PlainTextUndoValidation.restoredValue(
+        guard let currentValue = try wholeValue(target.element, failure: .undoUnavailable) else {
+            throw ImrseError.undoUnavailable
+        }
+        let currentProof = UndoSelectionProof(text: currentSelection.text, range: currentSelection.range)
+        let receiptProof = UndoSelectionProof(
+            text: undoTarget.focusedSelection.text,
+            range: undoTarget.focusedSelection.range
+        )
+        let restored: String?
+        if let proof = undoTarget.insertionProof {
+            guard (try? attributeIsSettable(target.element, kAXSelectedTextRangeAttribute)) == true else {
+                throw ImrseError.undoUnavailable
+            }
+            restored = PlainTextUndoValidation.insertionRestoredValue(
+                currentValue: currentValue,
+                proof: proof,
+                receipt: receipt,
+                currentSelection: currentProof,
+                receiptSelection: receiptProof
+            )
+        } else {
+            restored = PlainTextUndoValidation.restoredValue(
                 currentValue: currentValue,
                 receipt: receipt,
                 replacementRange: undoTarget.replacementRange,
-                currentSelection: UndoSelectionProof(text: currentSelection.text, range: currentSelection.range),
-                receiptSelection: UndoSelectionProof(
-                    text: undoTarget.focusedSelection.text,
-                    range: undoTarget.focusedSelection.range
-                )
-              )
-        else {
-            throw ImrseError.undoUnavailable
+                currentSelection: currentProof,
+                receiptSelection: receiptProof
+            )
         }
-        if let proof = undoTarget.insertionProof {
-            guard proof.confirmsApplied(value: currentValue, inserting: receipt.replacement) else {
-                throw ImrseError.undoUnavailable
-            }
+        guard let restoredValue = restored else {
+            throw ImrseError.undoUnavailable
         }
 
         let selectedReplacement = currentSelection.range == undoTarget.replacementRange

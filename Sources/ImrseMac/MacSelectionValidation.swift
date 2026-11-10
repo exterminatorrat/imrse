@@ -265,6 +265,31 @@ enum PlainTextUndoValidation {
         ), restoredValue.utf16.count <= maximumWholeValueUTF16Length else { return nil }
         return restoredValue
     }
+
+    static func insertionRestoredValue(
+        currentValue: String,
+        proof: CaretInsertionProof,
+        receipt: ReplacementReceipt,
+        currentSelection: UndoSelectionProof,
+        receiptSelection: UndoSelectionProof
+    ) -> String? {
+        guard receipt.target.intent == .insertAtCaret,
+              receipt.target.text.isEmpty,
+              receipt.target.range == proof.range,
+              let replacementRange = UTF16SelectionRange.make(
+                at: proof.range.location,
+                length: receipt.replacement.utf16.count
+              ),
+              proof.confirmsApplied(value: currentValue, inserting: receipt.replacement)
+        else { return nil }
+        return restoredValue(
+            currentValue: currentValue,
+            receipt: receipt,
+            replacementRange: replacementRange,
+            currentSelection: currentSelection,
+            receiptSelection: receiptSelection
+        )
+    }
 }
 
 @MainActor
