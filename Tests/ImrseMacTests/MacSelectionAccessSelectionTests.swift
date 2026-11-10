@@ -220,9 +220,13 @@ final class MacSelectionAccessSelectionTests: XCTestCase {
                     capturedDocument: .unavailable,
                     currentWindow: captured,
                     intent: .replaceSelection,
-                    sameWindow: { $0.id == $1.id },
-                    isValidWindow: { $0.processID == 42 && $0.role == "AXWindow" },
-                    readDocument: { _ in
+                    sameWindow: { (left: WindowFixture, right: WindowFixture) -> Bool in
+                        left.id == right.id
+                    },
+                    isValidWindow: { (window: WindowFixture) -> Bool in
+                        window.processID == 42 && window.role == "AXWindow"
+                    },
+                    readDocument: { (_: WindowFixture) throws -> SelectionTargetContextValidation.Document in
                         documentReads += 1
                         throw TestError.documentReadFailed
                     }
@@ -640,9 +644,13 @@ final class MacSelectionAccessSelectionTests: XCTestCase {
             capturedDocument: capturedDocument,
             currentWindow: window,
             intent: .replaceSelection,
-            sameWindow: { $0.id == $1.id },
-            isValidWindow: { $0.processID == 42 && $0.role == "AXWindow" },
-            readDocument: { _ in currentDocument }
+            sameWindow: { (left: WindowFixture, right: WindowFixture) -> Bool in
+                left.id == right.id
+            },
+            isValidWindow: { (window: WindowFixture) -> Bool in
+                window.processID == 42 && window.role == "AXWindow"
+            },
+            readDocument: { (_: WindowFixture) -> SelectionTargetContextValidation.Document in currentDocument }
         )
     }
 
