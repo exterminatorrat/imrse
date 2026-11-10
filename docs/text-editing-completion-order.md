@@ -64,7 +64,9 @@ Exercise precommit Cancel with delayed provider completion and confirm no late w
 
 ### 4. Implement demonstrated host/editor gaps under ELV-16
 
-Current capture binds the focused AX node, not a general focus-anchor/editable-host pair (`MacSelectionAccess.swift`, `TargetHandle` and `capture(intent:)`). Current rich eligibility requires the focused `AXTextArea` itself to be its editable and highest-editable ancestor, with a supported direct static child. Those are real capability boundaries, not proof that every editor needs a bridge.
+The source candidate preserves direct focused-node capture and attempts a bounded explicit ancestor fallback only when replacement selection evidence is unavailable. It binds the exact focused anchor and a same-process, parent-linked, uniquely self-advertising `AXTextArea` host separately, revalidating their identities, window, roles and any available anchor selection evidence through the transaction. Empty, malformed or contradictory evidence never authorizes a fallback. These source paths and their pure regressions still need compiled tests and an observed distinct-anchor profile before they establish a supported editor.
+
+Rich eligibility still requires the resolved `AXTextArea` to be its own editable and highest-editable ancestor, with the existing content/style/inverse proof. Plain whole-value write eligibility and explicit insertion eligibility are unchanged. This is not a document-wide search or proof that every editor can be handled through AX.
 
 For a demonstrated required-field failure, first identify whether capture lacks range/text, the focused anchor differs from its editable host, the host/document changed, or the write/readback proof is unavailable. Implement a bounded, same-process, parent-linked resolver only for the evidenced relationship. Bind anchor and host independently through validation, commit and Undo; preserve secure/read-only, cycle, foreign-node and ambiguity refusals. Add pure relationship/identity regressions and then native evidence for that profile.
 

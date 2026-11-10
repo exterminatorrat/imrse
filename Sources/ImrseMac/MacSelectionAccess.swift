@@ -81,6 +81,7 @@ public final class MacSelectionAccess: SelectionAccess {
     private static let axMessagingTimeout: Float = 0.1
     private static let captureBudget = Duration.seconds(1)
     private static let focusRetryDelayMilliseconds: Int64 = 10
+    private static let captureSetupAXCallReserve: Int64 = 8
     private static let manualAccessibilityAttribute = "AXManualAccessibility"
     private static let protectedContentAttribute = "AXProtectedContent"
     private static let editableAncestorAttribute = "AXEditableAncestor"
@@ -96,7 +97,21 @@ public final class MacSelectionAccess: SelectionAccess {
         let window: AXUIElement
         let document: SelectionTargetContextValidation.Document
         let application: AXUIElement
+        let anchor: AXUIElement
+        let anchorRole: String
         let element: AXUIElement
+    }
+
+    private struct EditableHostBinding {
+        let element: AXUIElement
+        let role: String
+        let selection: NativeSelection
+    }
+
+    private struct SelectionEvidence<Value> {
+        let availability: CaptureSelectionFallback.Availability
+        let value: Value?
+        let reason: SelectionFailureReason?
     }
 
     private struct CapturedTarget {
@@ -225,24 +240,20 @@ public final class MacSelectionAccess: SelectionAccess {
         }
         let canReadValue = supportsPlainTextValueReplacement(element, role: role)
         let inserting = intent == .insertAtCaret
-        let captureError: ImrseError = inserting ? .insertionUnavailable : .noSelection
-        let selectedRange = try rangeAttribute(element, kAXSelectedTextRangeAttribute, failure: captureError)
-        if let reason = SelectionReadValidation.rangeFailure(selectedRange, allowingEmpty: inserting) {
-            throw failure(reason, captureError)
-        }
-        guard let range = selectedRange else { throw failure(.selectedRangeUnavailable, captureError) }
-        let selected: String?
-        if inserting {
-            selected = try stringAttribute(element, kAXSelectedTextAttribute, failure: .insertionUnavailable)
-        } else {
-            selected = try selectedText(element, range: range, failure: .noSelection, allowValueFallback: canReadValue)
-        }
-        if let reason = SelectionReadValidation.textFailure(selected, range: range, allowingEmpty: inserting) {
-            throw failure(reason, captureError)
-        }
-        guard let text = selected else { throw failure(.selectedTextUnavailable, captureError) }
+        let selection: NativeSelection
+        let hostBinding: EditableHostBinding?
         let insertionProof: CaretInsertionProof?
         if inserting {
+            let selectedRange = try rangeAttribute(element, kAXSelectedTextRangeAttribute, failure: .insertionUnavailable)
+            if let reason = SelectionReadValidation.rangeFailure(selectedRange, allowingEmpty: true) {
+                throw failure(reason, .insertionUnavailable)
+            }
+            guard let range = selectedRange else { throw failure(.selectedRangeUnavailable, .insertionUnavailable) }
+            let selected = try stringAttribute(element, kAXSelectedTextAttribute, failure: .insertionUnavailable)
+            if let reason = SelectionReadValidation.textFailure(selected, range: range, allowingEmpty: true) {
+                throw failure(reason, .insertionUnavailable)
+            }
+            guard let text = selected else { throw failure(.selectedTextUnavailable, .insertionUnavailable) }
             guard canReadValue, range.length == 0, text.isEmpty else {
                 throw failure(.caretProofUnavailable, .insertionUnavailable)
             }
@@ -261,18 +272,64 @@ public final class MacSelectionAccess: SelectionAccess {
                 composition: composition
             ) else { throw failure(.caretProofUnavailable, .insertionUnavailable) }
             insertionProof = proof
+            hostBinding = nil
+            selection = NativeSelection(text: text, range: range)
         } else {
-            insertionProof = nil
+            let rangeProbe = rangeAvailability(element, allowingEmpty: false)
+            if let reason = rangeProbe.reason {
+                throw failure(reason, .noSelection)
+            }
+            let textProbe: SelectionEvidence<String>
+            if let range = rangeProbe.value {
+                textProbe = textAvailability(element, range: range, allowingEmpty: false, canReadValue: canReadValue)
+            } else {
+                textProbe = unrangedTextAvailability(element)
+            }
+            if let reason = textProbe.reason {
+                throw failure(reason, .noSelection)
+            }
+            switch CaptureSelectionFallback.route(
+                range: rangeProbe.availability,
+                text: textProbe.availability
+            ) {
+            case .refuse:
+                throw ImrseError.noSelection
+            case .captured:
+                guard let range = rangeProbe.value, let text = textProbe.value else {
+                    throw ImrseError.noSelection
+                }
+                insertionProof = nil
+                hostBinding = nil
+                selection = NativeSelection(text: text, range: range)
+            case .resolveHost:
+                guard let binding = fallbackEditableHostBinding(
+                    anchor: element,
+                    processID: processID,
+                    intent: intent,
+                    anchorRange: rangeProbe.value,
+                    anchorText: textProbe.value
+                ) else {
+                    throw failure(
+                        rangeProbe.value == nil ? .selectedRangeUnavailable : .selectedTextUnavailable,
+                        .noSelection
+                    )
+                }
+                insertionProof = nil
+                hostBinding = binding
+                selection = binding.selection
+            }
         }
         let windowContext = try captureWindowContext(for: element, processID: processID, intent: intent)
+        let targetRole = hostBinding?.role ?? role
+        let targetElement = hostBinding?.element ?? element
 
         let applicationID = runningApplication.bundleIdentifier ?? "pid:\(processID)"
         let snapshot = SelectionSnapshot(
             applicationID: applicationID,
             processID: processID,
-            role: role,
-            text: text,
-            range: range,
+            role: targetRole,
+            text: selection.text,
+            range: selection.range,
             isSecure: false,
             intent: intent
         )
@@ -280,12 +337,14 @@ public final class MacSelectionAccess: SelectionAccess {
             id: snapshot.id,
             applicationID: applicationID,
             processID: processID,
-            role: role,
+            role: targetRole,
             intent: intent,
             window: windowContext.window,
             document: windowContext.document,
             application: application,
-            element: element
+            anchor: element,
+            anchorRole: role,
+            element: targetElement
         )
         try requireTargetForeground(handle)
         capturedTarget = CapturedTarget(snapshot: snapshot, handle: handle, insertionProof: insertionProof)
@@ -293,10 +352,7 @@ public final class MacSelectionAccess: SelectionAccess {
         installWorkspaceObserver(for: handle)
         do {
             try requireTargetForeground(handle)
-            guard sameSelection(
-                try currentSelection(handle),
-                NativeSelection(text: text, range: range)
-            ) else {
+            guard sameSelection(try currentSelection(handle), selection) else {
                 throw failure(.captureChangedDuringSetup, .noSelection)
             }
             try validateInsertionProof(insertionProof, on: handle)
@@ -725,11 +781,17 @@ public final class MacSelectionAccess: SelectionAccess {
               let observer else { return nil }
         let context = ObserverContext(owner: self, targetID: target.id)
         let refcon = Unmanaged.passUnretained(context).toOpaque()
-        let notifications: [(AXUIElement, CFString)] = [
-            (target.application, kAXFocusedUIElementChangedNotification as CFString),
-            (target.element, kAXSelectedTextChangedNotification as CFString),
-            (target.element, kAXValueChangedNotification as CFString)
+        var notifiedElements = [target.anchor]
+        if !sameElement(target.anchor, target.element) {
+            notifiedElements.append(target.element)
+        }
+        var notifications: [(AXUIElement, CFString)] = [
+            (target.application, kAXFocusedUIElementChangedNotification as CFString)
         ]
+        for element in notifiedElements {
+            notifications.append((element, kAXSelectedTextChangedNotification as CFString))
+            notifications.append((element, kAXValueChangedNotification as CFString))
+        }
         var registered: [(AXUIElement, CFString)] = []
         for (element, notification) in notifications {
             do {
@@ -799,7 +861,7 @@ public final class MacSelectionAccess: SelectionAccess {
             let preservesCapture = ObservedFocusValidation.preservesCapture(
                 observedTargetID: targetID,
                 currentTargetID: captured.snapshot.id,
-                capturedElement: captured.handle.element,
+                capturedElement: captured.handle.anchor,
                 readFocusedElement: {
                     defer { self.lastFailureReason = previousFailureReason }
                     return try self.elementAttribute(
@@ -901,22 +963,149 @@ public final class MacSelectionAccess: SelectionAccess {
         return (window, document)
     }
 
+    private func fallbackEditableHostBinding(
+        anchor: AXUIElement,
+        processID: Int32,
+        intent: SelectionEditIntent,
+        anchorRange: TextRange?,
+        anchorText: String?
+    ) -> EditableHostBinding? {
+        let previousFailureReason = lastFailureReason
+        defer { lastFailureReason = previousFailureReason }
+        guard intent == .replaceSelection,
+              let host = resolvedEditableHost(anchor: anchor, processID: processID),
+              let hostSelection = try? elementSelection(
+                host,
+                allowingEmpty: false,
+                readingCaretText: false,
+                allowValueFallback: false
+              ),
+              anchorRange.map({ $0 == hostSelection.range }) ?? true,
+              anchorText.map({ sameText($0, hostSelection.text) }) ?? true
+        else {
+            return nil
+        }
+        return EditableHostBinding(element: host, role: kAXTextAreaRole as String, selection: hostSelection)
+    }
+
+    private func rangeAvailability(
+        _ element: AXUIElement,
+        allowingEmpty: Bool
+    ) -> SelectionEvidence<TextRange> {
+        do {
+            guard let resolved = try rangeAttribute(
+                element,
+                kAXSelectedTextRangeAttribute,
+                failure: .noSelection
+            ) else {
+                return SelectionEvidence(availability: .absent, value: nil, reason: nil)
+            }
+            if let reason = SelectionReadValidation.rangeFailure(resolved, allowingEmpty: allowingEmpty) {
+                return SelectionEvidence(availability: .present, value: nil, reason: reason)
+            }
+            return SelectionEvidence(availability: .present, value: resolved, reason: nil)
+        } catch {
+            return SelectionEvidence(availability: .malformed, value: nil, reason: nil)
+        }
+    }
+
+    private func textAvailability(
+        _ element: AXUIElement,
+        range: TextRange,
+        allowingEmpty: Bool,
+        canReadValue: Bool
+    ) -> SelectionEvidence<String> {
+        do {
+            let selected = try selectedText(
+                element,
+                range: range,
+                failure: .noSelection,
+                allowingEmpty: allowingEmpty,
+                allowValueFallback: canReadValue
+            )
+            guard let selected else {
+                return SelectionEvidence(availability: .absent, value: nil, reason: nil)
+            }
+            if let reason = SelectionReadValidation.textFailure(
+                selected,
+                range: range,
+                allowingEmpty: allowingEmpty
+            ) {
+                return SelectionEvidence(availability: .present, value: nil, reason: reason)
+            }
+            return SelectionEvidence(availability: .present, value: selected, reason: nil)
+        } catch {
+            return SelectionEvidence(availability: .malformed, value: nil, reason: nil)
+        }
+    }
+
+    private func unrangedTextAvailability(_ element: AXUIElement) -> SelectionEvidence<String> {
+        do {
+            guard let selected = try stringAttribute(element, kAXSelectedTextAttribute, failure: .noSelection) else {
+                return SelectionEvidence(availability: .absent, value: nil, reason: nil)
+            }
+            return SelectionEvidence(availability: .present, value: selected, reason: nil)
+        } catch {
+            return SelectionEvidence(availability: .malformed, value: nil, reason: nil)
+        }
+    }
+
+    private func resolvedEditableHost(anchor: AXUIElement, processID: Int32) -> AXUIElement? {
+        let previousFailureReason = lastFailureReason
+        defer { lastFailureReason = previousFailureReason }
+        guard let host = EditableHostResolution.host(
+            anchor: anchor,
+            hasTimeForProbe: { self.hasCaptureTimeForProbe() },
+            isSameProcess: { self.hasProcessID($0, equalTo: processID) },
+            readParent: { try self.elementAttribute($0, kAXParentAttribute, failure: .noSelection) },
+            readEditableAncestor: {
+                try self.elementAttribute($0, Self.editableAncestorAttribute, failure: .noSelection)
+            },
+            readHighestEditableAncestor: {
+                try self.elementAttribute($0, Self.highestEditableAncestorAttribute, failure: .noSelection)
+            },
+            sameElement: { self.sameElement($0, $1) }
+        ),
+              (try? booleanAttribute(host, kAXEnabledAttribute as String, failure: .noSelection)) == true,
+              (try? stringAttribute(host, kAXRoleAttribute, failure: .noSelection)) == (kAXTextAreaRole as String)
+        else {
+            return nil
+        }
+        return host
+    }
+
     private func validateSelectionTarget(_ target: TargetHandle) throws {
         guard Self.accessibilityPermissionGranted else { throw ImrseError.permissionRequired }
-        guard !IsSecureEventInputEnabled(), try !isSecure(target.element, in: target.application) else {
+        guard !IsSecureEventInputEnabled(), try !isSecure(target.anchor, in: target.application) else {
             throw failure(.protectedTarget, .secureInput)
         }
         try requireSafeForeground(target)
         guard let focused = try elementAttribute(target.application, kAXFocusedUIElementAttribute, failure: .targetLost) else {
             throw failure(.focusedElementUnavailable, .staleSelection)
         }
-        guard sameElement(focused, target.element) else {
+        guard sameElement(focused, target.anchor) else {
             throw failure(.focusedElementChanged, .staleSelection)
         }
         guard try stringAttribute(target.element, kAXRoleAttribute, failure: .targetLost) == target.role else {
             throw failure(.roleChanged, .staleSelection)
         }
-        let currentWindow = try elementAttribute(target.element, kAXWindowAttribute, failure: .staleSelection)
+        if !sameElement(target.anchor, target.element) {
+            guard try stringAttribute(target.anchor, kAXRoleAttribute, failure: .targetLost) == target.anchorRole else {
+                throw failure(.roleChanged, .staleSelection)
+            }
+            guard let host = resolvedEditableHost(anchor: target.anchor, processID: target.processID),
+                  sameElement(host, target.element)
+            else {
+                throw failure(.focusedElementChanged, .staleSelection)
+            }
+            guard let hostWindow = try elementAttribute(target.element, kAXWindowAttribute, failure: .staleSelection),
+                  sameElement(hostWindow, target.window)
+            else {
+                throw failure(.windowContextChanged, .staleSelection)
+            }
+            try requireAnchorHostSelectionAgreement(target)
+        }
+        let currentWindow = try elementAttribute(target.anchor, kAXWindowAttribute, failure: .staleSelection)
         if let reason = try SelectionTargetContextValidation.failureReason(
             capturedWindow: target.window,
             capturedDocument: target.document,
@@ -971,22 +1160,36 @@ public final class MacSelectionAccess: SelectionAccess {
 
     private func readSelection(_ target: TargetHandle, allowingEmpty: Bool) throws -> NativeSelection? {
         let allowingEmpty = allowingEmpty || target.intent == .insertAtCaret
-        let selectedRange = try rangeAttribute(target.element, kAXSelectedTextRangeAttribute, failure: .targetLost)
+        return try elementSelection(
+            target.element,
+            allowingEmpty: allowingEmpty,
+            readingCaretText: target.intent == .insertAtCaret,
+            allowValueFallback: supportsPlainTextValueReplacement(target.element, role: target.role)
+        )
+    }
+
+    private func elementSelection(
+        _ element: AXUIElement,
+        allowingEmpty: Bool,
+        readingCaretText: Bool,
+        allowValueFallback: @autoclosure () -> Bool
+    ) throws -> NativeSelection? {
+        let selectedRange = try rangeAttribute(element, kAXSelectedTextRangeAttribute, failure: .targetLost)
         if let reason = SelectionReadValidation.rangeFailure(selectedRange, allowingEmpty: allowingEmpty) {
             lastFailureReason = reason
             return nil
         }
         guard let range = selectedRange else { return nil }
         let selected: String?
-        if target.intent == .insertAtCaret && range.length == 0 {
-            selected = try stringAttribute(target.element, kAXSelectedTextAttribute, failure: .targetLost)
+        if readingCaretText && range.length == 0 {
+            selected = try stringAttribute(element, kAXSelectedTextAttribute, failure: .targetLost)
         } else {
             selected = try selectedText(
-                target.element,
+                element,
                 range: range,
                 failure: .targetLost,
                 allowingEmpty: allowingEmpty,
-                allowValueFallback: supportsPlainTextValueReplacement(target.element, role: target.role)
+                allowValueFallback: allowValueFallback()
             )
         }
         if let reason = SelectionReadValidation.textFailure(selected, range: range, allowingEmpty: allowingEmpty) {
@@ -996,6 +1199,54 @@ public final class MacSelectionAccess: SelectionAccess {
         guard let text = selected else { return nil }
         lastFailureReason = nil
         return NativeSelection(text: text, range: range)
+    }
+
+    private func requireAnchorHostSelectionAgreement(_ target: TargetHandle) throws {
+        let allowingEmpty = true
+        guard let hostSelection = try elementSelection(
+            target.element,
+            allowingEmpty: allowingEmpty,
+            readingCaretText: false,
+            allowValueFallback: false
+        ) else {
+            throw failure(lastFailureReason ?? .selectedRangeUnavailable, .staleSelection)
+        }
+        let rangeProbe = rangeAvailability(target.anchor, allowingEmpty: allowingEmpty)
+        let textProbe: SelectionEvidence<String>
+        if let advertisedRange = rangeProbe.value {
+            textProbe = textAvailability(
+                target.anchor,
+                range: advertisedRange,
+                allowingEmpty: allowingEmpty,
+                canReadValue: false
+            )
+        } else if rangeProbe.availability == .absent {
+            textProbe = unrangedTextAvailability(target.anchor)
+        } else {
+            textProbe = SelectionEvidence(availability: .absent, value: nil, reason: nil)
+        }
+        let anchorRange = rangeProbe.reason == nil
+            ? rangeProbe.availability
+            : CaptureSelectionFallback.Availability.malformed
+        let anchorText = textProbe.reason == nil
+            ? textProbe.availability
+            : CaptureSelectionFallback.Availability.malformed
+        switch CaptureSelectionFallback.anchorAgreement(
+            anchorRange: anchorRange,
+            anchorRangeMatchesHost: anchorRange == .present && rangeProbe.value == hostSelection.range,
+            anchorText: anchorText,
+            anchorTextMatchesHost: anchorText == .present
+                && (textProbe.value.map { sameText($0, hostSelection.text) } ?? false)
+        ) {
+        case .agrees:
+            return
+        case .rangeMismatch:
+            throw failure(.rangeChanged, .staleSelection)
+        case .textMismatch:
+            throw failure(.textChanged, .staleSelection)
+        case .malformed:
+            throw failure(.axReadFailure, .staleSelection)
+        }
     }
 
     private func caretCompositionState(_ element: AXUIElement) throws -> CaretCompositionState {
@@ -1972,6 +2223,12 @@ public final class MacSelectionAccess: SelectionAccess {
     private func hasCaptureTimeForFocusRetry() -> Bool {
         guard let captureDeadline else { return true }
         let requiredMilliseconds = Self.focusRetryDelayMilliseconds + Int64(Self.axMessagingTimeout * 1_000)
+        return clock.now.advanced(by: .milliseconds(requiredMilliseconds)) < captureDeadline
+    }
+
+    private func hasCaptureTimeForProbe() -> Bool {
+        guard let captureDeadline else { return true }
+        let requiredMilliseconds = Int64(Self.axMessagingTimeout * 1_000) * Self.captureSetupAXCallReserve
         return clock.now.advanced(by: .milliseconds(requiredMilliseconds)) < captureDeadline
     }
 
