@@ -236,6 +236,12 @@ jobs:
           persist-credentials: false
       - name: Run exact combined build under bounded scope
         id: build
+        # Diagnostic route only. The bounded-closure rule counts SwiftPM's own
+        # children, which each enter their own process group, as escapes, and
+        # the phase environment pins GIT_ALLOW_PROTOCOL=file so a fresh runner
+        # cannot fetch dependencies. Until both are addressed the receipt is the
+        # evidence and the check never gates the pull request.
+        continue-on-error: true
         shell: bash
         env:
           PYTHONDONTWRITEBYTECODE: "1"
@@ -267,6 +273,21 @@ jobs:
             --control-commit "$GITHUB_SHA" \
             --run-id "$GITHUB_RUN_ID" \
             --run-attempt "$GITHUB_RUN_ATTEMPT"
+      - name: Record the diagnostic outcome in the run summary
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          SUMMARY="$RUNNER_TEMP/imrse-hosted-public-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT/receipts/build-summary.txt"
+          {
+            echo "### Hosted combined build: diagnostic only"
+            echo
+            echo "This route does not gate the pull request. The merge gate is \`native\`, \`package\`, \`portable\` and \`design\`."
+            echo
+            echo '```'
+            cat "$SUMMARY" 2>/dev/null || echo '{"status":"missing"}'
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
       - name: Retain sanitized build receipts and log summary
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
