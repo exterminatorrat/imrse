@@ -97,6 +97,33 @@ final class OpenAICompatibleProviderTests: XCTestCase {
         )])
     }
 
+    @MainActor
+    func testOpenRouterRepeatedTerminalUsageChunkKeepsStrictCompletion() async throws {
+        let body = [
+            #"data: {"model":"openai/gpt-6.1","choices":[{"delta":{"content":"Done"},"finish_reason":"stop"}]}"#,
+            #"data: {"model":"openai/gpt-6.1","choices":[{"delta":{"content":"","role":"assistant"},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":4,"total_tokens":14,"cost":0.00014}}"#,
+            "data: [DONE]"
+        ].joined(separator: "\n\n") + "\n\n"
+        let provider = OpenAICompatibleProvider(
+            credentials: StubCredentials(value: "test-key"),
+            transport: StubTransport(exchange: exchange(status: 200, chunks: [Data(body.utf8)])),
+            requireSuccessfulStreamTerminator: true
+        )
+        let reports = ResponseMetadataReports()
+        let metadataCallback: @MainActor @Sendable (ResponseMetadata) -> Void = { reports.values.append($0) }
+
+        let output = try await collect(provider, request: request(kind: .openRouter, reportResponseMetadata: metadataCallback))
+
+        XCTAssertEqual(output, "Done")
+        XCTAssertEqual(reports.values, [ResponseMetadata(
+            detectedModel: "openai/gpt-6.1",
+            inputTokens: 10,
+            outputTokens: 4,
+            totalTokens: 14,
+            costUSD: 0.00014
+        )])
+    }
+
     func testStrictTerminationRequiresBothStopAndDone() async throws {
         let bodies = [
             "data: {\"choices\":[{\"delta\":{\"content\":\"Done\"},\"finish_reason\":\"stop\"}]}\n\n",
@@ -281,6 +308,76 @@ final class OpenAICompatibleProviderTests: XCTestCase {
 
         let output = try await collect(provider, request: request())
         XCTAssertEqual(output, "Done")
+    }
+
+    func testAcceptsRoleOnlyAndEmptyFinalDeltaFromStandardStreams() async throws {
+        let body = [
+            #"data: {"choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":null}]}"#,
+            #"data: {"choices":[{"index":0,"delta":{"content":"Hello "},"finish_reason":null}]}"#,
+            #"data: {"choices":[{"index":0,"delta":{"content":"world"},"finish_reason":null}]}"#,
+            #"data: {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}"#,
+            "data: [DONE]"
+        ].joined(separator: "\n\n") + "\n\n"
+
+        for strictTermination in [false, true] {
+            let provider = OpenAICompatibleProvider(
+                credentials: StubCredentials(value: "test-key"),
+                transport: StubTransport(exchange: exchange(status: 200, chunks: [Data(body.utf8)])),
+                requireSuccessfulStreamTerminator: strictTermination
+            )
+
+            let output = try await collect(provider, request: request())
+            XCTAssertEqual(output, "Hello world")
+        }
+    }
+
+    func testIgnoresReasoningDeltasFromThinkingModels() async throws {
+        for reasoningField in ["reasoning_content", "reasoning"] {
+            let body = [
+                #"data: {"choices":[{"index":0,"delta":{"role":"assistant","reasoning_content":""},"finish_reason":null}]}"#,
+                #"data: {"choices":[{"index":0,"delta":{"\#(reasoningField)":"synthetic reasoning"},"finish_reason":null}]}"#,
+                #"data: {"choices":[{"index":0,"delta":{"content":null,"\#(reasoningField)":"synthetic reasoning"},"finish_reason":null}]}"#,
+                #"data: {"choices":[{"index":0,"delta":{"content":"final answer"},"finish_reason":"stop"}]}"#,
+                "data: [DONE]"
+            ].joined(separator: "\n\n") + "\n\n"
+            let provider = OpenAICompatibleProvider(
+                credentials: StubCredentials(value: "test-key"),
+                transport: StubTransport(exchange: exchange(status: 200, chunks: [Data(body.utf8)]))
+            )
+
+            let output = try await collect(provider, request: request())
+            XCTAssertEqual(output, "final answer")
+        }
+    }
+
+    func testReasoningWithoutFinalTextNeverCompletesSuccessfully() async throws {
+        let body = [
+            #"data: {"choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":null}]}"#,
+            #"data: {"choices":[{"index":0,"delta":{"reasoning_content":"private reasoning"},"finish_reason":null}]}"#,
+            #"data: {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}"#,
+            "data: [DONE]"
+        ].joined(separator: "\n\n") + "\n\n"
+        let provider = OpenAICompatibleProvider(
+            credentials: StubCredentials(value: "test-key"),
+            transport: StubTransport(exchange: exchange(status: 200, chunks: [Data(body.utf8)]))
+        )
+
+        await assertError(.emptyOutput) {
+            _ = try await collect(provider, request: request())
+        }
+    }
+
+    func testUnsupportedDeltaShapesStillFailClosed() async throws {
+        for delta in [#"{"content":42}"#, #""text""#, #"[]"#] {
+            let body = "data: {\"choices\":[{\"delta\":\(delta),\"finish_reason\":null}]}\n\ndata: [DONE]\n\n"
+            let provider = OpenAICompatibleProvider(
+                credentials: StubCredentials(value: "test-key"),
+                transport: StubTransport(exchange: exchange(status: 200, chunks: [Data(body.utf8)]))
+            )
+            await assertError(.malformedResponse) {
+                _ = try await collect(provider, request: request())
+            }
+        }
     }
 
     func testNonStopFinishReasonsNeverCompletePartialOutput() async throws {

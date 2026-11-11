@@ -60,10 +60,12 @@ jobs:
     env:
       DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
       IMRSE_CI_PACKAGE_VALIDATION: "1"
+      IMRSE_EXPECTED_SOURCE_COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
       PYTHONDONTWRITEBYTECODE: "1"
     steps:
       - uses: actions/checkout@v4
         with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
       - run: xcodebuild -version && swift --version
       - run: bash -n scripts/build-app.sh
@@ -78,6 +80,24 @@ jobs:
       - run: ./scripts/build-app.sh
         env:
           IMRSE_DIST_DIR: ${{ runner.temp }}/imrse-ci-package-validation
+      - name: Retain the exact unsigned test application
+        run: |
+          python3 scripts/retain_ci_test_app.py \
+            --source-root . \
+            --expected-commit "$IMRSE_EXPECTED_SOURCE_COMMIT" \
+            --app "$RUNNER_TEMP/imrse-ci-package-validation/imrse.app" \
+            --output-dir "$RUNNER_TEMP/imrse-ci-test-app" \
+            --run-id "$GITHUB_RUN_ID" \
+            --run-attempt "$GITHUB_RUN_ATTEMPT"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: imrse-ci-test-app-${{ github.run_id }}-${{ github.run_attempt }}
+          retention-days: 7
+          if-no-files-found: error
+          path: |
+            ${{ runner.temp }}/imrse-ci-test-app/imrse-ci-test-app-arm64.tar.gz
+            ${{ runner.temp }}/imrse-ci-test-app/ci-test-app-manifest.json
+            ${{ runner.temp }}/imrse-ci-test-app/SHA256SUMS
   design:
     if: ${{ github.event_name != 'workflow_dispatch' || (inputs.mode == 'verify' && !inputs.qualification_only) }}
     needs: namespace-qualification

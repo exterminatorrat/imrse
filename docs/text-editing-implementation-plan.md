@@ -77,7 +77,7 @@ The typed outcome must replace an actual routing ambiguity, not decorate a Boole
 
 ## Capture, focused anchor and editable host
 
-Current capture resolves one focused element and later insists it is still focused. Text-read fallbacks are not discovery. First preserve this behavior while classifying missing focus, missing/empty range, missing text, AX read/type error, changed focused identity and unavailable confirmation separately.
+Direct capture resolves one focused element and later insists it is still focused. The source candidate adds a replacement-only fallback for genuinely missing range or text evidence: resolve only an explicitly advertised, same-process, parent-linked, unique self-advertising `AXTextArea` host, then bind the original focused anchor and that exact host independently. Successful direct capture performs no resolver reads. Empty selections and malformed or contradictory evidence refuse rather than trigger discovery. The new path is not yet a live-qualified editor profile.
 
 If a synthetic case demonstrates a focused leaf distinct from the real editable host, introduce a private TargetBinding containing the focused anchor, resolved host and a validated relationship, alongside existing process/application/snapshot identity. Use one bounded resolver for capture, validation, observer relevance, mutation and Undo. Search only the invocation's focused subtree/explicit ancestor relationship within fixed node/depth/time limits. Ambiguous editors, cycles, unsupported relationships, recreated hosts and out-of-budget reads refuse. Never scan unrelated application text or select by string similarity.
 

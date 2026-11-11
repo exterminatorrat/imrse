@@ -1,5 +1,19 @@
 # Cross-app text editing: agent continuation and completion order
 
+## Active delivery goal — 2026-11-10
+
+Finish Harry's reported failures: imrse must capture the actual selected text, apply the generated result in that original field, insert at an explicitly requested caret, and handle configured provider requests and failures correctly. Deliver one combined test application built from all intended source corrections so Harry can test it across applications. Source changes, static checks, compiled tests, delivered artifacts and user acceptance are separate milestones; none substitutes for the next.
+
+Keep this finite delivery loop active until completion or a concrete access, safety or product decision blocks it:
+
+1. Fix remaining demonstrated selection, replacement, insertion and provider defects in source, with focused regressions. Continue independent source work while an execution dependency is blocked.
+2. Reconcile the relevant PRs into one exact-source candidate, run the focused tests and required CI, and fix real failures without weakening coverage or identity/content/Undo guards.
+3. Build and verify the matching combined test application, preserve the persistent permission identity, and give Harry the application with its source identity and honest remaining compatibility limits.
+4. Wait for Harry to test that exact application. If he reports a failure, diagnose it and return to the source fix; do not call the delivery complete or silently substitute a newer artifact.
+5. After Harry confirms that testing is good, merge the relevant reviewed PRs with passing required checks and a clean merge state. Deferred preview UI PRs and unrelated work are not part of this delivery.
+
+Runner setup, new build-controller projects, broad optimization and unrelated cleanup are out of scope. Supporting work is justified only when it directly removes a demonstrated blocker to a fix, required verification or the test build. Existing execution, privacy, permission, source-continuity and resource-safety boundaries remain in force; name an actual blocker instead of replacing this goal with more tooling.
+
 ## Goal and current boundary
 
 Harry's goal is that imrse works across ordinary text fields, not merely that Undo is repaired. Selected replacement in the original field is primary. Explicit caret insertion is a separate intent and milestone. Preserve the existing instruction/preset → generation → direct Apply interaction.
@@ -50,7 +64,9 @@ Exercise precommit Cancel with delayed provider completion and confirm no late w
 
 ### 4. Implement demonstrated host/editor gaps under ELV-16
 
-Current capture binds the focused AX node, not a general focus-anchor/editable-host pair (`MacSelectionAccess.swift`, `TargetHandle` and `capture(intent:)`). Current rich eligibility requires the focused `AXTextArea` itself to be its editable and highest-editable ancestor, with a supported direct static child. Those are real capability boundaries, not proof that every editor needs a bridge.
+The source candidate preserves direct focused-node capture and attempts a bounded explicit ancestor fallback only when replacement selection evidence is unavailable. It binds the exact focused anchor and a same-process, parent-linked, uniquely self-advertising `AXTextArea` host separately, revalidating their identities, window, roles and any available anchor selection evidence through the transaction. Empty, malformed or contradictory evidence never authorizes a fallback. These source paths and their pure regressions still need compiled tests and an observed distinct-anchor profile before they establish a supported editor.
+
+Rich eligibility still requires the resolved `AXTextArea` to be its own editable and highest-editable ancestor, with the existing content/style/inverse proof. Plain whole-value write eligibility and explicit insertion eligibility are unchanged. This is not a document-wide search or proof that every editor can be handled through AX.
 
 For a demonstrated required-field failure, first identify whether capture lacks range/text, the focused anchor differs from its editable host, the host/document changed, or the write/readback proof is unavailable. Implement a bounded, same-process, parent-linked resolver only for the evidenced relationship. Bind anchor and host independently through validation, commit and Undo; preserve secure/read-only, cycle, foreign-node and ambiguity refusals. Add pure relationship/identity regressions and then native evidence for that profile.
 

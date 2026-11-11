@@ -214,21 +214,22 @@ public struct OpenAICompatibleProvider: TextProvider, Sendable {
         }
 
         for choice in choices {
-            if let delta = choice["delta"] as? [String: Any], let content = delta["content"] {
-                if let text = content as? String {
-                    if requireSuccessfulStreamTerminator, sawSuccessfulFinishReason, !text.isEmpty {
-                        throw ImrseError.interruptedStream
+            if let deltaValue = choice["delta"], !(deltaValue is NSNull) {
+                guard let delta = deltaValue as? [String: Any] else { throw ImrseError.malformedResponse }
+                if let content = delta["content"] {
+                    if let text = content as? String {
+                        if requireSuccessfulStreamTerminator, sawSuccessfulFinishReason, !text.isEmpty {
+                            throw ImrseError.interruptedStream
+                        }
+                        outputBytes += text.utf8.count
+                        guard outputBytes <= maximumOutputBytes else { throw ImrseError.outputTooLarge }
+                        if !text.isEmpty {
+                            if case .terminated = continuation.yield(text) { throw CancellationError() }
+                        }
+                    } else if !(content is NSNull) {
+                        throw ImrseError.malformedResponse
                     }
-                    outputBytes += text.utf8.count
-                    guard outputBytes <= maximumOutputBytes else { throw ImrseError.outputTooLarge }
-                    if !text.isEmpty {
-                        if case .terminated = continuation.yield(text) { throw CancellationError() }
-                    }
-                } else if !(content is NSNull) {
-                    throw ImrseError.malformedResponse
                 }
-            } else if choice["delta"] != nil && !(choice["delta"] is NSNull) {
-                throw ImrseError.malformedResponse
             }
 
             if let finishReason = choice["finish_reason"], !(finishReason is NSNull) {

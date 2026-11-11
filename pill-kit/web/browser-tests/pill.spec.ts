@@ -2,7 +2,7 @@ import {test,expect,type Page} from "@playwright/test";
 test.beforeEach(async({page})=>{await page.goto("/");});
 async function expectPillGeometry(page:Page,width:number){
  const pill=page.locator(".imrse-pill");
- expect(await pill.boundingBox()).toMatchObject({width,height:52});
+ await expect.poll(()=>pill.boundingBox()).toMatchObject({width,height:52});
  await expect(pill).toHaveCSS("border-radius","26px");
 }
 test("hidden until invoked; Escape removes surface",async({page})=>{

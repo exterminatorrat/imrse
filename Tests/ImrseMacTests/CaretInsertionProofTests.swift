@@ -124,6 +124,206 @@ struct CaretInsertionProofTests {
         #expect(restored?.utf16.elementsEqual(proof.value.utf16) == true)
     }
 
+    @Test(arguments: [0, 1, 3, 5])
+    func insertionInverseRequiresTheExactInsertedDocument(at offset: Int) throws {
+        let proof = try #require(make(range: TextRange(location: offset, length: 0)))
+        let replacement = "🪻\u{301}"
+        let applied = try #require(proof.inserting(replacement))
+        let receipt = insertionReceipt(proof: proof, replacement: replacement)
+        let selection = caret(afterInserting: replacement, at: offset)
+
+        #expect(restored(proof, receipt, applied, selection)?.utf16.elementsEqual(proof.value.utf16) == true)
+        #expect(PlainTextUndoValidation.restoredValue(
+            currentValue: applied + "!",
+            receipt: receipt,
+            replacementRange: TextRange(location: offset, length: replacement.utf16.count),
+            currentSelection: selection,
+            receiptSelection: selection
+        ) != nil)
+        #expect(restored(proof, receipt, applied + "!", selection) == nil)
+        #expect(restored(proof, receipt, "Z" + applied, selection) == nil)
+        #expect(restored(proof, receipt, proof.value, selection) == nil)
+
+        let sameLengthEdit = try #require(UTF16SelectionRange.replacing(
+            applied,
+            range: TextRange(location: offset, length: replacement.utf16.count),
+            with: "🪻a"
+        ))
+        #expect(sameLengthEdit.utf16.count == applied.utf16.count)
+        #expect(restored(proof, receipt, sameLengthEdit, selection) == nil)
+    }
+
+    @Test
+    func canonicalEquivalenceDoesNotConfirmInsertionOrItsInverse() throws {
+        let proof = try #require(make(value: "e\u{301}", range: TextRange(location: 0, length: 0)))
+        let applied = try #require(proof.inserting("🪻"))
+        let composed = "🪻\u{E9}"
+        #expect(composed == applied)
+        #expect(composed.utf16.count != applied.utf16.count)
+        let receipt = insertionReceipt(proof: proof, replacement: "🪻")
+        let selection = caret(afterInserting: "🪻", at: 0)
+
+        #expect(!proof.confirmsApplied(value: composed, inserting: "🪻"))
+        #expect(restored(proof, receipt, applied, selection) != nil)
+        #expect(restored(proof, receipt, composed, selection) == nil)
+    }
+
+    @Test
+    func insertionInverseRequiresTheReceiptBoundSelection() throws {
+        let proof = try #require(make())
+        let replacement = "🪻"
+        let applied = try #require(proof.inserting(replacement))
+        let receipt = insertionReceipt(proof: proof, replacement: replacement)
+        let selection = caret(afterInserting: replacement, at: 0)
+
+        #expect(restored(proof, receipt, applied, selection) != nil)
+        #expect(restored(
+            proof,
+            receipt,
+            applied,
+            UndoSelectionProof(text: "", range: TextRange(location: replacement.utf16.count + 1, length: 0))
+        ) == nil)
+
+        let selectedInsertion = UndoSelectionProof(
+            text: replacement,
+            range: TextRange(location: 0, length: replacement.utf16.count)
+        )
+        #expect(restored(
+            proof,
+            receipt,
+            applied,
+            selectedInsertion,
+            receiptSelection: selectedInsertion
+        ) != nil)
+        #expect(restored(
+            proof,
+            receipt,
+            applied,
+            UndoSelectionProof(text: "", range: selectedInsertion.range),
+            receiptSelection: selectedInsertion
+        ) == nil)
+    }
+
+    @Test
+    func insertionInverseRejectsReceiptsThatDoNotMatchTheProof() throws {
+        let proof = try #require(make())
+        let replacement = "🪻"
+        let applied = try #require(proof.inserting(replacement))
+        let selection = caret(afterInserting: replacement, at: 0)
+        let receipt = insertionReceipt(proof: proof, replacement: replacement)
+
+        #expect(restored(proof, replacementReceipt(proof: proof, replacement: replacement), applied, selection) == nil)
+        #expect(restored(
+            proof,
+            insertionReceipt(proof: proof, replacement: replacement, range: TextRange(location: 1, length: 0)),
+            applied,
+            selection
+        ) == nil)
+        #expect(restored(
+            proof,
+            insertionReceipt(proof: proof, replacement: replacement, text: "a"),
+            applied,
+            selection
+        ) == nil)
+        #expect(restored(proof, receipt, applied, selection) != nil)
+    }
+
+    @Test(arguments: [0, 1, 3, 4])
+    func insertionPreservesCJKContextAtEachScalarBoundary(at offset: Int) throws {
+        let proof = try #require(make(value: "東😀京", range: TextRange(location: offset, length: 0)))
+        let inserted = try #require(proof.inserting("語"))
+        let expected = try #require(UTF16SelectionRange.replacing(
+            proof.value,
+            range: proof.range,
+            with: "語"
+        ))
+        #expect(inserted.utf16.count == 5)
+        #expect(inserted.utf16.elementsEqual(expected.utf16))
+    }
+
+    @Test
+    func caretInsideASurrogatePairIsRefusedInCJKContext() {
+        #expect(make(value: "東😀京", range: TextRange(location: 2, length: 0)) == nil)
+        #expect(make(value: "東😀京", range: TextRange(location: 3, length: 0)) != nil)
+    }
+
+    @Test
+    func insertionConfirmationNeverFallsBackToRangeOnlyEvidence() {
+        let expected = "🪻a😀e\u{301}"
+        let replacementRange = TextRange(location: 0, length: "🪻".utf16.count)
+
+        #expect(!SelectedTextReplacementValidation.permitsRangeOnlyConfirmation(expectedValue: expected))
+        #expect(!SelectedTextReplacementValidation.confirms(
+            afterValue: nil,
+            expectedValue: expected,
+            afterRange: replacementRange,
+            afterText: "🪻",
+            replacementRange: replacementRange,
+            replacement: "🪻"
+        ))
+        #expect(SelectedTextReplacementValidation.permitsRangeOnlyConfirmation(expectedValue: nil))
+        #expect(SelectedTextReplacementValidation.confirms(
+            afterValue: expected,
+            expectedValue: expected,
+            afterRange: replacementRange,
+            afterText: "🪻",
+            replacementRange: replacementRange,
+            replacement: "🪻"
+        ))
+    }
+
+    private func insertionReceipt(
+        proof: CaretInsertionProof,
+        replacement: String,
+        range: TextRange? = nil,
+        text: String = "",
+        intent: SelectionEditIntent = .insertAtCaret
+    ) -> ReplacementReceipt {
+        ReplacementReceipt(
+            target: SelectionSnapshot(
+                applicationID: "owned.fixture",
+                processID: 42,
+                role: "AXTextField",
+                text: text,
+                range: range ?? proof.range,
+                isSecure: false,
+                intent: intent
+            ),
+            replacement: replacement,
+            strategy: .selectedText
+        )
+    }
+
+    private func replacementReceipt(proof: CaretInsertionProof, replacement: String) -> ReplacementReceipt {
+        insertionReceipt(proof: proof, replacement: replacement, intent: .replaceSelection)
+    }
+
+    private func caret(afterInserting text: String, at offset: Int) -> UndoSelectionProof {
+        UndoSelectionProof(
+            text: "",
+            range: TextRange(location: offset + text.utf16.count, length: 0)
+        )
+    }
+
+    private func restored(
+        _ proof: CaretInsertionProof,
+        _ receipt: ReplacementReceipt,
+        _ currentValue: String,
+        _ selection: UndoSelectionProof,
+        receiptSelection: UndoSelectionProof? = nil
+    ) -> String? {
+        PlainTextUndoValidation.insertionRestoredValue(
+            currentValue: currentValue,
+            proof: proof,
+            receipt: receipt,
+            currentSelection: selection,
+            receiptSelection: receiptSelection ?? caret(
+                afterInserting: receipt.replacement,
+                at: proof.range.location
+            )
+        )
+    }
+
     private func make(
         value: String? = "a😀e\u{301}",
         range: TextRange = TextRange(location: 0, length: 0),
