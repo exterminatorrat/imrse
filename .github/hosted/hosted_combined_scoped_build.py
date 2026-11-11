@@ -193,6 +193,8 @@ class RetainedProcess:
         except ProcessLookupError:
             return
         except PermissionError as error:
+            if self.exited:
+                return
             raise LifetimeError("signal-permission") from error
         self.signals.append(signum)
 

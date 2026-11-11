@@ -342,6 +342,23 @@ class LifetimeInvariantTests(unittest.TestCase):
         with self.assertRaises(helper.LifetimeError):
             proc.signal_group(helper.signal.SIGKILL)
 
+    def test_exited_unreaped_group_permission_error_is_not_a_signal_failure(self):
+        child = self.FakePopen()
+        proc = helper.RetainedProcess(child, self.FakeWatcher(), child.pid)
+        proc.exited = True
+        with patch.object(helper.os, "killpg", side_effect=PermissionError) as kill:
+            proc.signal_group(helper.signal.SIGKILL)
+        kill.assert_called_once_with(child.pid, helper.signal.SIGKILL)
+        self.assertEqual(proc.signals, [])
+
+    def test_running_group_permission_error_remains_a_signal_failure(self):
+        child = self.FakePopen()
+        proc = helper.RetainedProcess(child, self.FakeWatcher(), child.pid)
+        with patch.object(helper.os, "killpg", side_effect=PermissionError):
+            with self.assertRaises(helper.LifetimeError):
+                proc.signal_group(helper.signal.SIGKILL)
+        self.assertEqual(proc.signals, [])
+
     def test_no_reap_before_last_signal(self):
         proc = FakeProcess(exited=False)
         io = FakeIO(rows=[row(100, 1, 100), row(101, 100, 100)], proc=proc)
@@ -448,6 +465,29 @@ class MetadataBoundaryTests(unittest.TestCase):
             result = helper.run_bounded(["/bin/ps"], {}, 5, max_bytes=1024)
         self.assertEqual(result.stdout, b"ok")
         self.assertTrue(proc.reaped)
+
+    def test_run_bounded_exited_group_permission_error_keeps_its_output(self):
+        child = self.FakePopen(b"ok")
+        proc = helper.RetainedProcess(child, LifetimeInvariantTests.FakeWatcher(), child.pid)
+        proc.exited = True
+        with patch.object(helper.RetainedProcess, "spawn", return_value=proc), patch.object(helper.os, "killpg", side_effect=[PermissionError, ProcessLookupError]):
+            result = helper.run_bounded(["/bin/ps"], {}, 5)
+        self.assertEqual(result.stdout, b"ok")
+        self.assertEqual(result.returncode, 0)
+        self.assertTrue(proc.reaped)
+        self.assertEqual(proc.signals, [])
+
+    def test_run_bounded_exited_group_permission_error_does_not_prove_closure(self):
+        for probe_result in (None, PermissionError()):
+            with self.subTest(probe_result=type(probe_result).__name__):
+                child = self.FakePopen(b"ok")
+                proc = helper.RetainedProcess(child, LifetimeInvariantTests.FakeWatcher(), child.pid)
+                proc.exited = True
+                with patch.object(helper.RetainedProcess, "spawn", return_value=proc), patch.object(helper.os, "killpg", side_effect=[PermissionError(), probe_result]):
+                    with self.assertRaisesRegex(helper.ScopeError, "metadata-incomplete:group-absence"):
+                        helper.run_bounded(["/bin/ps"], {}, 5)
+                self.assertTrue(proc.reaped)
+                self.assertFalse(proc.authority)
 
     def test_run_bounded_oversize_is_rejected_and_group_closed(self):
         proc = self.fake_process(b"x" * 100)
