@@ -514,7 +514,7 @@ def evaluate_toolchain(observations):
     for flag in ("--only-use-versions-from-resolved-file", "--jobs", "--disable-experimental-prebuilts", "--skip-update"):
         if flag not in observations.get("buildHelp", ""):
             issues.append("build-flag:" + flag)
-    if "--disable-automatic-resolution" not in observations.get("resolveHelp", ""):
+    if "--disable-automatic-resolution" not in observations.get("packageHelp", ""):
         issues.append("resolve-flag")
     if observations.get("realSwift", "") and not observations["realSwift"].startswith("/"):
         issues.append("swift-executable")
@@ -749,8 +749,8 @@ def check_toolchain(environment):
     observations["metalVersion"] = metal.stdout.decode().strip()
     build_help = require_success(run_bounded(["/usr/bin/xcrun", "swift", "build", "--help"], tool_environment, 20), "build-help")
     observations["buildHelp"] = build_help.stdout.decode("utf-8", errors="replace")
-    resolve_help = require_success(run_bounded(["/usr/bin/xcrun", "swift", "package", "resolve", "--help"], tool_environment, 20), "resolve-help")
-    observations["resolveHelp"] = resolve_help.stdout.decode("utf-8", errors="replace")
+    package_help = require_success(run_bounded(["/usr/bin/xcrun", "swift", "package", "--help"], tool_environment, 20), "package-help")
+    observations["packageHelp"] = package_help.stdout.decode("utf-8", errors="replace")
     issues = evaluate_toolchain(observations)
     if issues:
         raise ScopeError("toolchain:" + ",".join(issues))

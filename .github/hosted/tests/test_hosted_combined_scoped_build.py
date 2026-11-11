@@ -513,6 +513,48 @@ class MetadataBoundaryTests(unittest.TestCase):
         self.assertTrue(proc.signals)
         self.assertTrue(proc.reaped)
 
+    TOOLCHAIN_PROBES = {
+        ("/usr/bin/uname", "-sm"): b"Darwin arm64",
+        ("/usr/bin/sw_vers", "-productVersion"): b"27.0",
+        ("/usr/bin/xcode-select", "-p"): b"/Applications/Xcode_27.app/Contents/Developer",
+        ("/usr/bin/xcodebuild", "-version"): b"Xcode 27.1\nBuild version 27A9275",
+        ("/usr/bin/xcrun", "swift", "--version"): b"Apple Swift version 6.4 (swiftlang-6.4.0.34.1)\nTarget: arm64-apple-macosx27.0.0",
+        ("/usr/bin/xcrun", "--sdk", "macosx", "--show-sdk-version"): b"27.0",
+        ("/usr/bin/xcrun", "--sdk", "macosx", "--show-sdk-path"): b"/Applications/Xcode_27.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX27.0.sdk",
+        ("/usr/bin/xcrun", "--find", "swift"): b"/Applications/Xcode_27.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swift",
+        ("/usr/bin/xcrun", "--sdk", "macosx", "metal", "--version"): b"Apple metal version 32027.1 (metalfe-32027.1)",
+        ("/usr/bin/xcrun", "swift", "build", "--help"): b"swiftbuild --only-use-versions-from-resolved-file --jobs --disable-experimental-prebuilts --skip-update",
+    }
+
+    def stub_toolchain(self, package_help):
+        probes = dict(self.TOOLCHAIN_PROBES)
+        probes[("/usr/bin/xcrun", "swift", "package", "--help")] = package_help
+        observed = []
+
+        def bounded(argv, environment, timeout, **kwargs):
+            observed.append(argv)
+            payload = probes.get(tuple(argv))
+            if payload is None:
+                raise AssertionError("unexpected toolchain probe: " + repr(argv))
+            return subprocess.CompletedProcess(argv, 0, payload, b"")
+
+        return observed, bounded
+
+    def test_toolchain_probes_visible_global_package_help_for_the_lockfile_flag(self):
+        observed, bounded = self.stub_toolchain(b"OPTIONS:\n  --disable-automatic-resolution  Only use versions from the Package.resolved file")
+        with patch.object(helper, "run_bounded", side_effect=bounded):
+            observations = helper.check_toolchain({})
+        self.assertEqual(observations["packageHelp"], "OPTIONS:\n  --disable-automatic-resolution  Only use versions from the Package.resolved file")
+        self.assertIn(["/usr/bin/xcrun", "swift", "package", "--help"], observed)
+        self.assertNotIn(["/usr/bin/xcrun", "swift", "package", "resolve", "--help"], observed)
+
+    def test_toolchain_refuses_a_missing_global_lockfile_flag(self):
+        observed, bounded = self.stub_toolchain(b"OPTIONS:\n  --package-path  Specify the package path to operate on")
+        with patch.object(helper, "run_bounded", side_effect=bounded):
+            with self.assertRaisesRegex(helper.ScopeError, "toolchain:resolve-flag"):
+                helper.check_toolchain({})
+        self.assertIn(["/usr/bin/xcrun", "swift", "package", "--help"], observed)
+
     def test_system_phase_identity_uses_bounded_helper(self):
         completed = subprocess.CompletedProcess(["/bin/ps"], 0, b"4242 Mon Jan  1 00:00:00 2026\n", b"")
         with patch.object(helper, "run_bounded", return_value=completed) as bounded:
@@ -603,12 +645,13 @@ class PureDecisionTests(unittest.TestCase):
             "sdkVersion": "27.0",
             "metalExitCode": 0,
             "buildHelp": "swiftbuild --only-use-versions-from-resolved-file --jobs --disable-experimental-prebuilts --skip-update",
-            "resolveHelp": "--disable-automatic-resolution",
+            "packageHelp": "--disable-automatic-resolution",
             "realSwift": "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swift",
         }
         self.assertEqual(helper.evaluate_toolchain(good), [])
         bad = dict(good, uname="Darwin x86_64", osVersion="26.6", xcode="Xcode 26.6", swift="Apple Swift version 6.2", sdkVersion="26.0", metalExitCode=1, buildHelp="", realSwift="swift")
         self.assertTrue(helper.evaluate_toolchain(bad))
+        self.assertEqual(helper.evaluate_toolchain(dict(good, packageHelp="OPTIONS: --package-path --cache-path")), ["resolve-flag"])
 
 
 class BuildEnvironmentTests(unittest.TestCase):
