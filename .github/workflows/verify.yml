@@ -251,24 +251,6 @@ jobs:
             --control-commit "$GITHUB_SHA" \
             --source-commit 0e2ddbd77f5b74a9d4b73a59448363becbbebd0b \
             --source-tree 3555d346a7fc2538703d34cb238ecf0dc5e4a703
-      - name: Transfer temporary failure text
-        if: always()
-        timeout-minutes: 1
-        shell: bash
-        run: |
-          set -euo pipefail
-          EVIDENCE="$RUNNER_TEMP/imrse-hosted-combined-535b7f8-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
-          /usr/bin/python3 - "$EVIDENCE" <<'PY'
-          import json, pathlib, sys
-          path = pathlib.Path(sys.argv[1]) / "hosted-combined-result.json"
-          if not path.is_file():
-              print("FAILURE_TEXT: <no result file>")
-              raise SystemExit(0)
-          result = json.loads(path.read_text())
-          print("FAILURE_TEXT: " + str(result.get("failure")))
-          for admission in result.get("admissions", []):
-              print("ADMISSION: " + json.dumps(admission, sort_keys=True))
-          PY
       - name: Export bounded public receipts and any validated unsigned app
         id: export
         if: always()
