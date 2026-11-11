@@ -15,8 +15,8 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
-SOURCE_COMMIT = "535b7f85720b2e53c60604e8b7c8abfb4e97ca4b"
-SOURCE_TREE = "711a36772737488bb99ffd3a00cbce277be68a68"
+SOURCE_COMMIT = "0e2ddbd77f5b74a9d4b73a59448363becbbebd0b"
+SOURCE_TREE = "3555d346a7fc2538703d34cb238ecf0dc5e4a703"
 WORKFLOW_PATH = ".github/workflows/verify.yml"
 HELPER_PATH = ".github/hosted/hosted_combined_scoped_build.py"
 PACKAGE_RESOLVED_SHA256 = "b50c36095657623b7356533963726cec44dc55c3ba429f81e2c25b9a0beb823b"
