@@ -61,7 +61,28 @@ final class PermissionStatusRefreshTests: XCTestCase {
         )
 
         XCTAssertEqual(activeModel.eventMonitoringStatus, "Active")
-        XCTAssertTrue(activeModel.keyboardMonitoringDetail.contains("No keyboard activation is enabled"))
+        XCTAssertTrue(activeModel.keyboardMonitoringDetail.contains("Listening for configured shortcuts"))
+    }
+
+    func testInsertionShortcutCollisionsAreExplainedInKeyboardMonitoringStatus() {
+        let permissions = TestPermissionValues(accessibility: true, inputMonitoring: true)
+        let insertionShortcut = InvocationConfiguration.defaultInsertAtCaretShortcut
+
+        var configuration = AppConfiguration()
+        configuration.invocation.shortcut = insertionShortcut
+        let replacementModel = makeModel(permissions: permissions, configuration: configuration)
+        XCTAssertEqual(replacementModel.eventMonitoringStatus, "Active")
+        XCTAssertTrue(replacementModel.keyboardMonitoringDetail.contains("conflicts with the configured replacement shortcut"))
+
+        let preset = Preset(
+            id: "insert-collision",
+            name: "Collision",
+            instruction: "Use a different tone",
+            shortcut: insertionShortcut
+        )
+        let presetModel = makeModel(permissions: permissions, presets: [preset])
+        XCTAssertEqual(presetModel.eventMonitoringStatus, "Active")
+        XCTAssertTrue(presetModel.keyboardMonitoringDetail.contains("conflicts with the Collision preset shortcut"))
     }
 
     func testVisibleRefreshIsCoalescedAndCancelsOnHideAndTermination() async {
@@ -186,6 +207,7 @@ final class PermissionStatusRefreshTests: XCTestCase {
         permissions: TestPermissionValues,
         monitor: TestPermissionShortcutMonitor = TestPermissionShortcutMonitor(),
         configuration: AppConfiguration = AppConfiguration(),
+        presets: [Preset] = [],
         interval: Duration = .seconds(2)
     ) -> AppModel {
         let engine = TransformationEngine(
@@ -208,6 +230,7 @@ final class PermissionStatusRefreshTests: XCTestCase {
         return AppModel(
             testEngine: engine,
             configuration: configuration,
+            presets: presets,
             shortcutMonitoring: monitor,
             permissionStatusReader: reader,
             permissionStatusRefreshClock: clock
@@ -252,7 +275,8 @@ private final class TestPermissionShortcutMonitor: ShortcutMonitoring {
     func start(
         configuration: InvocationConfiguration,
         presets: [Preset],
-        onInvoke: @escaping @MainActor (String?) -> Void
+        onInvoke: @escaping @MainActor (String?) -> Void,
+        onInsertAtCaret: @escaping @MainActor () -> Void
     ) throws {
         startCount += 1
         if let failure { throw failure }

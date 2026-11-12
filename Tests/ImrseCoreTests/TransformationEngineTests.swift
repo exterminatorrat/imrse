@@ -118,6 +118,120 @@ final class TransformationEngineTests: XCTestCase {
         XCTAssertNil(engine.diagnostics.model)
     }
 
+    func testCaptureFailureReasonIsRecordedAndClearedByNewInvocation() async {
+        let access = StubSelectionAccess(target: snapshot(text: "original"))
+        let engine = TransformationEngine(
+            selectionAccess: access,
+            textProvider: ScriptedTextProvider(fragments: ["rewritten"])
+        )
+        access.captureError = .noSelection
+        access.captureFailureReason = .focusedElementUnavailable
+
+        engine.invoke()
+
+        XCTAssertEqual(engine.state, .failed(.noSelection))
+        XCTAssertEqual(engine.diagnostics.selectionFailureReason, .focusedElementUnavailable)
+
+        engine.dismiss()
+        XCTAssertEqual(engine.diagnostics.selectionFailureReason, .focusedElementUnavailable)
+        access.captureError = nil
+        engine.invoke()
+
+        XCTAssertEqual(engine.state, .ready)
+        XCTAssertNil(engine.diagnostics.selectionFailureReason)
+
+        engine.submit(instruction: "", provider: providerConfiguration)
+        await waitForState(engine, .succeeded(unchanged: false))
+        XCTAssertNil(engine.diagnostics.selectionFailureReason)
+    }
+
+    func testValidationFailurePreservesOriginalReasonAfterDiscardingInvalidatedTarget() async {
+        for reason in [
+            SelectionFailureReason.captureInvalidated,
+            .captureObservedFocusChange,
+            .captureObservedSelectionChange,
+            .captureObservedValueChange,
+            .captureDiscarded
+        ] {
+            let access = StubSelectionAccess(target: snapshot(text: "original"))
+            access.validationError = .targetLost
+            access.validationFailureReason = reason
+            let engine = TransformationEngine(
+                selectionAccess: access,
+                textProvider: ScriptedTextProvider(fragments: ["rewritten"])
+            )
+            engine.invoke()
+            engine.submit(instruction: "", provider: providerConfiguration)
+
+            await waitForState(engine, .failed(.targetLost))
+
+            XCTAssertNil(access.lastFailureReason)
+            XCTAssertEqual(engine.diagnostics.selectionFailureReason, reason)
+        }
+    }
+
+    func testReplacementFailureRecordsAdapterReasonWithoutChangingError() async {
+        let access = StubSelectionAccess(target: snapshot(text: "original"))
+        access.replacementError = .clipboardPending
+        access.replacementFailureReason = .replacementVerificationFailed
+        let engine = TransformationEngine(
+            selectionAccess: access,
+            textProvider: ScriptedTextProvider(fragments: ["rewritten"])
+        )
+        engine.invoke()
+        engine.submit(instruction: "", provider: providerConfiguration)
+
+        await waitForState(engine, .failed(.clipboardPending))
+
+        XCTAssertEqual(engine.diagnostics.error, .clipboardPending)
+        XCTAssertEqual(engine.diagnostics.selectionFailureReason, .replacementVerificationFailed)
+    }
+
+    func testReplacementFailureStagesSurviveTargetCleanupWithoutChangingError() async {
+        for reason in [
+            SelectionFailureReason.replacementWriteRejected,
+            .replacementReadbackFailed,
+            .replacementEvidenceMismatch,
+            .clipboardTargetIneligible,
+            .axReadFailure
+        ] {
+            let access = StubSelectionAccess(target: snapshot(text: "original"))
+            access.replacementError = .replacementFailed
+            access.replacementFailureReason = reason
+            let engine = TransformationEngine(
+                selectionAccess: access,
+                textProvider: ScriptedTextProvider(fragments: ["rewritten"])
+            )
+            engine.invoke()
+            engine.submit(instruction: "", provider: providerConfiguration)
+
+            await waitForState(engine, .failed(.replacementFailed))
+
+            XCTAssertNil(access.lastFailureReason)
+            XCTAssertEqual(engine.diagnostics.error, .replacementFailed)
+            XCTAssertEqual(engine.diagnostics.selectionFailureReason, reason)
+        }
+    }
+
+    func testUndoFailureRecordsAdapterReasonWithoutChangingError() async {
+        let access = StubSelectionAccess(target: snapshot(text: "original"))
+        let engine = TransformationEngine(
+            selectionAccess: access,
+            textProvider: ScriptedTextProvider(fragments: ["rewritten"])
+        )
+        engine.invoke()
+        engine.submit(instruction: "", provider: providerConfiguration)
+        await waitForState(engine, .succeeded(unchanged: false))
+        access.undoError = .staleSelection
+        access.undoFailureReason = .snapshotMismatch
+
+        await engine.undo()
+
+        XCTAssertEqual(engine.state, .failed(.undoUnavailable))
+        XCTAssertEqual(engine.diagnostics.error, .undoUnavailable)
+        XCTAssertEqual(engine.diagnostics.selectionFailureReason, .snapshotMismatch)
+    }
+
     func testRejectedSubmissionReleasesTargetAndRecordsRoutingFailure() async {
         let access = StubSelectionAccess(target: snapshot(text: "original"))
         let provider = ScriptedTextProvider()
@@ -343,6 +457,103 @@ final class TransformationEngineTests: XCTestCase {
         XCTAssertTrue(access.replacedText.isEmpty)
         XCTAssertEqual(engine.diagnostics.replacement, "unchanged")
         XCTAssertNil(engine.diagnostics.error)
+    }
+
+    func testComposedSelectionWithDecomposedOutputIsReplacedExactly() async {
+        let composed = "caf\u{00E9}"
+        let decomposed = "cafe\u{0301}"
+        XCTAssertNotEqual(Array(composed.utf16), Array(decomposed.utf16))
+        let target = snapshot(
+            text: composed,
+            range: ImrseCore.TextRange(location: 4, length: composed.utf16.count)
+        )
+        let access = StubSelectionAccess(target: target)
+        let engine = TransformationEngine(
+            selectionAccess: access,
+            textProvider: ScriptedTextProvider(fragments: ["cafe", "\u{0301}"])
+        )
+        engine.invoke()
+        engine.submit(instruction: "", provider: providerConfiguration)
+
+        await waitForState(engine, .succeeded(unchanged: false))
+
+        XCTAssertEqual(engine.diagnostics.replacement, "replaced")
+        XCTAssertTrue(engine.canUndo)
+        XCTAssertEqual(access.replacedText.count, 1)
+        XCTAssertEqual(access.replacedText.first.map { Array($0.utf16) }, Array(decomposed.utf16))
+
+        await engine.undo()
+
+        XCTAssertEqual(engine.state, .succeeded(unchanged: false))
+        XCTAssertEqual(engine.diagnostics.replacement, "undone")
+        XCTAssertEqual(access.undoCount, 1)
+        let receipt = access.undoReceipts.last
+        XCTAssertEqual(receipt?.target.id, target.id)
+        XCTAssertEqual(receipt.map { Array($0.target.text.utf16) }, Array(composed.utf16))
+        XCTAssertEqual(receipt.map { Array($0.replacement.utf16) }, Array(decomposed.utf16))
+    }
+
+    func testDecomposedSelectionWithComposedOutputIsReplacedExactly() async {
+        let decomposed = "cafe\u{0301}"
+        let composed = "caf\u{00E9}"
+        XCTAssertNotEqual(Array(decomposed.utf16), Array(composed.utf16))
+        let target = snapshot(
+            text: decomposed,
+            range: ImrseCore.TextRange(location: 7, length: decomposed.utf16.count)
+        )
+        let access = StubSelectionAccess(target: target)
+        let engine = TransformationEngine(
+            selectionAccess: access,
+            textProvider: ScriptedTextProvider(fragments: ["caf\u{00E9}"])
+        )
+        engine.invoke()
+        engine.submit(instruction: "", provider: providerConfiguration)
+
+        await waitForState(engine, .succeeded(unchanged: false))
+
+        XCTAssertEqual(engine.diagnostics.replacement, "replaced")
+        XCTAssertTrue(engine.canUndo)
+        XCTAssertEqual(access.replacedText.count, 1)
+        XCTAssertEqual(access.replacedText.first.map { Array($0.utf16) }, Array(composed.utf16))
+
+        await engine.undo()
+
+        XCTAssertEqual(engine.state, .succeeded(unchanged: false))
+        XCTAssertEqual(engine.diagnostics.replacement, "undone")
+        XCTAssertEqual(access.undoCount, 1)
+        let receipt = access.undoReceipts.last
+        XCTAssertEqual(receipt?.target.id, target.id)
+        XCTAssertEqual(receipt.map { Array($0.target.text.utf16) }, Array(decomposed.utf16))
+        XCTAssertEqual(receipt.map { Array($0.replacement.utf16) }, Array(composed.utf16))
+    }
+
+    func testExactIdenticalNormalizedOutputKeepsUnchangedNoOpWithoutReceipt() async {
+        let text = "cafe\u{0301}"
+        let target = snapshot(
+            text: text,
+            range: ImrseCore.TextRange(location: 2, length: text.utf16.count)
+        )
+        let access = StubSelectionAccess(target: target)
+        let engine = TransformationEngine(
+            selectionAccess: access,
+            textProvider: ScriptedTextProvider(fragments: ["cafe", "\u{0301}"])
+        )
+        engine.invoke()
+        engine.submit(instruction: "", provider: providerConfiguration)
+
+        await waitForState(engine, .succeeded(unchanged: true))
+
+        XCTAssertEqual(engine.diagnostics.replacement, "unchanged")
+        XCTAssertNil(engine.diagnostics.error)
+        XCTAssertFalse(engine.canUndo)
+        XCTAssertTrue(access.replacedText.isEmpty)
+        XCTAssertTrue(access.undoReceipts.isEmpty)
+
+        await engine.undo()
+
+        XCTAssertEqual(engine.state, .failed(.undoUnavailable))
+        XCTAssertEqual(access.undoCount, 0)
+        XCTAssertTrue(access.undoReceipts.isEmpty)
     }
 
     func testEmptyDeltasDoNotChangeACompletedResponse() async {
@@ -897,11 +1108,16 @@ private actor DeferredTextProvider: TextProvider {
 private final class StubSelectionAccess: SelectionAccess {
     var target: SelectionSnapshot
     var captureError: ImrseError?
+    var captureFailureReason: SelectionFailureReason?
     var validationError: ImrseError?
+    var validationFailureReason: SelectionFailureReason?
     var replacementError: ImrseError?
+    var replacementFailureReason: SelectionFailureReason?
     var undoError: ImrseError?
+    var undoFailureReason: SelectionFailureReason?
     var holdReplacement = false
     private var replacementContinuation: CheckedContinuation<ReplacementReceipt, any Error>?
+    private(set) var lastFailureReason: SelectionFailureReason?
     private(set) var captureCount = 0
     private(set) var replacedText: [String] = []
     private(set) var discarded: [UUID] = []
@@ -914,18 +1130,30 @@ private final class StubSelectionAccess: SelectionAccess {
 
     func capture() throws -> SelectionSnapshot {
         captureCount += 1
-        if let captureError { throw captureError }
+        if let captureError {
+            lastFailureReason = captureFailureReason
+            throw captureError
+        }
+        lastFailureReason = nil
         return target
     }
 
     func validate(_ target: SelectionSnapshot) throws {
-        if let validationError { throw validationError }
+        if let validationError {
+            lastFailureReason = validationFailureReason
+            throw validationError
+        }
+        lastFailureReason = nil
         guard target.id == self.target.id else { throw ImrseError.targetLost }
     }
 
     func replace(_ target: SelectionSnapshot, with text: String) async throws -> ReplacementReceipt {
         replacedText.append(text)
-        if let replacementError { throw replacementError }
+        if let replacementError {
+            lastFailureReason = replacementFailureReason
+            throw replacementError
+        }
+        lastFailureReason = nil
         let receipt = ReplacementReceipt(target: target, replacement: text, strategy: .selectedText)
         guard holdReplacement else { return receipt }
         return try await withCheckedThrowingContinuation { replacementContinuation = $0 }
@@ -934,11 +1162,16 @@ private final class StubSelectionAccess: SelectionAccess {
     func undo(_ receipt: ReplacementReceipt) async throws {
         undoCount += 1
         undoReceipts.append(receipt)
-        if let undoError { throw undoError }
+        if let undoError {
+            lastFailureReason = undoFailureReason
+            throw undoError
+        }
+        lastFailureReason = nil
     }
 
     func discard(_ target: SelectionSnapshot) {
         discarded.append(target.id)
+        lastFailureReason = nil
     }
 
     func completeReplacement() {

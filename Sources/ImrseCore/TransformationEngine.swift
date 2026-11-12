@@ -20,6 +20,7 @@ public final class TransformationEngine {
     public private(set) var diagnostics = DiagnosticMetadata()
     public private(set) var responseMetadata: ResponseMetadata?
     public var onChange: (@MainActor (TransformationState) -> Void)?
+    public var onPrepareReplacement: (@MainActor () -> Void)?
     public var canUndo: Bool {
         undoReceipt != nil && state != .generating && state != .replacing && state != .undoing
     }
@@ -38,6 +39,10 @@ public final class TransformationEngine {
     }
 
     public func invoke() {
+        invoke(intent: .replaceSelection)
+    }
+
+    public func invoke(intent: SelectionEditIntent) {
         if state == .generating {
             cancel()
             return
@@ -49,9 +54,10 @@ public final class TransformationEngine {
 
         let snapshot: SelectionSnapshot
         do {
-            snapshot = try selectionAccess.capture()
+            snapshot = try selectionAccess.capture(intent: intent)
         } catch {
-            fail(Self.captureFailure(error))
+            let selectionFailureReason = selectionAccess.lastFailureReason
+            fail(Self.captureFailure(error), selectionFailureReason: selectionFailureReason)
             return
         }
 
@@ -60,6 +66,12 @@ public final class TransformationEngine {
         diagnostics.selectionLength = snapshot.isSecure ? nil : snapshot.text.utf16.count
         diagnostics.targetValid = nil
         diagnostics.strategy = nil
+
+        guard snapshot.intent == intent else {
+            selectionAccess.discard(snapshot)
+            fail(.insertionUnavailable)
+            return
+        }
 
         if let error = Self.snapshotFailure(snapshot) {
             selectionAccess.discard(snapshot)
@@ -83,6 +95,11 @@ public final class TransformationEngine {
         guard state == .ready, let target else { return }
         responseMetadata = nil
         pendingResponseMetadata = nil
+        if target.intent == .insertAtCaret,
+           instruction.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            fail(.missingInstruction)
+            return
+        }
         guard instruction.utf8.count <= Self.maximumInstructionUTF8Bytes else {
             fail(.instructionTooLarge)
             return
@@ -175,13 +192,16 @@ public final class TransformationEngine {
             selectionAccess.discard(receipt.target)
             diagnostics.strategy = receipt.strategy
             diagnostics.error = nil
+            diagnostics.selectionFailureReason = nil
             diagnostics.generation = "idle"
             diagnostics.replacement = "undone"
             transition(to: .succeeded(unchanged: false))
         } catch {
+            let selectionFailureReason = selectionAccess.lastFailureReason
             selectionAccess.discard(receipt.target)
             let failure = Self.undoFailure(error)
             diagnostics.error = failure
+            diagnostics.selectionFailureReason = selectionFailureReason
             diagnostics.targetValid = false
             diagnostics.replacement = "failed"
             transition(to: .failed(failure))
@@ -216,17 +236,24 @@ public final class TransformationEngine {
             try Self.validateOutput(output, utf8Length: outputLength)
             responseMetadata = pendingResponseMetadata
             pendingResponseMetadata = nil
-            if output == target.text {
+            if output.utf16.elementsEqual(target.text.utf16) {
                 finish(operationID, unchanged: true)
                 return
             }
 
+            onPrepareReplacement?()
+            guard isGenerating(operationID) else { return }
             do {
                 try selectionAccess.validate(target)
                 diagnostics.targetValid = true
             } catch {
+                let selectionFailureReason = selectionAccess.lastFailureReason
                 diagnostics.targetValid = false
-                finish(operationID, failure: Self.validationFailure(error))
+                finish(
+                    operationID,
+                    failure: Self.validationFailure(error),
+                    selectionFailureReason: selectionFailureReason
+                )
                 return
             }
             guard isGenerating(operationID) else { return }
@@ -236,7 +263,10 @@ public final class TransformationEngine {
             do {
                 let receipt = try await selectionAccess.replace(target, with: output)
                 guard activeOperationID == operationID, state == .replacing else { return }
-                guard receipt.target.id == target.id, receipt.replacement == output else {
+                guard receipt.target == target,
+                      receipt.target.text.utf16.elementsEqual(target.text.utf16),
+                      receipt.replacement.utf16.elementsEqual(output.utf16)
+                else {
                     diagnostics.replacement = "failed"
                     finish(operationID, failure: .replacementFailed, replacementFailed: true)
                     return
@@ -249,15 +279,22 @@ public final class TransformationEngine {
                 activeOperationID = nil
                 generationTask = nil
                 diagnostics.error = nil
+                diagnostics.selectionFailureReason = nil
                 diagnostics.strategy = receipt.strategy
                 diagnostics.generation = "complete"
                 diagnostics.replacement = "replaced"
                 transition(to: .succeeded(unchanged: false))
             } catch {
                 guard activeOperationID == operationID, state == .replacing else { return }
+                let selectionFailureReason = selectionAccess.lastFailureReason
                 let failure = Self.replacementFailure(error)
                 if failure == .targetLost || failure == .staleSelection { diagnostics.targetValid = false }
-                finish(operationID, failure: failure, replacementFailed: true)
+                finish(
+                    operationID,
+                    failure: failure,
+                    replacementFailed: true,
+                    selectionFailureReason: selectionFailureReason
+                )
             }
         } catch {
             guard activeOperationID == operationID else { return }
@@ -271,12 +308,18 @@ public final class TransformationEngine {
         generationTask = nil
         discardTarget()
         diagnostics.error = nil
+        diagnostics.selectionFailureReason = nil
         diagnostics.generation = "complete"
         diagnostics.replacement = unchanged ? "unchanged" : "replaced"
         transition(to: .succeeded(unchanged: unchanged))
     }
 
-    private func finish(_ operationID: UUID, failure: ImrseError, replacementFailed: Bool = false) {
+    private func finish(
+        _ operationID: UUID,
+        failure: ImrseError,
+        replacementFailed: Bool = false,
+        selectionFailureReason: SelectionFailureReason? = nil
+    ) {
         guard activeOperationID == operationID else { return }
         invalidateGeneration(cancelTask: false)
         pendingResponseMetadata = nil
@@ -288,16 +331,18 @@ public final class TransformationEngine {
         }
         discardTarget()
         diagnostics.error = failure
+        diagnostics.selectionFailureReason = selectionFailureReason
         diagnostics.generation = failure == .cancelled ? "cancelled" : "failed"
         diagnostics.replacement = replacementFailed ? "failed" : "idle"
         transition(to: .failed(failure))
     }
 
-    private func fail(_ failure: ImrseError) {
+    private func fail(_ failure: ImrseError, selectionFailureReason: SelectionFailureReason? = nil) {
         responseMetadata = nil
         pendingResponseMetadata = nil
         discardTarget()
         diagnostics.error = failure
+        diagnostics.selectionFailureReason = selectionFailureReason
         diagnostics.generation = failure == .cancelled ? "cancelled" : "idle"
         diagnostics.replacement = "idle"
         transition(to: .failed(failure))
@@ -328,14 +373,23 @@ public final class TransformationEngine {
 
     private static func snapshotFailure(_ snapshot: SelectionSnapshot) -> ImrseError? {
         if snapshot.isSecure { return .secureInput }
-        let length = snapshot.text.utf16.count
-        guard length > 0 else { return .noSelection }
-        guard !snapshot.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return .noSelection }
-        guard snapshot.text.utf8.count <= maximumSelectionUTF8Bytes else { return .selectionTooLarge }
-        if let range = snapshot.range {
-            guard range.location >= 0, range.length == length else { return .noSelection }
-            let (_, overflow) = range.location.addingReportingOverflow(range.length)
-            guard !overflow else { return .noSelection }
+        switch snapshot.intent {
+        case .replaceSelection:
+            let length = snapshot.text.utf16.count
+            guard length > 0 else { return .noSelection }
+            guard !snapshot.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return .noSelection }
+            guard snapshot.text.utf8.count <= maximumSelectionUTF8Bytes else { return .selectionTooLarge }
+            if let range = snapshot.range {
+                guard range.location >= 0, range.length == length else { return .noSelection }
+                let (_, overflow) = range.location.addingReportingOverflow(range.length)
+                guard !overflow else { return .noSelection }
+            }
+        case .insertAtCaret:
+            guard snapshot.text.isEmpty,
+                  let range = snapshot.range,
+                  range.location >= 0,
+                  range.length == 0
+            else { return .insertionUnavailable }
         }
         return nil
     }
