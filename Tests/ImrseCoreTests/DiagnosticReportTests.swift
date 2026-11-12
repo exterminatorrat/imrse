@@ -30,7 +30,8 @@ final class DiagnosticReportTests: XCTestCase {
     }
 
     func testDocumentContextFailureIsOmittedForUnrelatedOrAbsentFailure() throws {
-        for reason in [SelectionFailureReason?.none, .some(.axReadFailure), .some(.documentContextChanged)] {
+        let reasons: [SelectionFailureReason?] = [nil, .axReadFailure, .documentContextChanged]
+        for reason in reasons {
             var metadata = DiagnosticMetadata()
             metadata.selectionFailureReason = reason
             metadata.documentContextFailure = .emptyValue

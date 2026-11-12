@@ -21,18 +21,30 @@ enum SelectionTargetContextValidation {
     static let maximumDocumentUTF16Length = 4_096
 
     static func documentRead(status: AXError, value: CFTypeRef?) -> DocumentRead {
-        if status == .noValue {
-            return value == nil ? .context(.unavailable) : .failed(.documentContextUnavailable)
-        }
-        guard status == .success else {
-            return .failed(status == .attributeUnsupported ? .documentContextUnavailable : .axReadFailure)
-        }
-        guard let value, let document = value as? String else {
+        if status == .noValue, value == nil { return .context(.unavailable) }
+        if documentFailure(status: status, value: value) != nil {
             return .failed(.documentContextUnavailable)
         }
-        let context = self.document(document)
-        guard context != .malformed else { return .failed(.documentContextUnavailable) }
-        return .context(context)
+        guard status == .success, let document = value as? String else {
+            return .failed(.axReadFailure)
+        }
+        return .context(self.document(document))
+    }
+
+    static func documentFailure(status: AXError, value: CFTypeRef?) -> DocumentContextFailure? {
+        if status == .noValue {
+            return value == nil ? nil : .unexpectedNoValuePayload
+        }
+        guard status == .success else {
+            return status == .attributeUnsupported ? .attributeUnsupported : nil
+        }
+        guard let value else { return .missingValue }
+        guard let document = value as? String else { return .unexpectedValueType }
+        guard !document.isEmpty else { return .emptyValue }
+        guard document.utf16.prefix(maximumDocumentUTF16Length + 1).count <= maximumDocumentUTF16Length else {
+            return .valueTooLong
+        }
+        return nil
     }
 
     static func document(_ value: String) -> Document {
@@ -169,6 +181,7 @@ public final class MacSelectionAccess: SelectionAccess {
     public var clipboardFallbackEnabled: Bool
     public private(set) var capturedScreen: NSScreen?
     public private(set) var lastFailureReason: SelectionFailureReason?
+    public private(set) var lastDocumentContextFailure: DocumentContextFailure?
     private let prepareForClipboardPaste: ClipboardPastePreparation?
     private let clock = ContinuousClock()
     private var capturedTarget: CapturedTarget?
@@ -201,6 +214,7 @@ public final class MacSelectionAccess: SelectionAccess {
     public func capture(intent: SelectionEditIntent) throws -> SelectionSnapshot {
         clearCapture()
         lastFailureReason = nil
+        lastDocumentContextFailure = nil
         captureDeadline = clock.now.advanced(by: Self.captureBudget)
         defer { captureDeadline = nil }
         guard Self.accessibilityPermissionGranted else { throw ImrseError.permissionRequired }
@@ -1163,6 +1177,7 @@ public final class MacSelectionAccess: SelectionAccess {
         case let .context(document):
             return document
         case let .failed(reason):
+            lastDocumentContextFailure = SelectionTargetContextValidation.documentFailure(status: status, value: value)
             throw failure(reason, error)
         }
     }

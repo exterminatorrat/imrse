@@ -1554,6 +1554,10 @@ final class AppModel: ObservableObject {
         if !isPreviewMode {
             metadata.accessibilityGranted = MacSelectionAccess.accessibilityPermissionGranted
             metadata.eventMonitoringActive = shortcutMonitor.isMonitoring
+            if metadata.selectionFailureReason == .documentContextUnavailable,
+               selectionAccess.lastFailureReason == .documentContextUnavailable {
+                metadata.documentContextFailure = selectionAccess.lastDocumentContextFailure
+            }
         }
         return DiagnosticReport.render(metadata)
     }
