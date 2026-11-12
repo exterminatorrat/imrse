@@ -110,7 +110,7 @@ The build script uses SwiftBuild, assembles the app resources, verifies the bund
 ## First run
 
 1. Click the imrse menu-bar icon to open Settings, then go to **Models → Add Provider**. Choose an available provider or model, complete any explicit local-model download or account setup, then choose your default model.
-2. Allow **Input Monitoring** for the global shortcut and **Accessibility** for reading and replacing the selected text. macOS manages these separately in **System Settings → Privacy & Security**. Code signing does not grant either permission, and a Keychain prompt is not a grant.
+2. Allow **Input Monitoring** for the global shortcut and **Accessibility** for reading and replacing the selected text. macOS manages these separately in **System Settings → Privacy & Security**. After granting access, quit and reopen imrse before retrying. A displayed grant does not prove that Accessibility messaging is working for the running app. Code signing does not grant either permission, and a Keychain prompt is not a grant.
 3. For a safe first try, create a disposable TextEdit document and choose **Format → Make Plain Text**. Select a short paragraph, double-tap **Control**, enter an instruction such as “Make this concise,” and press **Return**. An empty instruction uses your `default.md` instruction or the built-in default.
 4. Wait for the completed replacement. Right-click or Control-click the imrse menu-bar icon and choose **Undo** while the target is unchanged to restore the original. Press **Escape** before completion to cancel.
 
@@ -286,6 +286,8 @@ See the [verification report](VERIFICATION.md) for test scope, [remaining macOS 
 ## Troubleshooting
 
 - **The shortcut does nothing:** Check **System Settings → Privacy & Security → Input Monitoring**, allow imrse, and retry. Accessibility permission is also needed to read and replace selections.
+- **"Turn on imrse in Privacy & Security" even though access is enabled:** Confirm that the grant belongs to the installed copy you intend to use, then quit and reopen imrse. The issue #32 handoff reports the Accessibility pane as **Device Control and Data Access** on macOS 27; pane naming has not been independently verified here. If the failure persists, report it before changing signing identities or resetting permissions.
+- **"Couldn't reach this app":** macOS refused the initial Accessibility connection to the target app. If other apps work, save your work and quit and reopen the affected app before retrying.
 - **Text stays unchanged:** Confirm the target still has a plain-text selection. Secure or read-only fields are intentionally unsupported. If the selection moved, the app changed, or the target changed during generation, select the text again and retry; Undo is available only while its target remains unchanged.
 - **A model request fails:** Check that the provider is reachable, the exact model ID is supported by your account, and the provider has available API quota, credits, plan entitlement, and organization approval. An account login alone may not include inference.
 - **Ollama is not found:** Start the Ollama server, check its model tag with `ollama list`, and verify the endpoint is exactly `http://localhost:11434/v1` with API-key authentication off.

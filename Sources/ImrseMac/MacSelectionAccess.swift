@@ -214,15 +214,15 @@ public final class MacSelectionAccess: SelectionAccess {
             throw failure(.ownApplicationFocused, .noSelection)
         }
         let application = AXUIElementCreateApplication(processID)
-        try configureAXMessaging(application)
+        try configureAXMessaging(application, failure: .applicationUnreachable)
         guard let element = try AccessibilityFocusAcquisition.acquire(
             readApplicationRole: {
-                _ = try self.stringAttribute(application, kAXRoleAttribute, failure: .noSelection)
+                _ = try self.stringAttribute(application, kAXRoleAttribute, failure: .applicationUnreachable)
             },
             requestManualAccessibility: { try self.requestManualAccessibility(on: application) },
             hasTimeForRetry: { self.hasCaptureTimeForFocusRetry() },
             readFocusedElement: {
-                try self.elementAttribute(application, kAXFocusedUIElementAttribute, failure: .noSelection)
+                try self.elementAttribute(application, kAXFocusedUIElementAttribute, failure: .applicationUnreachable)
             },
             validate: { element in
                 guard try !self.isSecure(element, in: application) else {
@@ -275,15 +275,15 @@ public final class MacSelectionAccess: SelectionAccess {
             hostBinding = nil
             selection = NativeSelection(text: text, range: range)
         } else {
-            let rangeProbe = rangeAvailability(element, allowingEmpty: false)
+            let rangeProbe = try rangeAvailability(element, allowingEmpty: false)
             if let reason = rangeProbe.reason {
                 throw failure(reason, .noSelection)
             }
             let textProbe: SelectionEvidence<String>
             if let range = rangeProbe.value {
-                textProbe = textAvailability(element, range: range, allowingEmpty: false, canReadValue: canReadValue)
+                textProbe = try textAvailability(element, range: range, allowingEmpty: false, canReadValue: canReadValue)
             } else {
-                textProbe = unrangedTextAvailability(element)
+                textProbe = try unrangedTextAvailability(element)
             }
             if let reason = textProbe.reason {
                 throw failure(reason, .noSelection)
@@ -991,7 +991,7 @@ public final class MacSelectionAccess: SelectionAccess {
     private func rangeAvailability(
         _ element: AXUIElement,
         allowingEmpty: Bool
-    ) -> SelectionEvidence<TextRange> {
+    ) throws -> SelectionEvidence<TextRange> {
         do {
             guard let resolved = try rangeAttribute(
                 element,
@@ -1004,6 +1004,8 @@ public final class MacSelectionAccess: SelectionAccess {
                 return SelectionEvidence(availability: .present, value: nil, reason: reason)
             }
             return SelectionEvidence(availability: .present, value: resolved, reason: nil)
+        } catch ImrseError.permissionRequired {
+            throw ImrseError.permissionRequired
         } catch {
             return SelectionEvidence(availability: .malformed, value: nil, reason: nil)
         }
@@ -1014,7 +1016,7 @@ public final class MacSelectionAccess: SelectionAccess {
         range: TextRange,
         allowingEmpty: Bool,
         canReadValue: Bool
-    ) -> SelectionEvidence<String> {
+    ) throws -> SelectionEvidence<String> {
         do {
             let selected = try selectedText(
                 element,
@@ -1034,17 +1036,21 @@ public final class MacSelectionAccess: SelectionAccess {
                 return SelectionEvidence(availability: .present, value: nil, reason: reason)
             }
             return SelectionEvidence(availability: .present, value: selected, reason: nil)
+        } catch ImrseError.permissionRequired {
+            throw ImrseError.permissionRequired
         } catch {
             return SelectionEvidence(availability: .malformed, value: nil, reason: nil)
         }
     }
 
-    private func unrangedTextAvailability(_ element: AXUIElement) -> SelectionEvidence<String> {
+    private func unrangedTextAvailability(_ element: AXUIElement) throws -> SelectionEvidence<String> {
         do {
             guard let selected = try stringAttribute(element, kAXSelectedTextAttribute, failure: .noSelection) else {
                 return SelectionEvidence(availability: .absent, value: nil, reason: nil)
             }
             return SelectionEvidence(availability: .present, value: selected, reason: nil)
+        } catch ImrseError.permissionRequired {
+            throw ImrseError.permissionRequired
         } catch {
             return SelectionEvidence(availability: .malformed, value: nil, reason: nil)
         }
@@ -1142,14 +1148,17 @@ public final class MacSelectionAccess: SelectionAccess {
         try configureAXMessaging(window)
         var attributes: CFArray?
         let attributesStatus = AXUIElementCopyAttributeNames(window, &attributes)
-        guard attributesStatus == .success,
-              let attributes = attributes as? [String]
+        guard attributesStatus == .success else {
+            throw failure(.axReadFailure, AccessibilityStatusClassification.failure(for: attributesStatus, default: error))
+        }
+        guard let attributes = attributes as? [String]
         else {
             throw failure(.axReadFailure, error)
         }
         guard attributes.contains(kAXDocumentAttribute as String) else { return .unavailable }
         var value: CFTypeRef?
         let status = AXUIElementCopyAttributeValue(window, kAXDocumentAttribute as CFString, &value)
+        if status == .apiDisabled { throw failure(.axReadFailure, .permissionRequired) }
         switch SelectionTargetContextValidation.documentRead(status: status, value: value) {
         case let .context(document):
             return document
@@ -1211,17 +1220,17 @@ public final class MacSelectionAccess: SelectionAccess {
         ) else {
             throw failure(lastFailureReason ?? .selectedRangeUnavailable, .staleSelection)
         }
-        let rangeProbe = rangeAvailability(target.anchor, allowingEmpty: allowingEmpty)
+        let rangeProbe = try rangeAvailability(target.anchor, allowingEmpty: allowingEmpty)
         let textProbe: SelectionEvidence<String>
         if let advertisedRange = rangeProbe.value {
-            textProbe = textAvailability(
+            textProbe = try textAvailability(
                 target.anchor,
                 range: advertisedRange,
                 allowingEmpty: allowingEmpty,
                 canReadValue: false
             )
         } else if rangeProbe.availability == .absent {
-            textProbe = unrangedTextAvailability(target.anchor)
+            textProbe = try unrangedTextAvailability(target.anchor)
         } else {
             textProbe = SelectionEvidence(availability: .absent, value: nil, reason: nil)
         }
@@ -2164,7 +2173,10 @@ public final class MacSelectionAccess: SelectionAccess {
             || status == .noValue || status == .notImplemented {
             return nil
         }
-        guard status == .success, let value else { throw self.failure(.axReadFailure, failure) }
+        guard status == .success else {
+            throw self.failure(.axReadFailure, AccessibilityStatusClassification.failure(for: status, default: failure))
+        }
+        guard let value else { throw self.failure(.axReadFailure, failure) }
         return value
     }
 
@@ -2176,8 +2188,10 @@ public final class MacSelectionAccess: SelectionAccess {
         try configureAXMessaging(element)
         var value: CFTypeRef?
         let status = AXUIElementCopyAttributeValue(element, kAXChildrenAttribute as CFString, &value)
-        guard status == .success,
-              let value,
+        guard status == .success else {
+            throw self.failure(.axReadFailure, AccessibilityStatusClassification.failure(for: status, default: failure))
+        }
+        guard let value,
               CFGetTypeID(value) == CFArrayGetTypeID(),
               CFArrayGetCount(unsafeDowncast(value, to: CFArray.self)) <= maximumCount,
               let children = value as? [AXUIElement]
@@ -2192,19 +2206,24 @@ public final class MacSelectionAccess: SelectionAccess {
         var settable = DarwinBoolean(false)
         let status = AXUIElementIsAttributeSettable(element, attribute as CFString, &settable)
         if status == .attributeUnsupported || status == .noValue || status == .notImplemented { return false }
-        guard status == .success else { throw failure(.axReadFailure, .replacementFailed) }
+        guard status == .success else {
+            throw failure(.axReadFailure, AccessibilityStatusClassification.failure(for: status, default: .replacementFailed))
+        }
         return settable.boolValue
     }
 
     private func setAttribute(_ element: AXUIElement, _ attribute: String, value: CFTypeRef) throws -> AXError {
         try configureAXMessaging(element)
-        return AXUIElementSetAttributeValue(element, attribute as CFString, value)
+        let status = AXUIElementSetAttributeValue(element, attribute as CFString, value)
+        if status == .apiDisabled { throw failure(.axReadFailure, .permissionRequired) }
+        return status
     }
 
-    private func configureAXMessaging(_ element: AXUIElement) throws {
+    private func configureAXMessaging(_ element: AXUIElement, failure error: ImrseError = .targetLost) throws {
         if let captureDeadline, clock.now >= captureDeadline { throw failure(.axMessagingFailure, .targetLost) }
-        guard AXUIElementSetMessagingTimeout(element, Self.axMessagingTimeout) == .success else {
-            throw failure(.axMessagingFailure, .targetLost)
+        let status = AXUIElementSetMessagingTimeout(element, Self.axMessagingTimeout)
+        guard status == .success else {
+            throw failure(.axMessagingFailure, AccessibilityStatusClassification.failure(for: status, default: error))
         }
     }
 
@@ -2304,7 +2323,10 @@ public final class MacSelectionAccess: SelectionAccess {
             || status == .notImplemented {
             return nil
         }
-        guard status == .success, let value else { throw self.failure(.axReadFailure, failure) }
+        guard status == .success else {
+            throw self.failure(.axReadFailure, AccessibilityStatusClassification.failure(for: status, default: failure))
+        }
+        guard let value else { throw self.failure(.axReadFailure, failure) }
         guard CFGetTypeID(value) == CFAttributedStringGetTypeID(),
               let attributedValue = value as? NSAttributedString
         else {
@@ -2334,7 +2356,10 @@ public final class MacSelectionAccess: SelectionAccess {
             || status == .notImplemented {
             return nil
         }
-        guard status == .success, let value else { throw self.failure(.axReadFailure, failure) }
+        guard status == .success else {
+            throw self.failure(.axReadFailure, AccessibilityStatusClassification.failure(for: status, default: failure))
+        }
+        guard let value else { throw self.failure(.axReadFailure, failure) }
         guard let result = value as? String else { throw self.failure(.axValueTypeMismatch, failure) }
         return result
     }
@@ -2367,7 +2392,10 @@ public final class MacSelectionAccess: SelectionAccess {
         var value: CFTypeRef?
         let status = AXUIElementCopyAttributeValue(element, attribute as CFString, &value)
         if status == .attributeUnsupported || status == .noValue { return nil }
-        guard status == .success, let value else { throw self.failure(.axReadFailure, failure) }
+        guard status == .success else {
+            throw self.failure(.axReadFailure, AccessibilityStatusClassification.failure(for: status, default: failure))
+        }
+        guard let value else { throw self.failure(.axReadFailure, failure) }
         guard CFGetTypeID(value) == AXUIElementGetTypeID() else { throw self.failure(.axValueTypeMismatch, failure) }
         return unsafeDowncast(value, to: AXUIElement.self)
     }
@@ -2381,7 +2409,10 @@ public final class MacSelectionAccess: SelectionAccess {
         var value: CFTypeRef?
         let status = AXUIElementCopyAttributeValue(element, attribute as CFString, &value)
         if status == .attributeUnsupported || status == .noValue { return nil }
-        guard status == .success, let value else { throw self.failure(.axReadFailure, failure) }
+        guard status == .success else {
+            throw self.failure(.axReadFailure, AccessibilityStatusClassification.failure(for: status, default: failure))
+        }
+        guard let value else { throw self.failure(.axReadFailure, failure) }
         guard let result = value as? String else { throw self.failure(.axValueTypeMismatch, failure) }
         return result
     }
@@ -2395,7 +2426,10 @@ public final class MacSelectionAccess: SelectionAccess {
         var value: CFTypeRef?
         let status = AXUIElementCopyAttributeValue(element, attribute as CFString, &value)
         if status == .attributeUnsupported || status == .noValue { return nil }
-        guard status == .success, let value else { throw self.failure(.axReadFailure, failure) }
+        guard status == .success else {
+            throw self.failure(.axReadFailure, AccessibilityStatusClassification.failure(for: status, default: failure))
+        }
+        guard let value else { throw self.failure(.axReadFailure, failure) }
         guard CFGetTypeID(value) == AXValueGetTypeID() else { throw self.failure(.axValueTypeMismatch, failure) }
         return unsafeDowncast(value, to: AXValue.self)
     }
@@ -2431,7 +2465,10 @@ public final class MacSelectionAccess: SelectionAccess {
         var value: CFTypeRef?
         let status = AXUIElementCopyAttributeValue(element, attribute as CFString, &value)
         if status == .attributeUnsupported || status == .noValue { return nil }
-        guard status == .success, let value else { throw self.failure(.axReadFailure, failure) }
+        guard status == .success else {
+            throw self.failure(.axReadFailure, AccessibilityStatusClassification.failure(for: status, default: failure))
+        }
+        guard let value else { throw self.failure(.axReadFailure, failure) }
         guard CFGetTypeID(value) == AXValueGetTypeID() else { throw self.failure(.axValueTypeMismatch, failure) }
         let axValue = unsafeDowncast(value, to: AXValue.self)
         var range = CFRange()
@@ -2448,7 +2485,10 @@ public final class MacSelectionAccess: SelectionAccess {
         var value: CFTypeRef?
         let status = AXUIElementCopyAttributeValue(element, attribute as CFString, &value)
         if status == .attributeUnsupported || status == .noValue { return nil }
-        guard status == .success, let value else { throw self.failure(.axReadFailure, failure) }
+        guard status == .success else {
+            throw self.failure(.axReadFailure, AccessibilityStatusClassification.failure(for: status, default: failure))
+        }
+        guard let value else { throw self.failure(.axReadFailure, failure) }
         guard CFGetTypeID(value) == CFBooleanGetTypeID(),
               let result = value as? Bool
         else {

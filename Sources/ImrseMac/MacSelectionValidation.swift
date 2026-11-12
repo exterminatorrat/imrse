@@ -4,6 +4,12 @@ import CoreFoundation
 import Foundation
 import ImrseCore
 
+enum AccessibilityStatusClassification {
+    static func failure(for status: AXError, default fallback: ImrseError) -> ImrseError {
+        status == .apiDisabled ? .permissionRequired : fallback
+    }
+}
+
 enum ObservedCaptureNotification {
     static func failureReason(for notification: CFString) -> SelectionFailureReason {
         if CFEqual(notification, kAXFocusedUIElementChangedNotification as CFString) {
@@ -184,8 +190,18 @@ enum AccessibilityFocusAcquisition {
         validate: (Element) throws -> Void,
         waitBeforeRetry: () -> Void
     ) throws -> Element? {
-        _ = try? readApplicationRole()
-        _ = try? requestManualAccessibility()
+        do {
+            try readApplicationRole()
+        } catch ImrseError.permissionRequired {
+            throw ImrseError.permissionRequired
+        } catch ImrseError.applicationUnreachable {
+            throw ImrseError.applicationUnreachable
+        } catch {}
+        do {
+            try requestManualAccessibility()
+        } catch ImrseError.permissionRequired {
+            throw ImrseError.permissionRequired
+        } catch {}
         while true {
             guard let element = try readFocusedElement() else {
                 guard hasTimeForRetry() else { return nil }
