@@ -8,6 +8,14 @@ public enum ProviderKind: String, Codable, CaseIterable, Sendable {
     case anthropic, openRouterAccount, huggingFaceAccount, githubCopilot
 }
 public enum ReplacementStrategy: String, Codable, Sendable { case selectedText, valueRange, clipboard }
+public enum DocumentContextFailure: String, Equatable, Sendable {
+    case attributeUnsupported
+    case unexpectedNoValuePayload
+    case missingValue
+    case unexpectedValueType
+    case emptyValue
+    case valueTooLong
+}
 public enum SelectionFailureReason: String, Equatable, Sendable {
     case frontmostApplicationUnavailable
     case ownApplicationFocused
@@ -390,6 +398,7 @@ public struct DiagnosticMetadata: Equatable, Sendable {
     public var role: String?
     public var selectionLength: Int?
     public var selectionFailureReason: SelectionFailureReason?
+    public var documentContextFailure: DocumentContextFailure?
     public var targetValid: Bool?
     public var strategy: ReplacementStrategy?
     public var providerName: String?
