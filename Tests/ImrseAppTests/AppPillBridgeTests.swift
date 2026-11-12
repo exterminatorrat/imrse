@@ -105,6 +105,7 @@ final class AppPillBridgeTests: XCTestCase {
 
         XCTAssertEqual(events, ["present"])
         XCTAssertEqual(selection.events, ["capture"])
+        XCTAssertEqual(selection.captureIntents, [.replaceSelection])
         XCTAssertEqual(bridge.pill.phase, .input)
         XCTAssertTrue(provider.requests.isEmpty)
     }
@@ -179,6 +180,66 @@ final class AppPillBridgeTests: XCTestCase {
         XCTAssertEqual(pill.phase, .success(requestID))
         XCTAssertTrue(pill.canUndo)
         XCTAssertEqual(presentationCount, 2)
+    }
+
+    func testFocusHandoffPrecedesValidationAndRestoresSuccessWithUndo() async {
+        let selection = RecordingSelectionAccess()
+        let (bridge, pill) = makeBridge(selection: selection, provider: RecordingTextProvider(output: "updated"))
+        var handoffCount = 0
+        var presentationCount = 0
+        bridge.onPresent = { _ in presentationCount += 1 }
+        bridge.onHideForFocusHandoff = { handoffCount += 1 }
+        selection.onValidate = {
+            XCTAssertEqual(handoffCount, 1)
+            guard case .applying = pill.phase else { return XCTFail("Expected applying before validation") }
+        }
+
+        bridge.invoke()
+        pill.submit()
+        await waitUntil { bridge.engine.state == .succeeded(unchanged: false) }
+
+        XCTAssertEqual(selection.replaceCount, 1)
+        XCTAssertEqual(handoffCount, 1)
+        XCTAssertEqual(presentationCount, 2)
+        XCTAssertTrue(pill.canUndo)
+    }
+
+    func testFocusHandoffDoesNotBypassChangedTargetAndRestoresFailure() async {
+        let selection = RecordingSelectionAccess()
+        let (bridge, pill) = makeBridge(selection: selection, provider: RecordingTextProvider(output: "updated"))
+        var handoffCount = 0
+        var presentationCount = 0
+        bridge.onPresent = { _ in presentationCount += 1 }
+        bridge.onHideForFocusHandoff = { handoffCount += 1 }
+        selection.onValidate = {
+            XCTAssertEqual(handoffCount, 1)
+            throw ImrseError.staleSelection
+        }
+
+        bridge.invoke()
+        pill.submit()
+        await waitUntil { bridge.engine.state == .failed(.staleSelection) }
+
+        XCTAssertEqual(selection.replaceCount, 0)
+        XCTAssertEqual(handoffCount, 1)
+        XCTAssertEqual(presentationCount, 2)
+        guard case .failure(_, ImrseError.staleSelection.message) = pill.phase else {
+            return XCTFail("Expected the original validation failure")
+        }
+    }
+
+    func testCancelDuringFocusHandoffPreventsValidationAndReplacement() async {
+        let selection = RecordingSelectionAccess()
+        let (bridge, pill) = makeBridge(selection: selection, provider: RecordingTextProvider(output: "updated"))
+        bridge.onHideForFocusHandoff = { pill.dismiss() }
+        selection.onValidate = { XCTFail("Cancelled generation must not validate or apply") }
+
+        bridge.invoke()
+        pill.submit()
+        await waitUntil { bridge.engine.state == .failed(.cancelled) }
+
+        XCTAssertEqual(selection.replaceCount, 0)
+        XCTAssertEqual(pill.phase, .hidden)
     }
 
     func testClipboardFocusHandoffRestoresReplacementFailurePresentation() async {
@@ -552,6 +613,78 @@ final class AppPillBridgeTests: XCTestCase {
         XCTAssertEqual(selection.replaceCount, 0)
     }
 
+    func testInsertionUsesTheExistingInstructionPillAndDirectApply() async {
+        let selection = RecordingSelectionAccess()
+        let provider = RecordingTextProvider(output: "inserted text")
+        let (bridge, _) = makeBridge(
+            selection: selection,
+            provider: provider,
+            defaultInstruction: "Improve selected text"
+        )
+
+        bridge.invoke(intent: .insertAtCaret)
+
+        XCTAssertEqual(bridge.engine.state, .ready)
+        XCTAssertEqual(bridge.pill.phase, .input)
+        XCTAssertEqual(selection.captureIntents, [.insertAtCaret])
+        XCTAssertTrue(provider.requests.isEmpty)
+
+        bridge.pill.instruction = "Add a concise summary"
+        bridge.pill.submit()
+        await waitUntil { bridge.engine.state == .succeeded(unchanged: false) }
+
+        XCTAssertEqual(provider.requests.first?.text, "")
+        XCTAssertEqual(provider.requests.first?.instruction, "Add a concise summary")
+        XCTAssertEqual(selection.replaceCount, 1)
+        XCTAssertEqual(selection.replacedTargets.first?.intent, .insertAtCaret)
+    }
+
+    func testInsertionRefusalIsPropagatedWithoutCallingProvider() {
+        let selection = RecordingSelectionAccess()
+        selection.insertionSnapshot = SelectionSnapshot(
+            applicationID: "test.application",
+            processID: 123,
+            role: "text field",
+            text: "selected text",
+            range: TextRange(location: 0, length: "selected text".utf16.count),
+            intent: .insertAtCaret
+        )
+        let provider = RecordingTextProvider(output: "updated")
+        let (bridge, _) = makeBridge(selection: selection, provider: provider)
+
+        bridge.invoke(intent: .insertAtCaret)
+
+        XCTAssertEqual(bridge.engine.state, .failed(.insertionUnavailable))
+        XCTAssertEqual(selection.captureIntents, [.insertAtCaret])
+        XCTAssertTrue(provider.requests.isEmpty)
+        guard case .failure(_, let message) = bridge.pill.phase else {
+            return XCTFail("Expected the insertion refusal to reach the existing pill")
+        }
+        XCTAssertEqual(message, ImrseError.insertionUnavailable.message)
+    }
+
+    func testBlankInsertionInstructionDoesNotUseReplacementDefaultOrCallProvider() async {
+        let selection = RecordingSelectionAccess()
+        let provider = RecordingTextProvider(output: "inserted text")
+        let (bridge, _) = makeBridge(
+            selection: selection,
+            provider: provider,
+            defaultInstruction: "Improve selected text"
+        )
+
+        bridge.invoke(intent: .insertAtCaret)
+        bridge.pill.instruction = "  \n"
+        bridge.pill.submit()
+        await waitUntil { bridge.engine.state == .failed(.missingInstruction) }
+
+        XCTAssertEqual(selection.captureIntents, [.insertAtCaret])
+        XCTAssertTrue(provider.requests.isEmpty)
+        guard case .failure(_, let message) = bridge.pill.phase else {
+            return XCTFail("Expected the blank insertion instruction to remain a pill failure")
+        }
+        XCTAssertEqual(message, ImrseError.missingInstruction.message)
+    }
+
     func testFocusedPresetFillsDraftAndKeepsPresetRoutingAfterEdits() async {
         let selection = RecordingSelectionAccess()
         let provider = RecordingTextProvider(output: "original text")
@@ -792,9 +925,13 @@ private final class RecordingSelectionAccess: SelectionAccess {
     var holdReplacement: Bool
     var holdUndo: Bool
     var captureCount = 0
+    private(set) var captureIntents: [SelectionEditIntent] = []
     var replaceCount = 0
+    private(set) var replacedTargets: [SelectionSnapshot] = []
     var undoCount = 0
     var events: [String] = []
+    var onValidate: (() throws -> Void)?
+    var insertionSnapshot: SelectionSnapshot?
     private var replacementContinuation: CheckedContinuation<Void, Never>?
     private var undoContinuation: CheckedContinuation<Void, Never>?
 
@@ -812,17 +949,29 @@ private final class RecordingSelectionAccess: SelectionAccess {
         self.holdUndo = holdUndo
     }
 
-    func capture() throws -> SelectionSnapshot {
+    func capture() throws -> SelectionSnapshot { try capture(intent: .replaceSelection) }
+
+    func capture(intent: SelectionEditIntent) throws -> SelectionSnapshot {
         captureCount += 1
         events.append("capture")
+        captureIntents.append(intent)
         if let captureError { throw captureError }
-        return snapshot
+        guard intent == .insertAtCaret else { return snapshot }
+        return insertionSnapshot ?? SelectionSnapshot(
+            applicationID: "test.application",
+            processID: 123,
+            role: "text field",
+            text: "",
+            range: TextRange(location: 0, length: 0),
+            intent: .insertAtCaret
+        )
     }
 
-    func validate(_ target: SelectionSnapshot) throws {}
+    func validate(_ target: SelectionSnapshot) throws { try onValidate?() }
 
     func replace(_ target: SelectionSnapshot, with text: String) async throws -> ReplacementReceipt {
         replaceCount += 1
+        replacedTargets.append(target)
         if holdReplacement {
             await withCheckedContinuation { replacementContinuation = $0 }
         }

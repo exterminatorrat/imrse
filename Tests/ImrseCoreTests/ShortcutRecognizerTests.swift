@@ -108,6 +108,63 @@ final class ShortcutRecognizerTests: XCTestCase {
         XCTAssertNil(shiftOnly.consume(ShortcutEvent(kind: .keyDown, keyCode: 12, timestamp: 4, shift: true)))
     }
 
+    func testDefaultInsertionShortcutIsDistinctFromReplacementAndUsesExactModifiers() {
+        let insertion = InvocationConfiguration.defaultInsertAtCaretShortcut
+        XCTAssertEqual(insertion, ShortcutBinding(keyCode: 34, command: true, control: true, shift: true))
+
+        let replacement = ShortcutBinding(keyCode: 0, command: true)
+        var insertionRecognizer = ShortcutRecognizer(
+            configuration: InvocationConfiguration(doubleControlEnabled: false, shortcut: replacement),
+            presets: []
+        )
+
+        XCTAssertEqual(
+            insertionRecognizer.consume(ShortcutEvent(kind: .keyDown, keyCode: 34, timestamp: 1, command: true, control: true, shift: true)),
+            .insertAtCaret
+        )
+
+        var commandOption = ShortcutRecognizer(configuration: .init(doubleControlEnabled: false), presets: [])
+        XCTAssertNil(commandOption.consume(ShortcutEvent(kind: .keyDown, keyCode: 34, timestamp: 1, command: true, option: true)))
+
+        var controlOption = ShortcutRecognizer(configuration: .init(doubleControlEnabled: false), presets: [])
+        XCTAssertNil(controlOption.consume(ShortcutEvent(kind: .keyDown, keyCode: 34, timestamp: 1, option: true, control: true)))
+
+        var replacementRecognizer = ShortcutRecognizer(
+            configuration: InvocationConfiguration(doubleControlEnabled: false, shortcut: replacement),
+            presets: []
+        )
+        XCTAssertEqual(
+            replacementRecognizer.consume(ShortcutEvent(kind: .keyDown, keyCode: 0, timestamp: 1, command: true)),
+            .invoke
+        )
+    }
+
+    func testConfiguredReplacementAndPresetBindingsTakePriorityOverInsertionChord() {
+        let insertion = InvocationConfiguration.defaultInsertAtCaretShortcut
+        let event = ShortcutEvent(
+            kind: .keyDown,
+            keyCode: insertion.keyCode,
+            timestamp: 1,
+            command: insertion.command,
+            option: insertion.option,
+            control: insertion.control,
+            shift: insertion.shift
+        )
+
+        var replacementRecognizer = ShortcutRecognizer(
+            configuration: InvocationConfiguration(doubleControlEnabled: false, shortcut: insertion),
+            presets: []
+        )
+        XCTAssertEqual(replacementRecognizer.consume(event), .invoke)
+
+        let preset = Preset(id: "insert-collision", name: "Collision", instruction: "Use a different tone", shortcut: insertion)
+        var presetRecognizer = ShortcutRecognizer(
+            configuration: InvocationConfiguration(doubleControlEnabled: false),
+            presets: [preset]
+        )
+        XCTAssertEqual(presetRecognizer.consume(event), .preset(id: preset.id))
+    }
+
     func testShortcutValidationRequiresModifiersAndRejectsOnlyExactConflicts() throws {
         let noModifiers = ShortcutBinding(keyCode: 12)
         XCTAssertThrowsError(try ShortcutValidator.validate(noModifiers))

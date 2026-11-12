@@ -37,6 +37,7 @@ public final class ShortcutMonitor {
     private var presets: [Preset] = []
     private var recognizer: ShortcutRecognizer?
     private var onInvoke: (@MainActor (String?) -> Void)?
+    private var onInsertAtCaret: (@MainActor () -> Void)?
 
     public static var eventMonitoringPermissionGranted: Bool {
         CGPreflightListenEventAccess()
@@ -52,7 +53,8 @@ public final class ShortcutMonitor {
     public func start(
         configuration: InvocationConfiguration,
         presets: [Preset],
-        onInvoke: @escaping @MainActor (String?) -> Void
+        onInvoke: @escaping @MainActor (String?) -> Void,
+        onInsertAtCaret: @escaping @MainActor () -> Void
     ) throws {
         guard Self.eventMonitoringPermissionGranted else { throw ShortcutMonitorError.inputMonitoringPermissionRequired }
         try Self.validateBindings(configuration: configuration, presets: presets)
@@ -78,6 +80,7 @@ public final class ShortcutMonitor {
         self.presets = presets
         recognizer = ShortcutRecognizer(configuration: configuration, presets: presets)
         self.onInvoke = onInvoke
+        self.onInsertAtCaret = onInsertAtCaret
         CFRunLoopAddSource(CFRunLoopGetMain(), runLoopSource, .commonModes)
         CGEvent.tapEnable(tap: eventTap, enable: true)
         startSecureInputGuard()
@@ -95,6 +98,7 @@ public final class ShortcutMonitor {
         presets = []
         recognizer = nil
         onInvoke = nil
+        onInsertAtCaret = nil
     }
 
     private static let eventMask: CGEventMask =
@@ -141,7 +145,7 @@ public final class ShortcutMonitor {
         return Unmanaged.passUnretained(event)
     }
 
-    private static func validateBindings(configuration: InvocationConfiguration, presets: [Preset]) throws {
+    static func validateBindings(configuration: InvocationConfiguration, presets: [Preset]) throws {
         var assigned: [ShortcutBinding] = []
         if let shortcut = configuration.shortcut {
             try ShortcutValidator.validate(shortcut, against: assigned)
@@ -165,6 +169,8 @@ public final class ShortcutMonitor {
         switch action {
         case .invoke:
             onInvoke?(nil)
+        case .insertAtCaret:
+            onInsertAtCaret?()
         case .preset(let id):
             onInvoke?(id)
         case nil:
