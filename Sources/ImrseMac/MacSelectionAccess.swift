@@ -1475,14 +1475,11 @@ public final class MacSelectionAccess: SelectionAccess {
                 var failureReason = SelectionFailureReason.replacementReadbackFailed
                 do {
                     let after = try currentSelection(target, allowingEmpty: true)
-                    let afterValue: String?
-                    if self.clipboardFallbackEnabled, selectedTextFallbackBaseline != nil {
-                        afterValue = try? self.wholeValue(target.element, failure: .replacementFailed)
-                    } else if !self.clipboardFallbackEnabled, allowsWholeValueWrite {
-                        afterValue = try self.wholeValue(target.element, failure: .replacementFailed)
-                    } else {
-                        afterValue = nil
-                    }
+                    let afterValue = try SelectedTextReplacementValidation.readbackValue(
+                        expectedValue: expectedValue,
+                        fallbackBaseline: selectedTextFallbackBaseline,
+                        read: { try self.wholeValue(target.element, failure: .replacementFailed) }
+                    )
                     if SelectedTextReplacementValidation.confirms(
                         afterValue: afterValue,
                         expectedValue: expectedValue,

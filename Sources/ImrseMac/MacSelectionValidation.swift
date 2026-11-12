@@ -362,6 +362,16 @@ enum ClipboardFallbackNoOpValidation {
 }
 
 enum SelectedTextReplacementValidation {
+    static func readbackValue(
+        expectedValue: String?,
+        fallbackBaseline: String?,
+        read: () throws -> String?
+    ) throws -> String? {
+        if expectedValue != nil { return try read() }
+        guard fallbackBaseline != nil else { return nil }
+        return try? read()
+    }
+
     static func permitsRangeOnlyConfirmation(expectedValue: String?) -> Bool {
         expectedValue == nil
     }
