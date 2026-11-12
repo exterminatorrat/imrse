@@ -23,6 +23,10 @@ public enum DiagnosticReport {
         if let selectionFailureReason = metadata.selectionFailureReason {
             fields["selectionFailureReason"] = selectionFailureReason.rawValue
         }
+        if metadata.selectionFailureReason == .documentContextUnavailable,
+           let documentContextFailure = metadata.documentContextFailure {
+            fields["documentContextFailure"] = documentContextFailure.rawValue
+        }
         if let targetValid = metadata.targetValid { fields["targetValid"] = targetValid }
         if let strategy = metadata.strategy { fields["strategy"] = strategy.rawValue }
         if let providerName = metadata.providerName {

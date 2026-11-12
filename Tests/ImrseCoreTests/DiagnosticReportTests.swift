@@ -3,6 +3,47 @@ import XCTest
 @testable import ImrseCore
 
 final class DiagnosticReportTests: XCTestCase {
+    func testDocumentContextFailureRendersOnlyContentFreeClassification() throws {
+        for failure in [
+            DocumentContextFailure.attributeUnsupported,
+            .unexpectedNoValuePayload,
+            .missingValue,
+            .unexpectedValueType,
+            .emptyValue,
+            .valueTooLong
+        ] {
+            var metadata = DiagnosticMetadata()
+            metadata.selectionFailureReason = .documentContextUnavailable
+            metadata.documentContextFailure = failure
+            metadata.error = .noSelection
+
+            let report = DiagnosticReport.render(metadata)
+            let fields = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(report.utf8)) as? [String: Any])
+
+            XCTAssertEqual(fields["documentContextFailure"] as? String, failure.rawValue)
+            XCTAssertEqual(fields["selectionFailureReason"] as? String, "documentContextUnavailable")
+            XCTAssertEqual(Set(fields.keys), Set([
+                "accessibilityGranted", "eventMonitoringActive", "generation", "replacement",
+                "selectionFailureReason", "documentContextFailure", "error"
+            ]))
+        }
+    }
+
+    func testDocumentContextFailureIsOmittedForUnrelatedOrAbsentFailure() throws {
+        let reasons: [SelectionFailureReason?] = [nil, .axReadFailure, .documentContextChanged]
+        for reason in reasons {
+            var metadata = DiagnosticMetadata()
+            metadata.selectionFailureReason = reason
+            metadata.documentContextFailure = .emptyValue
+
+            let fields = try XCTUnwrap(JSONSerialization.jsonObject(
+                with: Data(DiagnosticReport.render(metadata).utf8)
+            ) as? [String: Any])
+
+            XCTAssertNil(fields["documentContextFailure"])
+        }
+    }
+
     func testReplacementFailureStagesRenderAsContentFreeReasons() throws {
         for reason in [
             SelectionFailureReason.replacementWriteRejected,
