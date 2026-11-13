@@ -391,6 +391,8 @@ final class AppModel: ObservableObject {
         }
         let selectionAccess = MacSelectionAccess(
             clipboardFallbackEnabled: configuration.clipboardFallbackEnabled,
+            documentBindingDiagnosticsEnabled: !isPreviewMode
+                && ProcessInfo.processInfo.arguments.contains("--document-binding-diagnostics"),
             prepareForClipboardPaste: { [weak pillModel] in pillModel?.prepareForClipboardFocusHandoff() }
         )
         let runtimeAccountClient: OpenAIAccountClient?
@@ -1557,6 +1559,7 @@ final class AppModel: ObservableObject {
             if metadata.selectionFailureReason == .documentContextUnavailable,
                selectionAccess.lastFailureReason == .documentContextUnavailable {
                 metadata.documentContextFailure = selectionAccess.lastDocumentContextFailure
+                metadata.documentBindingDiagnostic = selectionAccess.lastDocumentBindingDiagnostic
             }
         }
         return DiagnosticReport.render(metadata)

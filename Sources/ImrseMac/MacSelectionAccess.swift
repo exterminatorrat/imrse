@@ -182,6 +182,8 @@ public final class MacSelectionAccess: SelectionAccess {
     public private(set) var capturedScreen: NSScreen?
     public private(set) var lastFailureReason: SelectionFailureReason?
     public private(set) var lastDocumentContextFailure: DocumentContextFailure?
+    public private(set) var lastDocumentBindingDiagnostic: DocumentBindingDiagnostic?
+    private let documentBindingDiagnosticsEnabled: Bool
     private let prepareForClipboardPaste: ClipboardPastePreparation?
     private let clock = ContinuousClock()
     private var capturedTarget: CapturedTarget?
@@ -189,6 +191,7 @@ public final class MacSelectionAccess: SelectionAccess {
     private var workspaceObserver: NSObjectProtocol?
     private var captureDeadline: ContinuousClock.Instant?
     private var undoTarget: UndoTarget?
+    private var previousDocumentBindingSnapshot: DocumentBindingProbe.Snapshot<AXUIElement>?
     private let clipboardRecovery = ClipboardPasteRecovery<ClipboardPasteboardTransaction, ClipboardDestination>()
 
     public static var accessibilityPermissionGranted: Bool {
@@ -201,9 +204,11 @@ public final class MacSelectionAccess: SelectionAccess {
 
     public init(
         clipboardFallbackEnabled: Bool = false,
+        documentBindingDiagnosticsEnabled: Bool = false,
         prepareForClipboardPaste: ClipboardPastePreparation? = nil
     ) {
         self.clipboardFallbackEnabled = clipboardFallbackEnabled
+        self.documentBindingDiagnosticsEnabled = documentBindingDiagnosticsEnabled
         self.prepareForClipboardPaste = prepareForClipboardPaste
     }
 
@@ -215,8 +220,15 @@ public final class MacSelectionAccess: SelectionAccess {
         clearCapture()
         lastFailureReason = nil
         lastDocumentContextFailure = nil
+        lastDocumentBindingDiagnostic = nil
         captureDeadline = clock.now.advanced(by: Self.captureBudget)
-        defer { captureDeadline = nil }
+        defer {
+            captureDeadline = nil
+            previousDocumentBindingSnapshot = DocumentBindingProbe.snapshotAfterCapture(
+                previousDocumentBindingSnapshot,
+                diagnostic: lastDocumentBindingDiagnostic
+            )
+        }
         guard Self.accessibilityPermissionGranted else { throw ImrseError.permissionRequired }
         guard !IsSecureEventInputEnabled() else { throw failure(.protectedTarget, .secureInput) }
         guard let runningApplication = NSWorkspace.shared.frontmostApplication else {
@@ -333,9 +345,14 @@ public final class MacSelectionAccess: SelectionAccess {
                 selection = binding.selection
             }
         }
-        let windowContext = try captureWindowContext(for: element, processID: processID, intent: intent)
         let targetRole = hostBinding?.role ?? role
         let targetElement = hostBinding?.element ?? element
+        let windowContext = try captureWindowContext(
+            for: element,
+            editor: targetElement,
+            processID: processID,
+            intent: intent
+        )
 
         let applicationID = runningApplication.bundleIdentifier ?? "pid:\(processID)"
         let snapshot = SelectionSnapshot(
@@ -958,6 +975,7 @@ public final class MacSelectionAccess: SelectionAccess {
 
     private func captureWindowContext(
         for element: AXUIElement,
+        editor: AXUIElement,
         processID: Int32,
         intent: SelectionEditIntent
     ) throws -> (window: AXUIElement, document: SelectionTargetContextValidation.Document) {
@@ -973,8 +991,70 @@ public final class MacSelectionAccess: SelectionAccess {
         else {
             throw failure(failureReason, error)
         }
-        let document = try documentContext(window, failure: error)
+        let document: SelectionTargetContextValidation.Document
+        do {
+            document = try documentContext(window, failure: error)
+        } catch {
+            observeDocumentBinding(editor: editor, window: window, processID: processID)
+            throw error
+        }
         return (window, document)
+    }
+
+    private func observeDocumentBinding(editor: AXUIElement, window: AXUIElement, processID: Int32) {
+        guard documentBindingDiagnosticsEnabled,
+              lastFailureReason == .documentContextUnavailable,
+              lastDocumentContextFailure == .emptyValue
+        else { return }
+        let previousFailureReason = lastFailureReason
+        let previousDocumentContextFailure = lastDocumentContextFailure
+        defer {
+            lastFailureReason = previousFailureReason
+            lastDocumentContextFailure = previousDocumentContextFailure
+        }
+
+        let observation = DocumentBindingProbe.observe(
+            editor: editor,
+            window: window,
+            hasTimeForProbe: { self.hasCaptureTimeForProbe() },
+            isSameProcess: { self.hasProcessID($0, equalTo: processID) },
+            readParent: { try self.elementAttribute($0, kAXParentAttribute, failure: .noSelection) },
+            readRole: { try self.stringAttribute($0, kAXRoleAttribute, failure: .noSelection) },
+            readWindow: { try self.elementAttribute($0, kAXWindowAttribute, failure: .noSelection) },
+            sameElement: { self.sameElement($0, $1) }
+        )
+
+        var urlSample: DocumentBindingProbe.URLSample?
+        if let candidate = observation.candidate {
+            do {
+                try configureAXMessaging(candidate)
+                var value: CFTypeRef?
+                let status = AXUIElementCopyAttributeValue(candidate, kAXURLAttribute as CFString, &value)
+                urlSample = DocumentBindingProbe.urlSample(status: status, value: value)
+            } catch {
+                urlSample = DocumentBindingProbe.URLSample(read: .readFailed)
+            }
+        }
+
+        let snapshot = DocumentBindingProbe.Snapshot(
+            processID: processID,
+            window: window,
+            editor: editor,
+            webArea: observation.candidate,
+            value: urlSample?.value
+        )
+        let comparison = DocumentBindingProbe.comparison(
+            previous: previousDocumentBindingSnapshot,
+            current: snapshot,
+            sameElement: { self.sameElement($0, $1) }
+        )
+        previousDocumentBindingSnapshot = snapshot
+        lastDocumentBindingDiagnostic = DocumentBindingDiagnostic(
+            ancestorResult: observation.result,
+            candidateDepth: observation.depth,
+            candidateURLRead: urlSample?.read,
+            comparison: comparison
+        )
     }
 
     private func fallbackEditableHostBinding(

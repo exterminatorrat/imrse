@@ -26,6 +26,31 @@ public enum DiagnosticReport {
         if metadata.selectionFailureReason == .documentContextUnavailable,
            let documentContextFailure = metadata.documentContextFailure {
             fields["documentContextFailure"] = documentContextFailure.rawValue
+            if documentContextFailure == .emptyValue,
+               let diagnostic = metadata.documentBindingDiagnostic {
+                var binding: [String: Any] = ["ancestorResult": diagnostic.ancestorResult.rawValue]
+                if let depth = diagnostic.candidateDepth,
+                   (0...DocumentBindingDiagnostic.maximumAncestorDepth).contains(depth) {
+                    binding["candidateDepth"] = depth
+                }
+                if let read = diagnostic.candidateURLRead {
+                    binding["candidateURLRead"] = read.rawValue
+                }
+                if let comparison = diagnostic.comparison {
+                    var equality: [String: Any] = [
+                        "windowUnchanged": comparison.windowUnchanged,
+                        "editorUnchanged": comparison.editorUnchanged
+                    ]
+                    if let unchanged = comparison.webAreaUnchanged {
+                        equality["webAreaUnchanged"] = unchanged
+                    }
+                    if let unchanged = comparison.urlUnchanged {
+                        equality["urlUnchanged"] = unchanged
+                    }
+                    binding["comparison"] = equality
+                }
+                fields["documentBinding"] = binding
+            }
         }
         if let targetValid = metadata.targetValid { fields["targetValid"] = targetValid }
         if let strategy = metadata.strategy { fields["strategy"] = strategy.rawValue }

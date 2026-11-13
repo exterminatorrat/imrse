@@ -399,6 +399,7 @@ public struct DiagnosticMetadata: Equatable, Sendable {
     public var selectionLength: Int?
     public var selectionFailureReason: SelectionFailureReason?
     public var documentContextFailure: DocumentContextFailure?
+    public var documentBindingDiagnostic: DocumentBindingDiagnostic?
     public var targetValid: Bool?
     public var strategy: ReplacementStrategy?
     public var providerName: String?
