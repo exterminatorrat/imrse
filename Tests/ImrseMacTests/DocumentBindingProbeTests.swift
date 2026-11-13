@@ -77,6 +77,18 @@ final class DocumentBindingProbeTests: XCTestCase {
         XCTAssertEqual(beyondLimit.observe(editor: 0, window: 900).result, .depthLimitReached)
     }
 
+    func testObservationFindsAWebAreaTwentyHopsAboveTheEditor() {
+        let fixture = chainFixture(depth: 20)
+
+        let observation = fixture.observe(editor: 0, window: 900)
+
+        XCTAssertEqual(observation.result, .foundWebArea)
+        XCTAssertEqual(observation.depth, 20)
+        XCTAssertEqual(observation.candidate?.role, "AXWebArea")
+        XCTAssertEqual(observation.candidate?.processID, 42)
+        XCTAssertEqual(observation.candidate?.windowID, 900)
+    }
+
     func testObservationStopsWhenTheCaptureBudgetIsExhausted() {
         let beforeAnyRead = ProbeFixture([
             probeNode(0, role: kAXTextAreaRole as String, parent: 1),

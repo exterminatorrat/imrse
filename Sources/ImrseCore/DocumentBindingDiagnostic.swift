@@ -1,5 +1,5 @@
 public struct DocumentBindingDiagnostic: Equatable, Sendable {
-    public static let maximumAncestorDepth = 16
+    public static let maximumAncestorDepth = 64
 
     public enum AncestorResult: String, Equatable, Sendable {
         case foundWebArea

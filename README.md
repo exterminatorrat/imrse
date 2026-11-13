@@ -300,7 +300,7 @@ When reporting a problem, use disposable non-sensitive text. Never include selec
 
 For an owned, non-sensitive test draft, an approved build can inspect the selected editor's parent chain after an empty-window-document refusal. This does not enable editing or bypass the refusal. Fully quit the agreed installed copy first, then launch it with `open /Applications/imrse.app --args --document-binding-diagnostics`. Use **Settings → Advanced → Diagnostics → View…** after capture. Fully quit and relaunch normally to disable the probe; no configuration or provider setting is changed.
 
-The probe is off by default, stays within the selected editor's process/window and existing capture deadline, and walks at most 16 ancestors. It reports only closed status/type classifications, bounded depth and equality/change booleans. At most one previous sample's element handles and bounded URL value are held privately in memory for comparison; URLs, titles, text, stable identifiers and hashes are never included in the report. Missing comparisons remain unknown. A matching URL or element is an observation, not proof of a document-instance lifetime or editor support.
+The probe is off by default, stays within the selected editor's process/window and existing capture deadline, and walks at most 64 ancestors. It reports only closed status/type classifications, bounded depth and equality/change booleans. At most one previous sample's element handles and bounded URL value are held privately in memory for comparison; URLs, titles, text, stable identifiers and hashes are never included in the report. Missing comparisons remain unknown. A matching URL or element is an observation, not proof of a document-instance lifetime or editor support.
 
 ## Engineering and license
 
