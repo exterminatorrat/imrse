@@ -54,6 +54,9 @@ public enum DiagnosticReport {
         }
         if let targetValid = metadata.targetValid { fields["targetValid"] = targetValid }
         if let strategy = metadata.strategy { fields["strategy"] = strategy.rawValue }
+        if let nativeRefusal = metadata.nativeRefusalDiagnostic {
+            fields["nativeRefusal"] = nativeRefusalFields(nativeRefusal)
+        }
         if let providerName = metadata.providerName {
             fields["providerName"] = safeString(providerName, maximumScalars: 128)
         }
@@ -64,6 +67,20 @@ public enum DiagnosticReport {
 
         let data = (try? JSONSerialization.data(withJSONObject: fields, options: [.sortedKeys])) ?? Data("{}".utf8)
         return String(data: data, encoding: .utf8) ?? "{}"
+    }
+
+    private static func nativeRefusalFields(_ diagnostic: NativeRefusalDiagnostic) -> [String: Any] {
+        var fields: [String: Any] = [:]
+        if let undo = diagnostic.undo {
+            var undoFields: [String: Any] = [
+                "route": undo.route.rawValue,
+                "stage": undo.stage.rawValue
+            ]
+            if let style = undo.style { undoFields["style"] = style.rawValue }
+            fields["undo"] = undoFields
+        }
+        if let focus = diagnostic.focus { fields["focus"] = focus.rawValue }
+        return fields
     }
 
     private static func safeString(_ value: String, maximumScalars: Int) -> String {

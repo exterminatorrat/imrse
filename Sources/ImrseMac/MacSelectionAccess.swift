@@ -189,6 +189,7 @@ public final class MacSelectionAccess: SelectionAccess {
     public private(set) var lastFailureReason: SelectionFailureReason?
     public private(set) var lastDocumentContextFailure: DocumentContextFailure?
     public private(set) var lastDocumentBindingDiagnostic: DocumentBindingDiagnostic?
+    public private(set) var lastNativeRefusalDiagnostic: NativeRefusalDiagnostic?
     private let documentBindingDiagnosticsEnabled: Bool
     private let prepareForClipboardPaste: ClipboardPastePreparation?
     private let clock = ContinuousClock()
@@ -197,6 +198,7 @@ public final class MacSelectionAccess: SelectionAccess {
     private var workspaceObserver: NSObjectProtocol?
     private var captureDeadline: ContinuousClock.Instant?
     private var documentBindingDeadline: ContinuousClock.Instant?
+    private var undoRoute: NativeRefusalDiagnostic.UndoRoute?
     private var undoTarget: UndoTarget?
     private var previousDocumentBindingSnapshot: DocumentBindingProbe.Snapshot<AXUIElement>?
     private let clipboardRecovery = ClipboardPasteRecovery<ClipboardPasteboardTransaction, ClipboardDestination>()
@@ -228,6 +230,7 @@ public final class MacSelectionAccess: SelectionAccess {
         lastFailureReason = nil
         lastDocumentContextFailure = nil
         lastDocumentBindingDiagnostic = nil
+        lastNativeRefusalDiagnostic = nil
         captureDeadline = clock.now.advanced(by: Self.captureBudget)
         defer {
             captureDeadline = nil
@@ -496,6 +499,8 @@ public final class MacSelectionAccess: SelectionAccess {
 
     public func undo(_ receipt: ReplacementReceipt) async throws {
         lastFailureReason = nil
+        lastNativeRefusalDiagnostic = nil
+        defer { undoRoute = nil }
         try recoverPendingClipboard()
         guard let undoTarget, sameReceipt(receipt, undoTarget.receipt) else {
             throw ImrseError.undoUnavailable
@@ -513,6 +518,10 @@ public final class MacSelectionAccess: SelectionAccess {
                 else { throw ImrseError.undoUnavailable }
             }
             if let styleProof = undoTarget.styleProof {
+                switch styleProof {
+                case .uniform: undoRoute = .uniform
+                case .structured: undoRoute = .structured
+                }
                 try await undoContenteditable(
                     undoTarget,
                     receipt: receipt,
@@ -522,6 +531,7 @@ public final class MacSelectionAccess: SelectionAccess {
             } else if supportsPlainTextValueReplacement(undoTarget.handle.element, role: undoTarget.handle.role) {
                 try await undoPlainTextField(undoTarget, receipt: receipt, currentSelection: current)
             } else {
+                undoRoute = .generic
                 let target = undoTarget.handle
                 let replacementSelection: NativeSelection
                 if current.range == undoTarget.replacementRange,
@@ -712,12 +722,13 @@ public final class MacSelectionAccess: SelectionAccess {
             selectionRange: undoTarget.replacementRange,
             selectedText: receipt.replacement,
             replacement: receipt.target.text
-        ),
-        try requireContenteditableStyleState(
-            target,
-            proof: styleProof,
-            confirmsApplied: true
         ) else {
+            noteUndoRefusal(.preflight)
+            throw ImrseError.undoUnavailable
+        }
+        let appliedState = try contenteditableStyleState(target, proof: styleProof, confirmsApplied: true)
+        guard appliedState == .satisfied else {
+            noteUndoRefusal(.preflight, style: appliedState)
             throw ImrseError.undoUnavailable
         }
         guard let prepareForClipboardPaste else { throw ImrseError.clipboardFailed }
@@ -740,14 +751,17 @@ public final class MacSelectionAccess: SelectionAccess {
             sameText(replacementText, receipt.replacement),
             (try? attributeIsSettable(target.element, kAXSelectedTextRangeAttribute)) == true
             else {
+                noteUndoRefusal(.preflight)
                 throw ImrseError.undoUnavailable
             }
             let beforeSelectionChange = try self.currentSelection(target, allowingEmpty: true)
             guard sameSelection(beforeSelectionChange, currentSelection) else {
+                noteUndoRefusal(.preflight)
                 throw ImrseError.undoUnavailable
             }
             let selectedRange = try axRangeValue(undoTarget.replacementRange, failure: .undoUnavailable)
             guard try setAttribute(target.element, kAXSelectedTextRangeAttribute, value: selectedRange) == .success else {
+                noteUndoRefusal(.preflight)
                 throw ImrseError.undoUnavailable
             }
             replacementSelection = try await selection(
@@ -757,7 +771,10 @@ public final class MacSelectionAccess: SelectionAccess {
             )
         }
         let beforePreparation = try self.currentSelection(target, allowingEmpty: true)
-        guard sameSelection(beforePreparation, replacementSelection) else { throw ImrseError.undoUnavailable }
+        guard sameSelection(beforePreparation, replacementSelection) else {
+            noteUndoRefusal(.preflight)
+            throw ImrseError.undoUnavailable
+        }
         do {
             try await prepareForClipboardPaste()
         } catch {
@@ -765,13 +782,13 @@ public final class MacSelectionAccess: SelectionAccess {
         }
 
         let beforePaste = try self.currentSelection(target, allowingEmpty: true)
-        guard sameSelection(beforePaste, replacementSelection),
-              try requireContenteditableStyleState(
-                target,
-                proof: inverseProof,
-                confirmsApplied: false
-              )
-        else {
+        guard sameSelection(beforePaste, replacementSelection) else {
+            noteUndoRefusal(.preflight)
+            throw ImrseError.undoUnavailable
+        }
+        let inverseState = try contenteditableStyleState(target, proof: inverseProof, confirmsApplied: false)
+        guard inverseState == .satisfied else {
+            noteUndoRefusal(.preflight, style: inverseState)
             throw ImrseError.undoUnavailable
         }
 
@@ -787,10 +804,18 @@ public final class MacSelectionAccess: SelectionAccess {
         )
 
         do {
-            guard try requireContenteditableStyleState(target, proof: styleProof, confirmsApplied: false),
-            try requireContenteditableStyleState(target, proof: inverseProof, confirmsApplied: true),
-            sameSelection(try self.currentSelection(target, allowingEmpty: true), afterPaste)
-            else {
+            let restoredState = try contenteditableStyleState(target, proof: styleProof, confirmsApplied: false)
+            guard restoredState == .satisfied else {
+                noteUndoRefusal(.verify, style: restoredState)
+                throw ImrseError.undoUnavailable
+            }
+            let reappliedState = try contenteditableStyleState(target, proof: inverseProof, confirmsApplied: true)
+            guard reappliedState == .satisfied else {
+                noteUndoRefusal(.verify, style: reappliedState)
+                throw ImrseError.undoUnavailable
+            }
+            guard sameSelection(try self.currentSelection(target, allowingEmpty: true), afterPaste) else {
+                noteUndoRefusal(.verify)
                 throw ImrseError.undoUnavailable
             }
         } catch {
@@ -894,11 +919,10 @@ public final class MacSelectionAccess: SelectionAccess {
 
     private func observedChange(for targetID: UUID, reason: SelectionFailureReason) {
         if reason == .captureObservedFocusChange,
-           let captured = capturedTarget {
+           let captured = capturedTarget,
+           captured.snapshot.id == targetID {
             let previousFailureReason = lastFailureReason
-            let preservesCapture = ObservedFocusValidation.preservesCapture(
-                observedTargetID: targetID,
-                currentTargetID: captured.snapshot.id,
+            let outcome = ObservedFocusValidation.outcome(
                 capturedElement: captured.handle.anchor,
                 readFocusedElement: {
                     defer { self.lastFailureReason = previousFailureReason }
@@ -910,9 +934,17 @@ public final class MacSelectionAccess: SelectionAccess {
                 },
                 sameElement: { self.sameElement($0, $1) }
             )
-            if preservesCapture { return }
+            guard let outcome else { return }
+            lastNativeRefusalDiagnostic = NativeRefusalDiagnostic(focus: outcome)
         }
         invalidateCapture(targetID, reason: reason)
+    }
+
+    private func noteUndoRefusal(
+        _ stage: NativeRefusalDiagnostic.UndoStage,
+        style: ContenteditableStyleState? = nil
+    ) {
+        lastNativeRefusalDiagnostic = NativeRefusalClassification.undo(route: undoRoute, stage: stage, style: style)
     }
 
     private func clearCapture() {
@@ -1827,7 +1859,9 @@ public final class MacSelectionAccess: SelectionAccess {
             with: replacement,
             expectedValue: selectedTextFallbackBaseline ?? oldValue
         )
-        guard clipboardFallbackTargetIsEligible(target, styleProof: styleProof) else {
+        let entryEligibility = clipboardTargetEligibility(target, styleProof: styleProof)
+        guard entryEligibility.permitted else {
+            noteUndoRefusal(.preflight, style: entryEligibility.style)
             throw ImrseError.replacementFailed
         }
         do {
@@ -1838,7 +1872,9 @@ public final class MacSelectionAccess: SelectionAccess {
         let clipboardValue: String
         do {
             try requireTargetForeground(target)
-            guard clipboardFallbackTargetIsEligible(target, styleProof: styleProof) else {
+            let eligibility = clipboardTargetEligibility(target, styleProof: styleProof)
+            guard eligibility.permitted else {
+                noteUndoRefusal(.preflight, style: eligibility.style)
                 throw ImrseError.staleSelection
             }
             let afterPreparation = try currentSelection(target, allowingEmpty: true)
@@ -1897,7 +1933,9 @@ public final class MacSelectionAccess: SelectionAccess {
     ) async throws -> NativeSelection {
         guard Self.eventPostingPermissionGranted else { throw ImrseError.permissionRequired }
         try requireTargetForeground(target)
-        guard clipboardFallbackTargetIsEligible(target, styleProof: styleProof) else {
+        let entryEligibility = clipboardTargetEligibility(target, styleProof: styleProof)
+        guard entryEligibility.permitted else {
+            noteUndoRefusal(.pasteEntry, style: entryEligibility.style)
             throw ImrseError.staleSelection
         }
         guard let application = NSRunningApplication(processIdentifier: target.processID), !application.isTerminated else {
@@ -1928,15 +1966,24 @@ public final class MacSelectionAccess: SelectionAccess {
                 let current = try self.currentSelection(target)
                 guard self.sameSelection(current, expectedSelection),
                       let value = try self.wholeValue(target.element, failure: .staleSelection),
-                      self.sameText(value, oldValue),
-                      self.clipboardFallbackTargetIsEligible(target, styleProof: styleProof)
-                else { throw ImrseError.staleSelection }
+                      self.sameText(value, oldValue)
+                else {
+                    self.noteUndoRefusal(.stage)
+                    throw ImrseError.staleSelection
+                }
+                let eligibility = self.clipboardTargetEligibility(target, styleProof: styleProof)
+                guard eligibility.permitted else {
+                    self.noteUndoRefusal(.stage, style: eligibility.style)
+                    throw ImrseError.staleSelection
+                }
                 try transaction.stage(text, on: pasteboard)
             },
             verify: { transaction in
                 try self.requireCurrentClipboardDestination(destination)
                 try self.requireTargetForeground(target)
-                guard self.clipboardFallbackTargetIsEligible(target, styleProof: styleProof) else {
+                let eligibility = self.clipboardTargetEligibility(target, styleProof: styleProof)
+                guard eligibility.permitted else {
+                    self.noteUndoRefusal(.verify, style: eligibility.style)
                     throw ImrseError.staleSelection
                 }
                 let beforePost = try self.currentSelection(target)
@@ -1945,7 +1992,10 @@ public final class MacSelectionAccess: SelectionAccess {
                       self.sameSelection(beforePost, expectedSelection),
                       let valueBeforePost = try self.wholeValue(target.element, failure: .staleSelection),
                       self.sameText(valueBeforePost, oldValue)
-                else { throw ImrseError.staleSelection }
+                else {
+                    self.noteUndoRefusal(.verify)
+                    throw ImrseError.staleSelection
+                }
                 guard transaction.stillOwns(pasteboard) else { throw ImrseError.clipboardFailed }
             },
             post: {
@@ -1965,13 +2015,13 @@ public final class MacSelectionAccess: SelectionAccess {
         )
         if let styleProof {
             do {
-                guard try requireContenteditableStyleState(
-                    target,
-                    proof: styleProof,
-                    confirmsApplied: true
-                ),
-                sameSelection(try currentSelection(target, allowingEmpty: true), afterPaste)
-                else {
+                let state = try contenteditableStyleState(target, proof: styleProof, confirmsApplied: true)
+                guard state == .satisfied else {
+                    noteUndoRefusal(.verify, style: state)
+                    throw ImrseError.replacementFailed
+                }
+                guard sameSelection(try currentSelection(target, allowingEmpty: true), afterPaste) else {
+                    noteUndoRefusal(.verify)
                     throw ImrseError.replacementFailed
                 }
             } catch {
@@ -2056,21 +2106,32 @@ public final class MacSelectionAccess: SelectionAccess {
         }
     }
 
+    private struct ClipboardTargetEligibility {
+        let permitted: Bool
+        let style: ContenteditableStyleState?
+    }
+
     private func clipboardFallbackTargetIsEligible(
         _ target: TargetHandle,
         styleProof: ContenteditableClipboardProof? = nil
     ) -> Bool {
+        clipboardTargetEligibility(target, styleProof: styleProof).permitted
+    }
+
+    private func clipboardTargetEligibility(
+        _ target: TargetHandle,
+        styleProof: ContenteditableClipboardProof? = nil
+    ) -> ClipboardTargetEligibility {
         let eligible: Bool
+        var style: ContenteditableStyleState?
         if let styleProof {
             do {
-                eligible = try requireContenteditableStyleState(
-                    target,
-                    proof: styleProof,
-                    confirmsApplied: false
-                )
+                let state = try contenteditableStyleState(target, proof: styleProof, confirmsApplied: false)
+                style = state
+                eligible = state == .satisfied
             } catch {
                 if lastFailureReason == nil { lastFailureReason = .clipboardTargetIneligible }
-                return false
+                return ClipboardTargetEligibility(permitted: false, style: nil)
             }
         } else {
             eligible = ClipboardTargetStructureValidation.permits(
@@ -2090,7 +2151,7 @@ public final class MacSelectionAccess: SelectionAccess {
         if !eligible, lastFailureReason == nil {
             lastFailureReason = .clipboardTargetIneligible
         }
-        return eligible
+        return ClipboardTargetEligibility(permitted: eligible, style: eligible ? nil : style)
     }
 
     private func preflightClipboardStyleProof(
@@ -2108,6 +2169,7 @@ public final class MacSelectionAccess: SelectionAccess {
             with: replacement,
             expectedValue: expectedValue
         ) else {
+            noteUndoRefusal(.preflight)
             if lastFailureReason == nil { lastFailureReason = .clipboardTargetIneligible }
             throw ImrseError.replacementFailed
         }
@@ -2162,27 +2224,31 @@ public final class MacSelectionAccess: SelectionAccess {
         return range
     }
 
-    private func requireContenteditableStyleState(
+    private func contenteditableStyleState(
         _ target: TargetHandle,
         proof: ContenteditableClipboardProof,
         confirmsApplied: Bool
-    ) throws -> Bool {
+    ) throws -> ContenteditableStyleState {
         switch proof {
         case .uniform(let uniform):
-            guard try contenteditableClipboardTargetIsEligible(target),
-                  let actual = try attributedWholeValue(
-                    target.element,
-                    matching: confirmsApplied ? uniform.expectedText : uniform.originalText,
-                    failure: .staleSelection
-                  )
-            else { return false }
-            return confirmsApplied ? uniform.confirmsApplied(actual) : uniform.confirmsOriginal(actual)
+            guard try contenteditableClipboardTargetIsEligible(target) else { return .rootIneligible }
+            guard let actual = try attributedWholeValue(
+                target.element,
+                matching: confirmsApplied ? uniform.expectedText : uniform.originalText,
+                failure: .staleSelection
+            ) else { return .attributedUnavailable }
+            let confirms = confirmsApplied ? uniform.confirmsApplied(actual) : uniform.confirmsOriginal(actual)
+            return confirms ? .satisfied : .styleMismatch
         case .structured(let structured):
             let expected = confirmsApplied ? structured.expectedProjection : structured.originalProjection
-            guard let actual = try structuredContenteditableSnapshot(target, matching: expected.displayText),
-                  actual.projection == expected
-            else { return false }
-            return confirmsApplied ? structured.confirmsApplied(actual.value) : structured.confirmsOriginal(actual.value)
+            guard let actual = try structuredContenteditableSnapshot(target, matching: expected.displayText) else {
+                return .structuredUnavailable
+            }
+            guard actual.projection == expected else { return .projectionMismatch }
+            let confirms = confirmsApplied
+                ? structured.confirmsApplied(actual.value)
+                : structured.confirmsOriginal(actual.value)
+            return confirms ? .satisfied : .styleMismatch
         }
     }
 
