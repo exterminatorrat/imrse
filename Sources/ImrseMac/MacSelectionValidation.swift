@@ -35,12 +35,55 @@ enum ObservedFocusValidation {
         sameElement: (Element, Element) -> Bool
     ) -> Bool {
         guard observedTargetID == currentTargetID else { return false }
+        return outcome(
+            capturedElement: capturedElement,
+            readFocusedElement: readFocusedElement,
+            sameElement: sameElement
+        ) == nil
+    }
+
+    static func outcome<Element>(
+        capturedElement: Element,
+        readFocusedElement: () throws -> Element?,
+        sameElement: (Element, Element) -> Bool
+    ) -> NativeRefusalDiagnostic.FocusOutcome? {
         do {
-            guard let focusedElement = try readFocusedElement() else { return false }
-            return sameElement(focusedElement, capturedElement)
+            guard let focusedElement = try readFocusedElement() else { return .missingFocusedElement }
+            return sameElement(focusedElement, capturedElement) ? nil : .differentAnchor
         } catch {
-            return false
+            return .readFailed
         }
+    }
+}
+
+enum ContenteditableStyleState: Equatable {
+    case satisfied
+    case rootIneligible
+    case attributedUnavailable
+    case structuredUnavailable
+    case projectionMismatch
+    case styleMismatch
+
+    var reported: NativeRefusalDiagnostic.StyleState? {
+        switch self {
+        case .satisfied: nil
+        case .rootIneligible: .rootIneligible
+        case .attributedUnavailable: .attributedUnavailable
+        case .structuredUnavailable: .structuredUnavailable
+        case .projectionMismatch: .projectionMismatch
+        case .styleMismatch: .styleMismatch
+        }
+    }
+}
+
+enum NativeRefusalClassification {
+    static func undo(
+        route: NativeRefusalDiagnostic.UndoRoute?,
+        stage: NativeRefusalDiagnostic.UndoStage,
+        style: ContenteditableStyleState? = nil
+    ) -> NativeRefusalDiagnostic? {
+        guard let route else { return nil }
+        return NativeRefusalDiagnostic(undo: .init(route: route, stage: stage, style: style?.reported))
     }
 }
 

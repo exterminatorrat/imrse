@@ -1561,6 +1561,7 @@ final class AppModel: ObservableObject {
                 metadata.documentContextFailure = selectionAccess.lastDocumentContextFailure
                 metadata.documentBindingDiagnostic = selectionAccess.lastDocumentBindingDiagnostic
             }
+            metadata.attachNativeRefusal(selectionAccess.lastNativeRefusalDiagnostic)
         }
         return DiagnosticReport.render(metadata)
     }

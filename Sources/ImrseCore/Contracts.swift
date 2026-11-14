@@ -400,6 +400,7 @@ public struct DiagnosticMetadata: Equatable, Sendable {
     public var selectionFailureReason: SelectionFailureReason?
     public var documentContextFailure: DocumentContextFailure?
     public var documentBindingDiagnostic: DocumentBindingDiagnostic?
+    public var nativeRefusalDiagnostic: NativeRefusalDiagnostic?
     public var targetValid: Bool?
     public var strategy: ReplacementStrategy?
     public var providerName: String?
@@ -408,4 +409,15 @@ public struct DiagnosticMetadata: Equatable, Sendable {
     public var replacement = "idle"
     public var error: ImrseError?
     public init() {}
+
+    public mutating func attachNativeRefusal(_ diagnostic: NativeRefusalDiagnostic?) {
+        guard error != nil, let diagnostic else {
+            nativeRefusalDiagnostic = nil
+            return
+        }
+        let focus = error == .targetLost && selectionFailureReason == .captureObservedFocusChange
+            ? diagnostic.focus : nil
+        nativeRefusalDiagnostic = diagnostic.undo == nil && focus == nil
+            ? nil : NativeRefusalDiagnostic(undo: diagnostic.undo, focus: focus)
+    }
 }
