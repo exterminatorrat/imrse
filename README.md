@@ -279,6 +279,8 @@ A recent locally validated app bundle contains both `arm64` and `x86_64` slices.
 
 Replacement checks are bounded to measured targets: disposable plain text in TextEdit and input/textarea fixtures in Safari, Chrome, and Vivaldi. Rich-text editors, web `contenteditable` fields, and other unmeasured apps are not claimed as supported.
 
+An empty window `AXDocument` URL no longer has to be the only capture authority: replace-selection can use a retained editor-bound WebArea and its nonempty typed URL, rechecked at every existing target-validation boundary including Undo. This does not enable caret insertion, change clipboard preferences, or qualify Capy/ChatGPT editing by itself. See [capture and target lifetime](MACOS_INTEGRATION.md#capture-and-target-lifetime) for the exact binding and its observable-target limitation.
+
 **Last recorded verification.** The provider/capture source change passed all four CI checks. Local verification reported 88 focused tests and a strict 390-test suite (one opt-in probe skipped, zero failures); app resources and the ad-hoc signature passed packaging checks. One app was deployed on macOS 26.2 with its previous bundle retained for rollback. No per-provider live sign-in or inference result, or live privacy CLI probe, is claimed.
 
 See the [verification report](VERIFICATION.md) for test scope, [remaining macOS gates](UNVERIFIED_MACOS.md) for what is still unverified, and the [web editor investigation roadmap](docs/web-editor-roadmap.md) for future validation gates; the roadmap is not a support commitment.

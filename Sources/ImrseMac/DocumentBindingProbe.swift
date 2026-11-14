@@ -81,6 +81,30 @@ enum DocumentBindingProbe {
             break
         }
 
+        return nearestWebAreaAncestor(
+            from: editor,
+            window: window,
+            hasTimeForProbe: hasTimeForProbe,
+            isSameProcess: isSameProcess,
+            readParent: readParent,
+            readRole: readRole,
+            readWindow: readWindow,
+            sameElement: sameElement
+        )
+    }
+
+    static func nearestWebAreaAncestor<Element>(
+        from editor: Element,
+        window: Element,
+        hasTimeForProbe: () -> Bool,
+        isSameProcess: (Element) -> Bool,
+        readParent: (Element) throws -> Element?,
+        readRole: (Element) throws -> String?,
+        readWindow: (Element) throws -> Element?,
+        sameElement: (Element, Element) -> Bool
+    ) -> Observation<Element> {
+        guard isSameProcess(editor) else { return Observation(result: .inconsistentProcess) }
+        guard !sameElement(editor, window) else { return Observation(result: .notFound) }
         var current = editor
         var visited = [editor]
         var depth = 0
