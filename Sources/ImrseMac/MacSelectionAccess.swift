@@ -92,6 +92,7 @@ public final class MacSelectionAccess: SelectionAccess {
 
     private static let axMessagingTimeout: Float = 0.1
     private static let captureBudget = Duration.seconds(1)
+    private static let documentBindingBudget = Duration.seconds(1)
     private static let focusRetryDelayMilliseconds: Int64 = 10
     private static let captureSetupAXCallReserve: Int64 = 8
     private static let manualAccessibilityAttribute = "AXManualAccessibility"
@@ -107,11 +108,16 @@ public final class MacSelectionAccess: SelectionAccess {
         let role: String
         let intent: SelectionEditIntent
         let window: AXUIElement
-        let document: SelectionTargetContextValidation.Document
+        let document: SelectionDocumentBinding
         let application: AXUIElement
         let anchor: AXUIElement
         let anchorRole: String
         let element: AXUIElement
+    }
+
+    private enum SelectionDocumentBinding {
+        case window(SelectionTargetContextValidation.Document)
+        case editorBound(EditorBoundDocumentBinding.Binding<AXUIElement>)
     }
 
     private struct EditableHostBinding {
@@ -190,6 +196,7 @@ public final class MacSelectionAccess: SelectionAccess {
     private var observerRegistration: ObserverRegistration?
     private var workspaceObserver: NSObjectProtocol?
     private var captureDeadline: ContinuousClock.Instant?
+    private var documentBindingDeadline: ContinuousClock.Instant?
     private var undoTarget: UndoTarget?
     private var previousDocumentBindingSnapshot: DocumentBindingProbe.Snapshot<AXUIElement>?
     private let clipboardRecovery = ClipboardPasteRecovery<ClipboardPasteboardTransaction, ClipboardDestination>()
@@ -978,7 +985,7 @@ public final class MacSelectionAccess: SelectionAccess {
         editor: AXUIElement,
         processID: Int32,
         intent: SelectionEditIntent
-    ) throws -> (window: AXUIElement, document: SelectionTargetContextValidation.Document) {
+    ) throws -> (window: AXUIElement, document: SelectionDocumentBinding) {
         let failureReason: SelectionFailureReason = intent == .insertAtCaret
             ? .caretProofUnavailable
             : .windowContextUnavailable
@@ -991,14 +998,73 @@ public final class MacSelectionAccess: SelectionAccess {
         else {
             throw failure(failureReason, error)
         }
-        let document: SelectionTargetContextValidation.Document
+        let document: SelectionDocumentBinding
         do {
-            document = try documentContext(window, failure: error)
-        } catch {
-            observeDocumentBinding(editor: editor, window: window, processID: processID)
-            throw error
+            document = .window(try documentContext(window, failure: error))
+        } catch let windowError {
+            guard let binding = EditorBoundDocumentBinding.captureResolution(
+                intent: intent,
+                documentFailure: lastDocumentContextFailure,
+                resolve: {
+                    editorBoundDocument(
+                        editor: editor,
+                        window: window,
+                        processID: processID,
+                        intent: intent
+                    )
+                },
+                observe: { observeDocumentBinding(editor: editor, window: window, processID: processID) }
+            ) else { throw windowError }
+            document = .editorBound(binding)
         }
         return (window, document)
+    }
+
+    private func editorBoundDocument(
+        editor: AXUIElement,
+        window: AXUIElement,
+        processID: Int32,
+        intent: SelectionEditIntent
+    ) -> EditorBoundDocumentBinding.Binding<AXUIElement>? {
+        let previousFailureReason = lastFailureReason
+        defer { lastFailureReason = previousFailureReason }
+        return EditorBoundDocumentBinding.resolve(
+            editor: editor,
+            window: window,
+            intent: intent,
+            hasTimeForProbe: { self.hasDocumentBindingTimeForProbe() },
+            isSameProcess: { self.hasProcessID($0, equalTo: processID) },
+            readParent: { try self.elementAttribute($0, kAXParentAttribute, failure: .noSelection) },
+            readRole: { try self.stringAttribute($0, kAXRoleAttribute, failure: .noSelection) },
+            readWindow: { try self.elementAttribute($0, kAXWindowAttribute, failure: .noSelection) },
+            readURL: { self.documentBindingURLSample($0) },
+            sameElement: { self.sameElement($0, $1) }
+        )
+    }
+
+    private func documentBindingURLSample(_ element: AXUIElement) -> DocumentBindingProbe.URLSample {
+        do {
+            try configureAXMessaging(element)
+        } catch {
+            return DocumentBindingProbe.URLSample(read: .readFailed)
+        }
+        var value: CFTypeRef?
+        let status = AXUIElementCopyAttributeValue(element, kAXURLAttribute as CFString, &value)
+        return DocumentBindingProbe.urlSample(status: status, value: value)
+    }
+
+    private func windowDocumentState(_ window: AXUIElement) -> EditorBoundDocumentBinding.WindowDocumentState {
+        do {
+            try configureAXMessaging(window)
+        } catch {
+            return .readFailed
+        }
+        var value: CFTypeRef?
+        let status = AXUIElementCopyAttributeValue(window, kAXDocumentAttribute as CFString, &value)
+        return EditorBoundDocumentBinding.windowDocumentState(
+            read: SelectionTargetContextValidation.documentRead(status: status, value: value),
+            failure: SelectionTargetContextValidation.documentFailure(status: status, value: value)
+        )
     }
 
     private func observeDocumentBinding(editor: AXUIElement, window: AXUIElement, processID: Int32) {
@@ -1026,14 +1092,7 @@ public final class MacSelectionAccess: SelectionAccess {
 
         var urlSample: DocumentBindingProbe.URLSample?
         if let candidate = observation.candidate {
-            do {
-                try configureAXMessaging(candidate)
-                var value: CFTypeRef?
-                let status = AXUIElementCopyAttributeValue(candidate, kAXURLAttribute as CFString, &value)
-                urlSample = DocumentBindingProbe.urlSample(status: status, value: value)
-            } catch {
-                urlSample = DocumentBindingProbe.URLSample(read: .readFailed)
-            }
+            urlSample = documentBindingURLSample(candidate)
         }
 
         let snapshot = DocumentBindingProbe.Snapshot(
@@ -1206,20 +1265,23 @@ public final class MacSelectionAccess: SelectionAccess {
             try requireAnchorHostSelectionAgreement(target)
         }
         let currentWindow = try elementAttribute(target.anchor, kAXWindowAttribute, failure: .staleSelection)
-        if let reason = try SelectionTargetContextValidation.failureReason(
-            capturedWindow: target.window,
-            capturedDocument: target.document,
-            currentWindow: currentWindow,
-            intent: target.intent,
-            sameWindow: { self.sameElement($0, $1) },
-            isValidWindow: { window in
-                guard self.processIdentifier(of: window) == target.processID else { return false }
-                return try self.stringAttribute(window, kAXRoleAttribute, failure: .staleSelection)
-                    == (kAXWindowRole as String)
-            },
-            readDocument: { window in try self.documentContext(window, failure: .staleSelection) }
-        ) {
-            throw failure(reason, .staleSelection)
+        switch target.document {
+        case let .window(document):
+            if let reason = try SelectionTargetContextValidation.failureReason(
+                capturedWindow: target.window,
+                capturedDocument: document,
+                currentWindow: currentWindow,
+                intent: target.intent,
+                sameWindow: { self.sameElement($0, $1) },
+                isValidWindow: { try self.isValidTargetWindow($0, processID: target.processID) },
+                readDocument: { window in try self.documentContext(window, failure: .staleSelection) }
+            ) {
+                throw failure(reason, .staleSelection)
+            }
+        case let .editorBound(binding):
+            if let reason = try editorBoundDocumentFailure(binding, target: target, currentWindow: currentWindow) {
+                throw failure(reason, .staleSelection)
+            }
         }
         if target.intent == .insertAtCaret {
             guard supportsPlainTextValueReplacement(target.element, role: target.role) else {
@@ -1260,6 +1322,40 @@ public final class MacSelectionAccess: SelectionAccess {
             lastDocumentContextFailure = SelectionTargetContextValidation.documentFailure(status: status, value: value)
             throw failure(reason, error)
         }
+    }
+
+    private func editorBoundDocumentFailure(
+        _ binding: EditorBoundDocumentBinding.Binding<AXUIElement>,
+        target: TargetHandle,
+        currentWindow: AXUIElement?
+    ) throws -> SelectionFailureReason? {
+        let previousDeadline = documentBindingDeadline
+        documentBindingDeadline = clock.now.advanced(by: Self.documentBindingBudget)
+        defer { documentBindingDeadline = previousDeadline }
+        return try EditorBoundDocumentBinding.failureReason(
+            binding: binding,
+            currentEditor: target.element,
+            capturedWindow: target.window,
+            currentWindow: currentWindow,
+            intent: target.intent,
+            sameElement: { self.sameElement($0, $1) },
+            isValidWindow: { try self.isValidTargetWindow($0, processID: target.processID) },
+            readWindowDocumentState: {
+                guard self.hasDocumentBindingTimeForProbe() else { return .readFailed }
+                return self.windowDocumentState(target.window)
+            },
+            hasTimeForProbe: { self.hasDocumentBindingTimeForProbe() },
+            isSameProcess: { self.hasProcessID($0, equalTo: target.processID) },
+            readParent: { try self.elementAttribute($0, kAXParentAttribute, failure: .staleSelection) },
+            readRole: { try self.stringAttribute($0, kAXRoleAttribute, failure: .staleSelection) },
+            readWindow: { try self.elementAttribute($0, kAXWindowAttribute, failure: .staleSelection) },
+            readURL: { self.documentBindingURLSample($0) }
+        )
+    }
+
+    private func isValidTargetWindow(_ window: AXUIElement, processID: Int32) throws -> Bool {
+        guard processIdentifier(of: window) == processID else { return false }
+        return try stringAttribute(window, kAXRoleAttribute, failure: .staleSelection) == (kAXWindowRole as String)
     }
 
     private func readSelection(_ target: TargetHandle, allowingEmpty: Bool) throws -> NativeSelection? {
@@ -2341,6 +2437,13 @@ public final class MacSelectionAccess: SelectionAccess {
         guard let captureDeadline else { return true }
         let requiredMilliseconds = Int64(Self.axMessagingTimeout * 1_000) * Self.captureSetupAXCallReserve
         return clock.now.advanced(by: .milliseconds(requiredMilliseconds)) < captureDeadline
+    }
+
+    private func hasDocumentBindingTimeForProbe() -> Bool {
+        let deadlines = [documentBindingDeadline, captureDeadline].compactMap { $0 }
+        guard let deadline = deadlines.min() else { return true }
+        let requiredMilliseconds = Int64(Self.axMessagingTimeout * 1_000) * Self.captureSetupAXCallReserve
+        return clock.now.advanced(by: .milliseconds(requiredMilliseconds)) < deadline
     }
 
     private func supportsPlainTextValueReplacement(_ element: AXUIElement, role: String) -> Bool {
