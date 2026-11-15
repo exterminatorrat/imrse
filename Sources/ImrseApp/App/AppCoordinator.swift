@@ -85,6 +85,7 @@ final class AppCoordinator: NSObject, NSMenuItemValidation {
 
     func openSettings() {
         guard model.canOpenSettings else { return }
+        panelController.invalidatePresentationFocusReturn()
         model.prepareForSettings()
         let shouldCenterWindow = settingsWindowController.window == nil
         let window = settingsWindow()

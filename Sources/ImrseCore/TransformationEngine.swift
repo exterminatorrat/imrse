@@ -245,9 +245,12 @@ public final class TransformationEngine {
             onPrepareReplacement?()
             guard isGenerating(operationID) else { return }
             do {
+                try await selectionAccess.prepareForReplacement(target)
+                guard isGenerating(operationID) else { return }
                 try selectionAccess.validate(target)
                 diagnostics.targetValid = true
             } catch {
+                guard isGenerating(operationID) else { return }
                 let selectionFailureReason = selectionAccess.lastFailureReason
                 diagnostics.targetValid = false
                 finish(
@@ -435,7 +438,8 @@ public final class TransformationEngine {
     }
 
     private static func validationFailure(_ error: any Error) -> ImrseError {
-        (error as? ImrseError) ?? .targetLost
+        if error is CancellationError { return .cancelled }
+        return (error as? ImrseError) ?? .targetLost
     }
 
     private static func replacementFailure(_ error: any Error) -> ImrseError {

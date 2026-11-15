@@ -1,16 +1,20 @@
 #if os(macOS)
 import AppKit
 import Combine
+import ImrseMac
+import ImrsePillCore
 import ImrsePillUI
 import SwiftUI
 
 @MainActor
 final class PillPanelController {
+    static let panelStyleMask: NSWindow.StyleMask = [.borderless, .nonactivatingPanel]
     private let model: AppModel
     private var panel: ImrsePanel?
     private var keyMonitor: Any?
     private var subscription: AnyCancellable?
     private var capturedVisibleFrame: NSRect?
+    private let presentationFocus = PillPresentationFocusSession()
 
     init(model: AppModel) {
         self.model = model
@@ -19,12 +23,23 @@ final class PillPanelController {
                 guard let self else { return }
                 let phase = lifecycle.phase
                 guard phase.isVisible else { self.hide(); return }
+                switch phase {
+                case .success, .failure:
+                    self.makeFeedbackNonKey()
+                default:
+                    break
+                }
+                self.presentationFocus.didChange(to: phase)
                 self.resizePanel(for: PillTokens.width(for: phase))
             }
     }
 
     func present(afterCapturingTargetOn screen: NSScreen?) {
         guard model.pillModel.phase.isVisible else { return }
+        let acceptsInputFocus = Self.acceptsInputFocus(for: model.pillModel.phase)
+        if acceptsInputFocus {
+            presentationFocus.begin(model.selectionAccess.presentationFocusReturn)
+        }
         let pointerScreen = NSScreen.screens.first { NSMouseInRect(NSEvent.mouseLocation, $0.frame, false) }
         guard let screen = screen ?? pointerScreen ?? NSScreen.main else { return }
 
@@ -33,14 +48,37 @@ final class PillPanelController {
         let panel = makePanelIfNeeded()
         panel.setFrame(Self.frame(width: PillTokens.width(for: model.pillModel.phase), visibleFrame: visible), display: false)
         model.selectionAccess.focusObservationPanelPhase = .presentationRequested
-        panel.makeKeyAndOrderFront(nil)
-        panel.makeFirstResponder(panel.contentView)
+        if acceptsInputFocus {
+            panel.acceptsKeyFocus = true
+            NSApp.activate()
+            panel.makeKeyAndOrderFront(nil)
+            panel.makeFirstResponder(panel.contentView)
+        } else {
+            panel.acceptsKeyFocus = false
+            panel.orderFrontRegardless()
+        }
         model.selectionAccess.focusObservationPanelPhase = .presentationReturned
         installKeyMonitor()
     }
 
     func hideForFocusHandoff() {
         hide(forFocusHandoff: true)
+    }
+
+    static func acceptsInputFocus(for phase: PillPhase) -> Bool {
+        phase == .input
+    }
+
+    func invalidatePresentationFocusReturn() {
+        presentationFocus.invalidate()
+    }
+
+    private func makeFeedbackNonKey() {
+        panel?.acceptsKeyFocus = false
+        if let panel, panel.isKeyWindow {
+            panel.orderOut(nil)
+            panel.orderFrontRegardless()
+        }
     }
 
     static func frame(width: CGFloat, visibleFrame: CGRect) -> CGRect {
@@ -67,7 +105,7 @@ final class PillPanelController {
                 origin: .zero,
                 size: NSSize(width: PillTokens.width(for: .input) + 2 * PillTokens.shadowPadding, height: PillTokens.height + 2 * PillTokens.shadowPadding)
             ),
-            styleMask: [.borderless, .nonactivatingPanel],
+            styleMask: Self.panelStyleMask,
             backing: .buffered,
             defer: false
         )
@@ -129,6 +167,10 @@ final class PillPanelController {
     private func hide(forFocusHandoff: Bool = false) {
         model.selectionAccess.focusObservationPanelPhase = forFocusHandoff ? .handoffHideRequested : .hideRequested
         panel?.orderOut(nil)
+        if !forFocusHandoff {
+            panel?.acceptsKeyFocus = false
+            presentationFocus.didChange(to: .hidden)
+        }
         model.selectionAccess.focusObservationPanelPhase = forFocusHandoff ? .handoffHideReturned : .hideReturned
         capturedVisibleFrame = nil
         if let keyMonitor {
@@ -138,8 +180,36 @@ final class PillPanelController {
     }
 }
 
+@MainActor
+final class PillPresentationFocusSession {
+    private var focusReturn: ApplicationFocusReturn?
+
+    func begin(_ token: ApplicationFocusReturn?) {
+        invalidate()
+        focusReturn = token
+    }
+
+    func didChange(to phase: PillPhase) {
+        switch phase {
+        case .hidden, .success, .failure:
+            let token = focusReturn
+            focusReturn = nil
+            token?.finishPresentation()
+        default:
+            break
+        }
+    }
+
+    func invalidate() {
+        let token = focusReturn
+        focusReturn = nil
+        token?.invalidate()
+    }
+}
+
 private final class ImrsePanel: NSPanel {
-    override var canBecomeKey: Bool { true }
+    var acceptsKeyFocus = false
+    override var canBecomeKey: Bool { acceptsKeyFocus }
     override var canBecomeMain: Bool { false }
 }
 #endif

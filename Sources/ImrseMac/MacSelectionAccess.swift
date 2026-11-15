@@ -105,6 +105,7 @@ public final class MacSelectionAccess: SelectionAccess {
         let id: UUID
         let applicationID: String
         let processID: Int32
+        let focusReturn: ApplicationFocusReturn
         let role: String
         let intent: SelectionEditIntent
         let window: AXUIElement
@@ -192,6 +193,7 @@ public final class MacSelectionAccess: SelectionAccess {
     public var clipboardFallbackEnabled: Bool
     public var focusObservationPanelPhase: NativeRefusalDiagnostic.PanelPhase = .unavailable
     public private(set) var capturedScreen: NSScreen?
+    public private(set) var presentationFocusReturn: ApplicationFocusReturn?
     public private(set) var lastFailureReason: SelectionFailureReason?
     public private(set) var lastDocumentContextFailure: DocumentContextFailure?
     public private(set) var lastDocumentBindingDiagnostic: DocumentBindingDiagnostic?
@@ -232,6 +234,8 @@ public final class MacSelectionAccess: SelectionAccess {
     }
 
     public func capture(intent: SelectionEditIntent) throws -> SelectionSnapshot {
+        presentationFocusReturn?.invalidate()
+        presentationFocusReturn = nil
         clearCapture()
         lastFailureReason = nil
         lastDocumentContextFailure = nil
@@ -384,6 +388,7 @@ public final class MacSelectionAccess: SelectionAccess {
             id: snapshot.id,
             applicationID: applicationID,
             processID: processID,
+            focusReturn: ApplicationFocusReturn(application: runningApplication),
             role: targetRole,
             intent: intent,
             window: windowContext.window,
@@ -409,7 +414,29 @@ public final class MacSelectionAccess: SelectionAccess {
             throw error
         }
         lastFailureReason = nil
+        presentationFocusReturn = handle.focusReturn
         return snapshot
+    }
+
+    public func prepareForReplacement(_ target: SelectionSnapshot) async throws {
+        do {
+            guard let focusReturn = capturedTarget?.handle.focusReturn else {
+                throw failure(lastFailureReason ?? .captureInvalidated, .targetLost)
+            }
+            try await focusReturn.restoreForReplacement {
+                guard let captured = self.capturedTarget,
+                      captured.snapshot.id == target.id,
+                      captured.handle.focusReturn === focusReturn else {
+                    throw self.failure(self.lastFailureReason ?? .captureInvalidated, .targetLost)
+                }
+                guard self.sameSnapshot(target, captured.snapshot) else {
+                    throw self.failure(.snapshotMismatch, .staleSelection)
+                }
+            }
+        } catch {
+            invalidateCapture(target.id)
+            throw error
+        }
     }
 
     public func validate(_ target: SelectionSnapshot) throws {
