@@ -32,13 +32,15 @@ final class PillPanelController {
         capturedVisibleFrame = visible
         let panel = makePanelIfNeeded()
         panel.setFrame(Self.frame(width: PillTokens.width(for: model.pillModel.phase), visibleFrame: visible), display: false)
+        model.selectionAccess.focusObservationPanelPhase = .presentationRequested
         panel.makeKeyAndOrderFront(nil)
         panel.makeFirstResponder(panel.contentView)
+        model.selectionAccess.focusObservationPanelPhase = .presentationReturned
         installKeyMonitor()
     }
 
     func hideForFocusHandoff() {
-        hide()
+        hide(forFocusHandoff: true)
     }
 
     static func frame(width: CGFloat, visibleFrame: CGRect) -> CGRect {
@@ -124,8 +126,10 @@ final class PillPanelController {
         (window?.firstResponder as? NSTextView)?.hasMarkedText() == true
     }
 
-    private func hide() {
+    private func hide(forFocusHandoff: Bool = false) {
+        model.selectionAccess.focusObservationPanelPhase = forFocusHandoff ? .handoffHideRequested : .hideRequested
         panel?.orderOut(nil)
+        model.selectionAccess.focusObservationPanelPhase = forFocusHandoff ? .handoffHideReturned : .hideReturned
         capturedVisibleFrame = nil
         if let keyMonitor {
             NSEvent.removeMonitor(keyMonitor)

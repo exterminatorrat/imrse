@@ -171,6 +171,119 @@ struct NativeRefusalDiagnosticReportTests {
         #expect(metadata.nativeRefusalDiagnostic?.focus == nil)
     }
 
+    @Test func focusEvidenceRendersBesideTheBroadOutcome() throws {
+        var metadata = DiagnosticMetadata()
+        metadata.nativeRefusalDiagnostic = .init(
+            focus: .differentAnchor,
+            focusRead: .resolved,
+            foreground: .own,
+            panelPhase: .handoffHideReturned
+        )
+
+        let refusal = try #require(try fields(metadata)["nativeRefusal"] as? [String: Any])
+        #expect(Set(refusal.keys) == Set(["focus", "focusRead", "foreground", "panelPhase"]))
+        #expect(refusal["focus"] as? String == "differentAnchor")
+        #expect(refusal["focusRead"] as? String == "resolved")
+        #expect(refusal["foreground"] as? String == "own")
+        #expect(refusal["panelPhase"] as? String == "handoffHideReturned")
+    }
+
+    @Test func attachedFocusEvidenceSurvivesOnlyItsCurrentFailure() throws {
+        let diagnostic = NativeRefusalDiagnostic(
+            undo: .init(route: .generic, stage: .preflight),
+            focus: .missingFocusedElement,
+            focusRead: .noValue,
+            foreground: .target,
+            panelPhase: .presentationReturned
+        )
+        var metadata = DiagnosticMetadata()
+        metadata.error = .targetLost
+        metadata.selectionFailureReason = .captureObservedFocusChange
+        metadata.attachNativeRefusal(diagnostic)
+        #expect(metadata.nativeRefusalDiagnostic == diagnostic)
+        let refusal = try #require(try fields(metadata)["nativeRefusal"] as? [String: Any])
+        #expect(refusal["focusRead"] as? String == "noValue")
+        #expect(refusal["foreground"] as? String == "target")
+        #expect(refusal["panelPhase"] as? String == "presentationReturned")
+
+        metadata.error = .network
+        metadata.attachNativeRefusal(diagnostic)
+        #expect(metadata.nativeRefusalDiagnostic == .init(undo: diagnostic.undo))
+        let unrelated = try #require(try fields(metadata)["nativeRefusal"] as? [String: Any])
+        #expect(Set(unrelated.keys) == Set(["undo"]))
+
+        metadata.error = nil
+        metadata.attachNativeRefusal(diagnostic)
+        #expect(metadata.nativeRefusalDiagnostic == nil)
+    }
+
+    @Test(arguments: [
+        NativeRefusalDiagnostic.FocusRead.resolved,
+        .noValue,
+        .attributeUnsupported,
+        .successWithoutElement,
+        .unexpectedValueType,
+        .readFailed
+    ])
+    func everyFocusReadRendersItsOwnName(_ read: NativeRefusalDiagnostic.FocusRead) throws {
+        var metadata = DiagnosticMetadata()
+        metadata.nativeRefusalDiagnostic = .init(focus: .missingFocusedElement, focusRead: read)
+
+        let refusal = try #require(try fields(metadata)["nativeRefusal"] as? [String: Any])
+        #expect(refusal["focusRead"] as? String == read.rawValue)
+    }
+
+    @Test(arguments: [
+        NativeRefusalDiagnostic.ForegroundRelation.target,
+        .own,
+        .other,
+        .unavailable
+    ])
+    func everyForegroundRelationRendersItsOwnName(
+        _ relation: NativeRefusalDiagnostic.ForegroundRelation
+    ) throws {
+        var metadata = DiagnosticMetadata()
+        metadata.nativeRefusalDiagnostic = .init(focus: .readFailed, foreground: relation)
+
+        let refusal = try #require(try fields(metadata)["nativeRefusal"] as? [String: Any])
+        #expect(refusal["foreground"] as? String == relation.rawValue)
+    }
+
+    @Test(arguments: [
+        NativeRefusalDiagnostic.PanelPhase.unavailable,
+        .presentationRequested,
+        .presentationReturned,
+        .hideRequested,
+        .hideReturned,
+        .handoffHideRequested,
+        .handoffHideReturned
+    ])
+    func everyPanelPhaseRendersItsOwnName(_ phase: NativeRefusalDiagnostic.PanelPhase) throws {
+        var metadata = DiagnosticMetadata()
+        metadata.nativeRefusalDiagnostic = .init(focus: .readFailed, panelPhase: phase)
+
+        let refusal = try #require(try fields(metadata)["nativeRefusal"] as? [String: Any])
+        #expect(refusal["panelPhase"] as? String == phase.rawValue)
+    }
+
+    @Test func focusEvidenceValuesStayInsideTheirClosedSets() throws {
+        var metadata = DiagnosticMetadata()
+        metadata.nativeRefusalDiagnostic = .init(
+            focus: .missingFocusedElement,
+            focusRead: .successWithoutElement,
+            foreground: .other,
+            panelPhase: .hideRequested
+        )
+
+        let refusal = try #require(try fields(metadata)["nativeRefusal"] as? [String: Any])
+        #expect(Set(["resolved", "noValue", "attributeUnsupported", "successWithoutElement",
+                     "unexpectedValueType", "readFailed"]).contains(refusal["focusRead"] as? String ?? ""))
+        #expect(Set(["target", "own", "other", "unavailable"]).contains(refusal["foreground"] as? String ?? ""))
+        #expect(Set(["unavailable", "presentationRequested", "presentationReturned", "hideRequested",
+                     "hideReturned", "handoffHideRequested", "handoffHideReturned"])
+            .contains(refusal["panelPhase"] as? String ?? ""))
+    }
+
     private func undoFields(_ metadata: DiagnosticMetadata) throws -> [String: Any] {
         let refusal = try #require(try fields(metadata)["nativeRefusal"] as? [String: Any])
         return try #require(refusal["undo"] as? [String: Any])

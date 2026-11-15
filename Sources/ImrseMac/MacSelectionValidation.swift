@@ -85,6 +85,25 @@ enum NativeRefusalClassification {
         guard let route else { return nil }
         return NativeRefusalDiagnostic(undo: .init(route: route, stage: stage, style: style?.reported))
     }
+
+    static func focusRead(
+        status: AXError,
+        hasValue: Bool,
+        isElement: Bool
+    ) -> NativeRefusalDiagnostic.FocusRead {
+        switch status {
+        case .noValue:
+            return .noValue
+        case .attributeUnsupported:
+            return .attributeUnsupported
+        case .success:
+            break
+        default:
+            return .readFailed
+        }
+        guard hasValue else { return .successWithoutElement }
+        return isElement ? .resolved : .unexpectedValueType
+    }
 }
 
 enum UTF16SelectionRange {
