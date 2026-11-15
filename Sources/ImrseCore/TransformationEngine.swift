@@ -185,6 +185,7 @@ public final class TransformationEngine {
         discardTarget()
         undoReceipt = nil
         diagnostics.error = nil
+        diagnostics.replacementOutcome = nil
         diagnostics.replacement = "undoing"
         transition(to: .undoing)
         do {
@@ -260,15 +261,23 @@ public final class TransformationEngine {
 
             diagnostics.replacement = "running"
             transition(to: .replacing)
-            do {
-                let receipt = try await selectionAccess.replace(target, with: output)
-                guard activeOperationID == operationID, state == .replacing else { return }
+            let outcome = await selectionAccess.replace(target, with: output)
+            guard activeOperationID == operationID, state == .replacing else { return }
+            diagnostics.replacementOutcome = outcome.status
+            switch outcome {
+            case .applied(let receipt):
                 guard receipt.target == target,
                       receipt.target.text.utf16.elementsEqual(target.text.utf16),
                       receipt.replacement.utf16.elementsEqual(output.utf16)
                 else {
-                    diagnostics.replacement = "failed"
-                    finish(operationID, failure: .replacementFailed, replacementFailed: true)
+                    diagnostics.replacementOutcome = .unconfirmed
+                    diagnostics.targetValid = false
+                    finish(
+                        operationID,
+                        failure: .replacementFailed,
+                        replacementFailed: true,
+                        invalidatesPriorUndo: true
+                    )
                     return
                 }
                 if let previousReceipt = undoReceipt {
@@ -284,8 +293,7 @@ public final class TransformationEngine {
                 diagnostics.generation = "complete"
                 diagnostics.replacement = "replaced"
                 transition(to: .succeeded(unchanged: false))
-            } catch {
-                guard activeOperationID == operationID, state == .replacing else { return }
+            case .notWritten(let error, let invalidatesPriorUndo):
                 let selectionFailureReason = selectionAccess.lastFailureReason
                 let failure = Self.replacementFailure(error)
                 if failure == .targetLost || failure == .staleSelection { diagnostics.targetValid = false }
@@ -293,7 +301,19 @@ public final class TransformationEngine {
                     operationID,
                     failure: failure,
                     replacementFailed: true,
-                    selectionFailureReason: selectionFailureReason
+                    selectionFailureReason: selectionFailureReason,
+                    invalidatesPriorUndo: invalidatesPriorUndo
+                )
+            case .unconfirmed(let error):
+                let selectionFailureReason = selectionAccess.lastFailureReason
+                let failure = Self.replacementFailure(error)
+                diagnostics.targetValid = false
+                finish(
+                    operationID,
+                    failure: failure == .staleSelection ? .replacementFailed : failure,
+                    replacementFailed: true,
+                    selectionFailureReason: selectionFailureReason,
+                    invalidatesPriorUndo: true
                 )
             }
         } catch {
@@ -318,12 +338,13 @@ public final class TransformationEngine {
         _ operationID: UUID,
         failure: ImrseError,
         replacementFailed: Bool = false,
-        selectionFailureReason: SelectionFailureReason? = nil
+        selectionFailureReason: SelectionFailureReason? = nil,
+        invalidatesPriorUndo: Bool = false
     ) {
         guard activeOperationID == operationID else { return }
         invalidateGeneration(cancelTask: false)
         pendingResponseMetadata = nil
-        if replacementFailed && failure == .clipboardPending {
+        if invalidatesPriorUndo {
             if let previousReceipt = undoReceipt {
                 selectionAccess.discard(previousReceipt.target)
             }
@@ -420,7 +441,7 @@ public final class TransformationEngine {
     private static func replacementFailure(_ error: any Error) -> ImrseError {
         guard let error = error as? ImrseError else { return .replacementFailed }
         return switch error {
-        case .targetLost, .staleSelection, .clipboardFailed, .clipboardPending, .permissionRequired: error
+        case .targetLost, .staleSelection, .clipboardFailed, .clipboardPending, .permissionRequired, .cancelled: error
         default: .replacementFailed
         }
     }

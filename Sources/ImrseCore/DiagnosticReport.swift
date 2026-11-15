@@ -54,6 +54,7 @@ public enum DiagnosticReport {
         }
         if let targetValid = metadata.targetValid { fields["targetValid"] = targetValid }
         if let strategy = metadata.strategy { fields["strategy"] = strategy.rawValue }
+        if let outcome = metadata.replacementOutcome { fields["replacementOutcome"] = outcome.rawValue }
         if let nativeRefusal = metadata.nativeRefusalDiagnostic {
             fields["nativeRefusal"] = nativeRefusalFields(nativeRefusal)
         }

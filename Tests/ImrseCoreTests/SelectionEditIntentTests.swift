@@ -394,9 +394,9 @@ private final class LegacySelectionAccess: SelectionAccess {
         guard target.id == self.target.id else { throw ImrseError.targetLost }
     }
 
-    func replace(_ target: SelectionSnapshot, with text: String) async throws -> ReplacementReceipt {
+    func replace(_ target: SelectionSnapshot, with text: String) async -> ReplacementOutcome {
         replacedText.append(text)
-        return ReplacementReceipt(target: target, replacement: text, strategy: .selectedText)
+        return .applied(ReplacementReceipt(target: target, replacement: text, strategy: .selectedText))
     }
 
     func undo(_ receipt: ReplacementReceipt) async throws {
@@ -443,14 +443,14 @@ private final class IntentSelectionAccess: SelectionAccess {
         guard target.id == self.target.id else { throw ImrseError.targetLost }
     }
 
-    func replace(_ target: SelectionSnapshot, with text: String) async throws -> ReplacementReceipt {
+    func replace(_ target: SelectionSnapshot, with text: String) async -> ReplacementOutcome {
         replacedTargets.append(target)
         replacedText.append(text)
-        return ReplacementReceipt(
+        return .applied(ReplacementReceipt(
             target: receiptTarget ?? target,
             replacement: receiptReplacement ?? text,
             strategy: .selectedText
-        )
+        ))
     }
 
     func undo(_ receipt: ReplacementReceipt) async throws {
