@@ -62,36 +62,6 @@ jobs:
       - run: ./scripts/build-app.sh
         env:
           IMRSE_DIST_DIR: ${{ runner.temp }}/imrse-ci-package-validation
-      - name: Archive validation package for controlled local verification
-        shell: bash
-        run: |
-          test "$(uname -m)" = arm64
-          test -z "$(git status --porcelain)"
-          ditto -c -k --sequesterRsrc --keepParent \
-            "$RUNNER_TEMP/imrse-ci-package-validation/imrse.app" \
-            "$RUNNER_TEMP/imrse-validation.zip"
-          python3 - <<'PY'
-          import hashlib, json, os, platform, subprocess
-          from pathlib import Path
-          root = Path(os.environ["RUNNER_TEMP"])
-          record = {
-              "sourceCommitSHA": subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip(),
-              "sourceTreeSHA": subprocess.check_output(["git", "rev-parse", "HEAD^{tree}"], text=True).strip(),
-              "architecture": platform.machine(),
-              "runID": os.environ["GITHUB_RUN_ID"],
-              "runAttempt": os.environ["GITHUB_RUN_ATTEMPT"],
-              "archiveSHA256": hashlib.sha256((root / "imrse-validation.zip").read_bytes()).hexdigest(),
-              "signing": "CI validation only; requires the existing local signer before installation",
-          }
-          (root / "imrse-validation.json").write_text(json.dumps(record, indent=2) + "\n")
-          PY
-      - uses: actions/upload-artifact@v4
-        with:
-          name: imrse-validation-package
-          retention-days: 1
-          path: |
-            ${{ runner.temp }}/imrse-validation.zip
-            ${{ runner.temp }}/imrse-validation.json
   design:
     needs: namespace-qualification
     runs-on: namespace-profile-imrse
