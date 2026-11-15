@@ -146,12 +146,32 @@ public struct ReplacementReceipt: Equatable, Sendable {
     }
 }
 
+public enum ReplacementOutcome: Equatable, Sendable {
+    public enum Status: String, Equatable, Sendable {
+        case applied
+        case notWritten
+        case unconfirmed
+    }
+
+    case applied(ReplacementReceipt)
+    case notWritten(ImrseError, invalidatesPriorUndo: Bool)
+    case unconfirmed(ImrseError)
+
+    public var status: Status {
+        switch self {
+        case .applied: .applied
+        case .notWritten: .notWritten
+        case .unconfirmed: .unconfirmed
+        }
+    }
+}
+
 @MainActor public protocol SelectionAccess: AnyObject {
     var lastFailureReason: SelectionFailureReason? { get }
     func capture() throws -> SelectionSnapshot
     func capture(intent: SelectionEditIntent) throws -> SelectionSnapshot
     func validate(_ target: SelectionSnapshot) throws
-    func replace(_ target: SelectionSnapshot, with text: String) async throws -> ReplacementReceipt
+    func replace(_ target: SelectionSnapshot, with text: String) async -> ReplacementOutcome
     func undo(_ receipt: ReplacementReceipt) async throws
     func discard(_ target: SelectionSnapshot)
 }
@@ -403,6 +423,7 @@ public struct DiagnosticMetadata: Equatable, Sendable {
     public var nativeRefusalDiagnostic: NativeRefusalDiagnostic?
     public var targetValid: Bool?
     public var strategy: ReplacementStrategy?
+    public var replacementOutcome: ReplacementOutcome.Status?
     public var providerName: String?
     public var model: String?
     public var generation = "idle"

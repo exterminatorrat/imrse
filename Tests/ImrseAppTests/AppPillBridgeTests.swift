@@ -969,14 +969,14 @@ private final class RecordingSelectionAccess: SelectionAccess {
 
     func validate(_ target: SelectionSnapshot) throws { try onValidate?() }
 
-    func replace(_ target: SelectionSnapshot, with text: String) async throws -> ReplacementReceipt {
+    func replace(_ target: SelectionSnapshot, with text: String) async -> ReplacementOutcome {
         replaceCount += 1
         replacedTargets.append(target)
         if holdReplacement {
             await withCheckedContinuation { replacementContinuation = $0 }
         }
-        if let replacementError { throw replacementError }
-        return ReplacementReceipt(target: target, replacement: text, strategy: .selectedText)
+        if let replacementError { return .notWritten(replacementError, invalidatesPriorUndo: false) }
+        return .applied(ReplacementReceipt(target: target, replacement: text, strategy: .selectedText))
     }
 
     func undo(_ receipt: ReplacementReceipt) async throws {

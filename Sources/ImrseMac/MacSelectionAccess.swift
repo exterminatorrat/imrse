@@ -440,7 +440,29 @@ public final class MacSelectionAccess: SelectionAccess {
         }
     }
 
-    public func replace(_ target: SelectionSnapshot, with text: String) async throws -> ReplacementReceipt {
+    public func replace(_ target: SelectionSnapshot, with text: String) async -> ReplacementOutcome {
+        let dispatch = ReplacementDispatchState()
+        do {
+            try Task.checkCancellation()
+            return .applied(try await performReplacement(target, with: text, dispatch: dispatch))
+        } catch {
+            let invalidatesPriorUndo = clipboardRecovery.isBlocked
+            let outcome = dispatch.failure(error, invalidatesPriorUndo: invalidatesPriorUndo)
+            if dispatch.dispatched {
+                invalidateCapture(target.id)
+                undoTarget = nil
+            } else if invalidatesPriorUndo {
+                undoTarget = nil
+            }
+            return outcome
+        }
+    }
+
+    private func performReplacement(
+        _ target: SelectionSnapshot,
+        with text: String,
+        dispatch: ReplacementDispatchState
+    ) async throws -> ReplacementReceipt {
         try recoverPendingClipboard()
         try validate(target)
         guard let captured = capturedTarget, captured.snapshot.id == target.id else {
@@ -473,7 +495,8 @@ public final class MacSelectionAccess: SelectionAccess {
                 at: range,
                 with: text,
                 focusedSelection: before,
-                requiredOriginalValue: captured.insertionProof?.value
+                requiredOriginalValue: captured.insertionProof?.value,
+                dispatch: dispatch
             )
             if let insertionValue {
                 guard let value = try wholeValue(captured.handle.element, failure: .replacementFailed),
@@ -1667,7 +1690,8 @@ public final class MacSelectionAccess: SelectionAccess {
         at range: TextRange,
         with replacement: String,
         focusedSelection: NativeSelection,
-        requiredOriginalValue: String? = nil
+        requiredOriginalValue: String? = nil,
+        dispatch: ReplacementDispatchState? = nil
     ) async throws -> AppliedReplacement {
         guard !replacement.isEmpty else { throw ImrseError.emptyOutput }
         let before = try currentSelection(target, allowingEmpty: true)
@@ -1744,7 +1768,12 @@ public final class MacSelectionAccess: SelectionAccess {
                     }
                 },
                 action: {
-                    try self.setAttribute(target.element, kAXSelectedTextAttribute, value: replacement as CFString)
+                    try self.setAttribute(
+                        target.element,
+                        kAXSelectedTextAttribute,
+                        value: replacement as CFString,
+                        dispatch: dispatch
+                    )
                 }
             )
             if status != .success {
@@ -1861,7 +1890,12 @@ public final class MacSelectionAccess: SelectionAccess {
                     }
                 },
                 action: {
-                    try self.setAttribute(target.element, kAXValueAttribute, value: expectedValue as CFString)
+                    try self.setAttribute(
+                        target.element,
+                        kAXValueAttribute,
+                        value: expectedValue as CFString,
+                        dispatch: dispatch
+                    )
                 }
             )
             guard status == .success else {
@@ -1952,7 +1986,8 @@ public final class MacSelectionAccess: SelectionAccess {
             expectedSelection: before,
             oldValue: clipboardValue,
             expectedValue: clipboardExpectedValue,
-            styleProof: styleProof
+            styleProof: styleProof,
+            dispatch: dispatch
         )
         return AppliedReplacement(strategy: .clipboard, focusedSelection: afterPaste, styleProof: styleProof)
     }
@@ -1975,7 +2010,8 @@ public final class MacSelectionAccess: SelectionAccess {
         expectedSelection: NativeSelection,
         oldValue: String,
         expectedValue: String,
-        styleProof: ContenteditableClipboardProof? = nil
+        styleProof: ContenteditableClipboardProof? = nil,
+        dispatch: ReplacementDispatchState? = nil
     ) async throws -> NativeSelection {
         guard Self.eventPostingPermissionGranted else { throw ImrseError.permissionRequired }
         try requireTargetForeground(target)
@@ -2047,6 +2083,7 @@ public final class MacSelectionAccess: SelectionAccess {
             post: {
                 keyDown.flags = .maskCommand
                 keyUp.flags = .maskCommand
+                dispatch?.markDispatched()
                 keyDown.postToPid(target.processID)
                 keyUp.postToPid(target.processID)
             },
@@ -2515,9 +2552,15 @@ public final class MacSelectionAccess: SelectionAccess {
         return settable.boolValue
     }
 
-    private func setAttribute(_ element: AXUIElement, _ attribute: String, value: CFTypeRef) throws -> AXError {
+    private func setAttribute(
+        _ element: AXUIElement,
+        _ attribute: String,
+        value: CFTypeRef,
+        dispatch: ReplacementDispatchState? = nil
+    ) throws -> AXError {
         try configureAXMessaging(element)
-        let status = AXUIElementSetAttributeValue(element, attribute as CFString, value)
+        let action = { AXUIElementSetAttributeValue(element, attribute as CFString, value) }
+        let status = if let dispatch { try dispatch.perform(action) } else { action() }
         if status == .apiDisabled { throw failure(.axReadFailure, .permissionRequired) }
         return status
     }
