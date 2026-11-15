@@ -26,6 +26,39 @@ public struct NativeRefusalDiagnostic: Equatable, Sendable {
         case differentAnchor
     }
 
+    public enum FocusRead: String, Equatable, Sendable {
+        case resolved
+        case noValue
+        case attributeUnsupported
+        case successWithoutElement
+        case unexpectedValueType
+        case readFailed
+
+        public var isReadFailure: Bool {
+            switch self {
+            case .resolved, .noValue, .attributeUnsupported: false
+            case .successWithoutElement, .unexpectedValueType, .readFailed: true
+            }
+        }
+    }
+
+    public enum ForegroundRelation: String, Equatable, Sendable {
+        case target
+        case own
+        case other
+        case unavailable
+    }
+
+    public enum PanelPhase: String, Equatable, Sendable {
+        case unavailable
+        case presentationRequested
+        case presentationReturned
+        case hideRequested
+        case hideReturned
+        case handoffHideRequested
+        case handoffHideReturned
+    }
+
     public struct Undo: Equatable, Sendable {
         public let route: UndoRoute
         public let stage: UndoStage
@@ -40,9 +73,21 @@ public struct NativeRefusalDiagnostic: Equatable, Sendable {
 
     public let undo: Undo?
     public let focus: FocusOutcome?
+    public let focusRead: FocusRead?
+    public let foreground: ForegroundRelation?
+    public let panelPhase: PanelPhase?
 
-    public init(undo: Undo? = nil, focus: FocusOutcome? = nil) {
+    public init(
+        undo: Undo? = nil,
+        focus: FocusOutcome? = nil,
+        focusRead: FocusRead? = nil,
+        foreground: ForegroundRelation? = nil,
+        panelPhase: PanelPhase? = nil
+    ) {
         self.undo = undo
         self.focus = focus
+        self.focusRead = focusRead
+        self.foreground = foreground
+        self.panelPhase = panelPhase
     }
 }

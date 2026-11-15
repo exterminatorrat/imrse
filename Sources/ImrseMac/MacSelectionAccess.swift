@@ -184,7 +184,13 @@ public final class MacSelectionAccess: SelectionAccess {
         let replacementRange: TextRange
     }
 
+    private struct FocusedElementRead {
+        let classification: NativeRefusalDiagnostic.FocusRead
+        let element: AXUIElement?
+    }
+
     public var clipboardFallbackEnabled: Bool
+    public var focusObservationPanelPhase: NativeRefusalDiagnostic.PanelPhase = .unavailable
     public private(set) var capturedScreen: NSScreen?
     public private(set) var lastFailureReason: SelectionFailureReason?
     public private(set) var lastDocumentContextFailure: DocumentContextFailure?
@@ -921,23 +927,63 @@ public final class MacSelectionAccess: SelectionAccess {
         if reason == .captureObservedFocusChange,
            let captured = capturedTarget,
            captured.snapshot.id == targetID {
+            let panelPhase = focusObservationPanelPhase
+            let foreground = foregroundRelation(captured.handle)
             let previousFailureReason = lastFailureReason
+            var focusRead: NativeRefusalDiagnostic.FocusRead?
             let outcome = ObservedFocusValidation.outcome(
                 capturedElement: captured.handle.anchor,
                 readFocusedElement: {
                     defer { self.lastFailureReason = previousFailureReason }
-                    return try self.elementAttribute(
-                        captured.handle.application,
-                        kAXFocusedUIElementAttribute,
-                        failure: .targetLost
-                    )
+                    let read = self.focusedElementRead(captured.handle.application)
+                    focusRead = read.classification
+                    guard !read.classification.isReadFailure else { throw ImrseError.targetLost }
+                    return read.element
                 },
                 sameElement: { self.sameElement($0, $1) }
             )
             guard let outcome else { return }
-            lastNativeRefusalDiagnostic = NativeRefusalDiagnostic(focus: outcome)
+            lastNativeRefusalDiagnostic = NativeRefusalDiagnostic(
+                focus: outcome,
+                focusRead: focusRead,
+                foreground: foreground,
+                panelPhase: panelPhase
+            )
         }
         invalidateCapture(targetID, reason: reason)
+    }
+
+    private func focusedElementRead(_ application: AXUIElement) -> FocusedElementRead {
+        do {
+            try configureAXMessaging(application, failure: .targetLost)
+        } catch {
+            return FocusedElementRead(classification: .readFailed, element: nil)
+        }
+        var value: CFTypeRef?
+        let status = AXUIElementCopyAttributeValue(application, kAXFocusedUIElementAttribute as CFString, &value)
+        let isElement = value.map { CFGetTypeID($0) == AXUIElementGetTypeID() } ?? false
+        let classification = NativeRefusalClassification.focusRead(
+            status: status,
+            hasValue: value != nil,
+            isElement: isElement
+        )
+        guard classification == .resolved, let value else {
+            return FocusedElementRead(classification: classification, element: nil)
+        }
+        return FocusedElementRead(
+            classification: classification,
+            element: unsafeDowncast(value, to: AXUIElement.self)
+        )
+    }
+
+    private func foregroundRelation(_ target: TargetHandle) -> NativeRefusalDiagnostic.ForegroundRelation {
+        guard let frontmostApplication = NSWorkspace.shared.frontmostApplication else { return .unavailable }
+        let processID = frontmostApplication.processIdentifier
+        if processID == ProcessInfo.processInfo.processIdentifier { return .own }
+        guard processID == target.processID,
+              (frontmostApplication.bundleIdentifier ?? "pid:\(processID)") == target.applicationID
+        else { return .other }
+        return .target
     }
 
     private func noteUndoRefusal(

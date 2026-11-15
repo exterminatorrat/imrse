@@ -418,6 +418,12 @@ public struct DiagnosticMetadata: Equatable, Sendable {
         let focus = error == .targetLost && selectionFailureReason == .captureObservedFocusChange
             ? diagnostic.focus : nil
         nativeRefusalDiagnostic = diagnostic.undo == nil && focus == nil
-            ? nil : NativeRefusalDiagnostic(undo: diagnostic.undo, focus: focus)
+            ? nil : NativeRefusalDiagnostic(
+                undo: diagnostic.undo,
+                focus: focus,
+                focusRead: focus == nil ? nil : diagnostic.focusRead,
+                foreground: focus == nil ? nil : diagnostic.foreground,
+                panelPhase: focus == nil ? nil : diagnostic.panelPhase
+            )
     }
 }

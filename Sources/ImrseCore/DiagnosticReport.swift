@@ -80,6 +80,9 @@ public enum DiagnosticReport {
             fields["undo"] = undoFields
         }
         if let focus = diagnostic.focus { fields["focus"] = focus.rawValue }
+        if let focusRead = diagnostic.focusRead { fields["focusRead"] = focusRead.rawValue }
+        if let foreground = diagnostic.foreground { fields["foreground"] = foreground.rawValue }
+        if let panelPhase = diagnostic.panelPhase { fields["panelPhase"] = panelPhase.rawValue }
         return fields
     }
 
