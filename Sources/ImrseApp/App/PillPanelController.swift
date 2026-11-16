@@ -1,16 +1,22 @@
 #if os(macOS)
 import AppKit
 import Combine
+import ImrseCore
+import ImrseMac
+import ImrsePillCore
 import ImrsePillUI
 import SwiftUI
 
 @MainActor
 final class PillPanelController {
+    static let panelStyleMask: NSWindow.StyleMask = [.borderless, .nonactivatingPanel]
     private let model: AppModel
     private var panel: ImrsePanel?
     private var keyMonitor: Any?
+    private var foregroundEscapeMonitor: Any?
     private var subscription: AnyCancellable?
     private var capturedVisibleFrame: NSRect?
+    private let presentationFocus = PillPresentationFocusSession()
 
     init(model: AppModel) {
         self.model = model
@@ -18,13 +24,27 @@ final class PillPanelController {
             .sink { [weak self] lifecycle in
                 guard let self else { return }
                 let phase = lifecycle.phase
+                self.model.selectionAccess.focusObservationPresentationStage = Self.presentationStage(for: phase)
                 guard phase.isVisible else { self.hide(); return }
+                switch phase {
+                case .success, .failure:
+                    self.makeFeedbackNonKey()
+                default:
+                    break
+                }
+                self.updateForegroundEscapeMonitor(for: phase)
+                self.presentationFocus.didChange(to: phase)
                 self.resizePanel(for: PillTokens.width(for: phase))
             }
     }
 
     func present(afterCapturingTargetOn screen: NSScreen?) {
         guard model.pillModel.phase.isVisible else { return }
+        let acceptsInputFocus = Self.acceptsInputFocus(for: model.pillModel.phase)
+        model.selectionAccess.focusObservationPresentationStage = Self.presentationStage(for: model.pillModel.phase)
+        if acceptsInputFocus {
+            presentationFocus.begin(model.selectionAccess.presentationFocusReturn)
+        }
         let pointerScreen = NSScreen.screens.first { NSMouseInRect(NSEvent.mouseLocation, $0.frame, false) }
         guard let screen = screen ?? pointerScreen ?? NSScreen.main else { return }
 
@@ -33,14 +53,62 @@ final class PillPanelController {
         let panel = makePanelIfNeeded()
         panel.setFrame(Self.frame(width: PillTokens.width(for: model.pillModel.phase), visibleFrame: visible), display: false)
         model.selectionAccess.focusObservationPanelPhase = .presentationRequested
-        panel.makeKeyAndOrderFront(nil)
-        panel.makeFirstResponder(panel.contentView)
+        if acceptsInputFocus {
+            panel.acceptsKeyFocus = true
+            NSApp.activate()
+            panel.makeKeyAndOrderFront(nil)
+            panel.makeFirstResponder(panel.contentView)
+        } else {
+            panel.acceptsKeyFocus = false
+            panel.orderFrontRegardless()
+        }
         model.selectionAccess.focusObservationPanelPhase = .presentationReturned
         installKeyMonitor()
+        updateForegroundEscapeMonitor(for: model.pillModel.phase)
     }
 
     func hideForFocusHandoff() {
         hide(forFocusHandoff: true)
+    }
+
+    static func acceptsInputFocus(for phase: PillPhase) -> Bool {
+        phase == .input
+    }
+
+    static func presentationStage(for phase: PillPhase) -> NativeRefusalDiagnostic.PresentationStage {
+        switch phase {
+        case .hidden: return .hidden
+        case .input: return .input
+        case .processing: return .processing
+        case .applying: return .applying
+        case .success: return .success
+        case .failure: return .failure
+        }
+    }
+
+    static func dismissesOnForegroundEscape(for phase: PillPhase) -> Bool {
+        switch phase {
+        case .success, .failure: return true
+        default: return false
+        }
+    }
+
+    static func isPlainEscape(keyCode: UInt16, isRepeat: Bool, modifiers: NSEvent.ModifierFlags) -> Bool {
+        keyCode == 53
+            && !isRepeat
+            && modifiers.intersection([.command, .option, .control, .shift]).isEmpty
+    }
+
+    func invalidatePresentationFocusReturn() {
+        presentationFocus.invalidate()
+    }
+
+    private func makeFeedbackNonKey() {
+        panel?.acceptsKeyFocus = false
+        if let panel, panel.isKeyWindow {
+            panel.orderOut(nil)
+            panel.orderFrontRegardless()
+        }
     }
 
     static func frame(width: CGFloat, visibleFrame: CGRect) -> CGRect {
@@ -67,7 +135,7 @@ final class PillPanelController {
                 origin: .zero,
                 size: NSSize(width: PillTokens.width(for: .input) + 2 * PillTokens.shadowPadding, height: PillTokens.height + 2 * PillTokens.shadowPadding)
             ),
-            styleMask: [.borderless, .nonactivatingPanel],
+            styleMask: Self.panelStyleMask,
             backing: .buffered,
             defer: false
         )
@@ -94,10 +162,15 @@ final class PillPanelController {
     private func installKeyMonitor() {
         guard keyMonitor == nil else { return }
         keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
-            guard let self,
-                  let panel = self.panel,
-                  event.window?.windowNumber == panel.windowNumber
-            else { return event }
+            guard let self, let panel = self.panel else { return event }
+
+            if event.window == nil,
+               Self.dismissesOnForegroundEscape(for: self.model.pillModel.phase),
+               Self.isPlainEscape(keyCode: event.keyCode, isRepeat: event.isARepeat, modifiers: event.modifierFlags) {
+                self.model.escape()
+                return nil
+            }
+            guard event.window?.windowNumber == panel.windowNumber else { return event }
 
             if event.keyCode == 53 {
                 guard !Self.hasMarkedText(in: event.window) else { return event }
@@ -126,11 +199,38 @@ final class PillPanelController {
         (window?.firstResponder as? NSTextView)?.hasMarkedText() == true
     }
 
+    private func updateForegroundEscapeMonitor(for phase: PillPhase) {
+        guard Self.dismissesOnForegroundEscape(for: phase) else {
+            removeForegroundEscapeMonitor()
+            return
+        }
+        guard foregroundEscapeMonitor == nil else { return }
+        foregroundEscapeMonitor = NSEvent.addGlobalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            guard let self,
+                  Self.dismissesOnForegroundEscape(for: self.model.pillModel.phase),
+                  Self.isPlainEscape(keyCode: event.keyCode, isRepeat: event.isARepeat, modifiers: event.modifierFlags)
+            else { return }
+            self.model.escape()
+        }
+    }
+
+    private func removeForegroundEscapeMonitor() {
+        if let foregroundEscapeMonitor {
+            NSEvent.removeMonitor(foregroundEscapeMonitor)
+            self.foregroundEscapeMonitor = nil
+        }
+    }
+
     private func hide(forFocusHandoff: Bool = false) {
         model.selectionAccess.focusObservationPanelPhase = forFocusHandoff ? .handoffHideRequested : .hideRequested
         panel?.orderOut(nil)
+        if !forFocusHandoff {
+            panel?.acceptsKeyFocus = false
+            presentationFocus.didChange(to: .hidden)
+        }
         model.selectionAccess.focusObservationPanelPhase = forFocusHandoff ? .handoffHideReturned : .hideReturned
         capturedVisibleFrame = nil
+        removeForegroundEscapeMonitor()
         if let keyMonitor {
             NSEvent.removeMonitor(keyMonitor)
             self.keyMonitor = nil
@@ -138,8 +238,36 @@ final class PillPanelController {
     }
 }
 
+@MainActor
+final class PillPresentationFocusSession {
+    private var focusReturn: ApplicationFocusReturn?
+
+    func begin(_ token: ApplicationFocusReturn?) {
+        invalidate()
+        focusReturn = token
+    }
+
+    func didChange(to phase: PillPhase) {
+        switch phase {
+        case .hidden, .success, .failure:
+            let token = focusReturn
+            focusReturn = nil
+            token?.finishPresentation()
+        default:
+            break
+        }
+    }
+
+    func invalidate() {
+        let token = focusReturn
+        focusReturn = nil
+        token?.invalidate()
+    }
+}
+
 private final class ImrsePanel: NSPanel {
-    override var canBecomeKey: Bool { true }
+    var acceptsKeyFocus = false
+    override var canBecomeKey: Bool { acceptsKeyFocus }
     override var canBecomeMain: Bool { false }
 }
 #endif

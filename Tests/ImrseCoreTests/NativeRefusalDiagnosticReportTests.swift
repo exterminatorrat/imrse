@@ -266,6 +266,46 @@ struct NativeRefusalDiagnosticReportTests {
         #expect(refusal["panelPhase"] as? String == phase.rawValue)
     }
 
+    @Test(arguments: [
+        NativeRefusalDiagnostic.PresentationStage.unavailable,
+        .hidden,
+        .input,
+        .processing,
+        .applying,
+        .success,
+        .failure
+    ])
+    func everyPresentationStageRendersItsOwnName(_ stage: NativeRefusalDiagnostic.PresentationStage) throws {
+        var metadata = DiagnosticMetadata()
+        metadata.nativeRefusalDiagnostic = .init(focus: .missingFocusedElement, presentationStage: stage)
+
+        let refusal = try #require(try fields(metadata)["nativeRefusal"] as? [String: Any])
+        #expect(refusal["presentationStage"] as? String == stage.rawValue)
+    }
+
+    @Test func presentationStageFollowsItsFocusEvidenceThroughAttachment() throws {
+        let diagnostic = NativeRefusalDiagnostic(
+            undo: .init(route: .generic, stage: .preflight),
+            focus: .missingFocusedElement,
+            focusRead: .noValue,
+            foreground: .target,
+            panelPhase: .presentationReturned,
+            presentationStage: .input
+        )
+        var metadata = DiagnosticMetadata()
+        metadata.error = .targetLost
+        metadata.selectionFailureReason = .captureObservedFocusChange
+        metadata.attachNativeRefusal(diagnostic)
+
+        let refusal = try #require(try fields(metadata)["nativeRefusal"] as? [String: Any])
+        #expect(refusal["presentationStage"] as? String == "input")
+
+        metadata.selectionFailureReason = .captureObservedSelectionChange
+        metadata.attachNativeRefusal(diagnostic)
+        let unrelated = try #require(try fields(metadata)["nativeRefusal"] as? [String: Any])
+        #expect(Set(unrelated.keys) == Set(["undo"]))
+    }
+
     @Test func focusEvidenceValuesStayInsideTheirClosedSets() throws {
         var metadata = DiagnosticMetadata()
         metadata.nativeRefusalDiagnostic = .init(
@@ -276,6 +316,7 @@ struct NativeRefusalDiagnosticReportTests {
         )
 
         let refusal = try #require(try fields(metadata)["nativeRefusal"] as? [String: Any])
+        #expect(refusal["presentationStage"] == nil)
         #expect(Set(["resolved", "noValue", "attributeUnsupported", "successWithoutElement",
                      "unexpectedValueType", "readFailed"]).contains(refusal["focusRead"] as? String ?? ""))
         #expect(Set(["target", "own", "other", "unavailable"]).contains(refusal["foreground"] as? String ?? ""))

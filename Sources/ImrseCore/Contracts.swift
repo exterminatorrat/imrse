@@ -170,6 +170,7 @@ public enum ReplacementOutcome: Equatable, Sendable {
     var lastFailureReason: SelectionFailureReason? { get }
     func capture() throws -> SelectionSnapshot
     func capture(intent: SelectionEditIntent) throws -> SelectionSnapshot
+    func prepareForReplacement(_ target: SelectionSnapshot) async throws
     func validate(_ target: SelectionSnapshot) throws
     func replace(_ target: SelectionSnapshot, with text: String) async -> ReplacementOutcome
     func undo(_ receipt: ReplacementReceipt) async throws
@@ -179,6 +180,8 @@ public enum ReplacementOutcome: Equatable, Sendable {
 @MainActor
 public extension SelectionAccess {
     var lastFailureReason: SelectionFailureReason? { nil }
+
+    func prepareForReplacement(_ target: SelectionSnapshot) async throws {}
 
     func capture(intent: SelectionEditIntent) throws -> SelectionSnapshot {
         guard intent == .replaceSelection else { throw ImrseError.insertionUnavailable }
@@ -444,7 +447,8 @@ public struct DiagnosticMetadata: Equatable, Sendable {
                 focus: focus,
                 focusRead: focus == nil ? nil : diagnostic.focusRead,
                 foreground: focus == nil ? nil : diagnostic.foreground,
-                panelPhase: focus == nil ? nil : diagnostic.panelPhase
+                panelPhase: focus == nil ? nil : diagnostic.panelPhase,
+                presentationStage: focus == nil ? nil : diagnostic.presentationStage
             )
     }
 }

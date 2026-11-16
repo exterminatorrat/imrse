@@ -116,6 +116,7 @@ struct FocusedElementReadClassificationTests {
 
     @Test func panelPhaseDefaultsToUnavailable() {
         #expect(MacSelectionAccess().focusObservationPanelPhase == .unavailable)
+        #expect(MacSelectionAccess().focusObservationPresentationStage == .unavailable)
     }
 
     @Test func thePanelPhaseContractKeepsItsFrozenNames() {
@@ -126,6 +127,16 @@ struct FocusedElementReadClassificationTests {
         #expect(NativeRefusalDiagnostic.PanelPhase.hideReturned.rawValue == "hideReturned")
         #expect(NativeRefusalDiagnostic.PanelPhase.handoffHideRequested.rawValue == "handoffHideRequested")
         #expect(NativeRefusalDiagnostic.PanelPhase.handoffHideReturned.rawValue == "handoffHideReturned")
+    }
+
+    @Test func thePresentationStageContractKeepsItsFrozenNames() {
+        #expect(NativeRefusalDiagnostic.PresentationStage.unavailable.rawValue == "unavailable")
+        #expect(NativeRefusalDiagnostic.PresentationStage.hidden.rawValue == "hidden")
+        #expect(NativeRefusalDiagnostic.PresentationStage.input.rawValue == "input")
+        #expect(NativeRefusalDiagnostic.PresentationStage.processing.rawValue == "processing")
+        #expect(NativeRefusalDiagnostic.PresentationStage.applying.rawValue == "applying")
+        #expect(NativeRefusalDiagnostic.PresentationStage.success.rawValue == "success")
+        #expect(NativeRefusalDiagnostic.PresentationStage.failure.rawValue == "failure")
     }
 }
 
