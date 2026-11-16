@@ -22,6 +22,21 @@ final class AppMenuWindowTests: XCTestCase {
         XCTAssertNil(MenuBarClickRoute.resolve(eventType: .otherMouseUp, modifierFlags: []))
     }
 
+    func testReopeningSettingsSelectsGeneralWithoutCreatingAnotherWindow() throws {
+        _ = NSApplication.shared
+        let coordinator = AppCoordinator(model: AppModel(previewState: .settings))
+
+        coordinator.openSettings(tab: .advanced)
+        let window = try XCTUnwrap(NSApp.windows.first { $0.title == "Settings" && $0.isVisible })
+        defer { window.close() }
+        XCTAssertEqual(coordinator.settingsNavigation?.selectedTab, .advanced)
+
+        coordinator.openSettingsFromMenuItem(NSMenuItem())
+        let reopenedWindow = try XCTUnwrap(NSApp.windows.first { $0.title == "Settings" && $0.isVisible })
+        XCTAssertTrue(window === reopenedWindow)
+        XCTAssertEqual(coordinator.settingsNavigation?.selectedTab, .general)
+    }
+
     func testPreviewConfigurationNeverShowsStatusItem() {
         XCTAssertTrue(MenuBarStatusItemPolicy.shouldShow(showInMenuBar: true, isPreviewMode: false))
         XCTAssertFalse(MenuBarStatusItemPolicy.shouldShow(showInMenuBar: false, isPreviewMode: false))

@@ -39,23 +39,37 @@ enum SettingsTab: String, CaseIterable, Hashable {
     }
 }
 
+@MainActor
+final class SettingsNavigationModel: ObservableObject {
+    @Published var selectedTab: SettingsTab
+
+    init(initialTab: SettingsTab = .general) {
+        selectedTab = initialTab
+    }
+}
+
 struct SettingsView: View {
     @ObservedObject var model: AppModel
     @Environment(\.colorScheme) private var systemColorScheme
-    @State private var selectedTab: SettingsTab
+    @ObservedObject private var navigation: SettingsNavigationModel
     @State private var requestedPresetID: String?
     private let initialModelProvider: ModelProviderSection?
 
-    init(model: AppModel, initialTab: SettingsTab = .general, initialModelProvider: ModelProviderSection? = nil) {
+    init(
+        model: AppModel,
+        initialTab: SettingsTab = .general,
+        initialModelProvider: ModelProviderSection? = nil,
+        navigation: SettingsNavigationModel? = nil
+    ) {
         self.model = model
         self.initialModelProvider = initialModelProvider
-        _selectedTab = State(initialValue: initialTab)
+        self.navigation = navigation ?? SettingsNavigationModel(initialTab: initialTab)
         _requestedPresetID = State(initialValue: nil)
     }
 
     var body: some View {
         HStack(spacing: 0) {
-            SettingsSidebar(selection: $selectedTab)
+            SettingsSidebar(selection: $navigation.selectedTab)
 
             selectedContent
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
@@ -70,10 +84,10 @@ struct SettingsView: View {
 
     @ViewBuilder
     private var selectedContent: some View {
-        switch selectedTab {
+        switch navigation.selectedTab {
         case .general:
             GeneralSettingsPane(model: model) {
-                selectedTab = .shortcuts
+                navigation.selectedTab = .shortcuts
             }
         case .models:
             ModelsSettingsPane(model: model, initialSection: initialModelProvider)
@@ -84,9 +98,9 @@ struct SettingsView: View {
                 model: model,
                 onEditPreset: { presetID in
                     requestedPresetID = presetID
-                    selectedTab = .presets
+                    navigation.selectedTab = .presets
                 },
-                onCreatePreset: { selectedTab = .presets }
+                onCreatePreset: { navigation.selectedTab = .presets }
             )
         case .advanced:
             AdvancedSettingsPane(model: model)

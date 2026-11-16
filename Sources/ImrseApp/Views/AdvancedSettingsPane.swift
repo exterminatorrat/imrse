@@ -27,10 +27,9 @@ struct AdvancedSettingsPane: View {
                 ) {
                     VStack(spacing: 12) {
                         ImrseLabeledRow("Allow clipboard fallback") {
-                            Toggle("", isOn: clipboardFallbackBinding)
+                            Toggle("Allow clipboard fallback", isOn: clipboardFallbackBinding)
                                 .labelsHidden()
-                                .toggleStyle(.switch)
-                                .tint(.primary)
+                                .toggleStyle(ImrseMonochromeToggleStyle())
                                 .disabled(!model.canChangeSettings)
                         }
 
