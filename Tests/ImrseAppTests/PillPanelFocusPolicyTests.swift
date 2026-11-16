@@ -69,6 +69,32 @@ struct PillPanelFocusPolicyTests {
         }
     }
 
+    @Test func foregroundEscapeDismissesTheNonKeyTerminalFeedback() {
+        let id = UUID()
+        for phase in [PillPhase.success(id), .failure(id, "Provider failure")] {
+            #expect(!PillPanelController.acceptsInputFocus(for: phase))
+            #expect(PillPanelController.dismissesOnForegroundEscape(for: phase))
+        }
+    }
+
+    @Test func foregroundEscapeLeavesInputAndInFlightPresentationsAlone() {
+        let id = UUID()
+        for phase in [PillPhase.hidden, .input, .processing(id), .applying(id)] {
+            #expect(!PillPanelController.dismissesOnForegroundEscape(for: phase))
+        }
+    }
+
+    @Test func foregroundEscapeRequiresAPlainUnmodifiedPress() {
+        #expect(PillPanelController.isPlainEscape(keyCode: 53, isRepeat: false, modifiers: []))
+        #expect(PillPanelController.isPlainEscape(keyCode: 53, isRepeat: false, modifiers: .function))
+        #expect(PillPanelController.isPlainEscape(keyCode: 53, isRepeat: false, modifiers: .capsLock))
+        #expect(!PillPanelController.isPlainEscape(keyCode: 53, isRepeat: true, modifiers: []))
+        for modifier in [NSEvent.ModifierFlags.command, .option, .control, .shift] {
+            #expect(!PillPanelController.isPlainEscape(keyCode: 53, isRepeat: false, modifiers: modifier))
+        }
+        #expect(!PillPanelController.isPlainEscape(keyCode: 36, isRepeat: false, modifiers: []))
+    }
+
     private func makeToken(_ counter: FocusReturnCounter) -> ApplicationFocusReturn {
         let date = Date(timeIntervalSince1970: 1_700_000_000)
         return ApplicationFocusReturn(

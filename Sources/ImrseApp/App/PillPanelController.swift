@@ -12,6 +12,7 @@ final class PillPanelController {
     private let model: AppModel
     private var panel: ImrsePanel?
     private var keyMonitor: Any?
+    private var foregroundEscapeMonitor: Any?
     private var subscription: AnyCancellable?
     private var capturedVisibleFrame: NSRect?
     private let presentationFocus = PillPresentationFocusSession()
@@ -29,6 +30,7 @@ final class PillPanelController {
                 default:
                     break
                 }
+                self.updateForegroundEscapeMonitor(for: phase)
                 self.presentationFocus.didChange(to: phase)
                 self.resizePanel(for: PillTokens.width(for: phase))
             }
@@ -59,6 +61,7 @@ final class PillPanelController {
         }
         model.selectionAccess.focusObservationPanelPhase = .presentationReturned
         installKeyMonitor()
+        updateForegroundEscapeMonitor(for: model.pillModel.phase)
     }
 
     func hideForFocusHandoff() {
@@ -67,6 +70,19 @@ final class PillPanelController {
 
     static func acceptsInputFocus(for phase: PillPhase) -> Bool {
         phase == .input
+    }
+
+    static func dismissesOnForegroundEscape(for phase: PillPhase) -> Bool {
+        switch phase {
+        case .success, .failure: return true
+        default: return false
+        }
+    }
+
+    static func isPlainEscape(keyCode: UInt16, isRepeat: Bool, modifiers: NSEvent.ModifierFlags) -> Bool {
+        keyCode == 53
+            && !isRepeat
+            && modifiers.intersection([.command, .option, .control, .shift]).isEmpty
     }
 
     func invalidatePresentationFocusReturn() {
@@ -132,10 +148,15 @@ final class PillPanelController {
     private func installKeyMonitor() {
         guard keyMonitor == nil else { return }
         keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
-            guard let self,
-                  let panel = self.panel,
-                  event.window?.windowNumber == panel.windowNumber
-            else { return event }
+            guard let self, let panel = self.panel else { return event }
+
+            if event.window == nil,
+               Self.dismissesOnForegroundEscape(for: self.model.pillModel.phase),
+               Self.isPlainEscape(keyCode: event.keyCode, isRepeat: event.isARepeat, modifiers: event.modifierFlags) {
+                self.model.escape()
+                return nil
+            }
+            guard event.window?.windowNumber == panel.windowNumber else { return event }
 
             if event.keyCode == 53 {
                 guard !Self.hasMarkedText(in: event.window) else { return event }
@@ -164,6 +185,28 @@ final class PillPanelController {
         (window?.firstResponder as? NSTextView)?.hasMarkedText() == true
     }
 
+    private func updateForegroundEscapeMonitor(for phase: PillPhase) {
+        guard Self.dismissesOnForegroundEscape(for: phase) else {
+            removeForegroundEscapeMonitor()
+            return
+        }
+        guard foregroundEscapeMonitor == nil else { return }
+        foregroundEscapeMonitor = NSEvent.addGlobalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            guard let self,
+                  Self.dismissesOnForegroundEscape(for: self.model.pillModel.phase),
+                  Self.isPlainEscape(keyCode: event.keyCode, isRepeat: event.isARepeat, modifiers: event.modifierFlags)
+            else { return }
+            self.model.escape()
+        }
+    }
+
+    private func removeForegroundEscapeMonitor() {
+        if let foregroundEscapeMonitor {
+            NSEvent.removeMonitor(foregroundEscapeMonitor)
+            self.foregroundEscapeMonitor = nil
+        }
+    }
+
     private func hide(forFocusHandoff: Bool = false) {
         model.selectionAccess.focusObservationPanelPhase = forFocusHandoff ? .handoffHideRequested : .hideRequested
         panel?.orderOut(nil)
@@ -173,6 +216,7 @@ final class PillPanelController {
         }
         model.selectionAccess.focusObservationPanelPhase = forFocusHandoff ? .handoffHideReturned : .hideReturned
         capturedVisibleFrame = nil
+        removeForegroundEscapeMonitor()
         if let keyMonitor {
             NSEvent.removeMonitor(keyMonitor)
             self.keyMonitor = nil
