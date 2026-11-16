@@ -559,11 +559,16 @@ public final class MacSelectionAccess: SelectionAccess {
         return receipt
     }
 
+    public func isClipboardUndoDisabled(_ receipt: ReplacementReceipt) -> Bool {
+        receipt.strategy == .clipboard && !clipboardFallbackEnabled
+    }
+
     public func undo(_ receipt: ReplacementReceipt) async throws {
         lastWriteAttempt = nil
         lastFailureReason = nil
         lastNativeRefusalDiagnostic = nil
         defer { undoRoute = nil }
+        guard !isClipboardUndoDisabled(receipt) else { throw ImrseError.clipboardUndoDisabled }
         try recoverPendingClipboard()
         guard let undoTarget, sameReceipt(receipt, undoTarget.receipt) else {
             throw ImrseError.undoUnavailable
@@ -1768,27 +1773,22 @@ public final class MacSelectionAccess: SelectionAccess {
             return result
         }
 
-        let selectedTextSettable: Bool
-        if before.range == range, sameText(before.text, expectedText) {
-            selectedTextSettable = try attributeIsSettable(target.element, kAXSelectedTextAttribute)
-        } else {
-            selectedTextSettable = false
-        }
-        let capabilities = SelectionWriteCapabilities(
-            selectedTextSettable: selectedTextSettable,
-            permitsWholeValueWrite: allowsWholeValueWrite,
-            clipboardFallbackEnabled: clipboardFallbackEnabled
-        )
         let upfrontClipboard = QualifiedClipboardRoute.isCandidate(
             enabled: clipboardFallbackEnabled, applicationID: target.applicationID,
             role: target.role, intent: target.intent
         ) && hasVerifiedWebAreaAncestor(target)
+        let plan = try SelectionWritePlan.choose(
+            prefersQualifiedClipboard: upfrontClipboard,
+            clipboardEnabled: clipboardFallbackEnabled,
+            selectedTextSettable: { try self.attributeIsSettable(target.element, kAXSelectedTextAttribute) },
+            wholeValueAvailable: allowsWholeValueWrite && oldValue != nil && expectedValue != nil,
+            valueSettable: { try self.attributeIsSettable(target.element, kAXValueAttribute) }
+        )
         // Diagnostic evidence only; never grants fallback or write authority.
         let diagnosticBaseline = oldValue ?? diagnosticWholeValue(target.element)
         var selectedTextFallbackBaseline: String?
         var selectedTextOutcome: SelectionMutationOutcome<AppliedReplacement>?
-        if before.range == range, sameText(before.text, expectedText),
-           !upfrontClipboard, capabilities.canConsider(.selectedText) {
+        if plan == .selectedText {
             let status = try VerifiedAction.perform(
                 verify: {
                     let current = try self.currentSelection(target, allowingEmpty: true)
@@ -1921,19 +1921,16 @@ public final class MacSelectionAccess: SelectionAccess {
             case .confirmedApplied(let applied):
                 return applied
             case .provedNotApplied:
-                break
+                // Even an apparently unchanged result cannot authorize a new route
+                // after native dispatch. Keep the original plan terminal.
+                invalidateAfterUnverifiedWrite(target.id, reason: .replacementEvidenceMismatch)
+                throw ImrseError.replacementFailed
             case .indeterminate(let reason):
                 invalidateAfterUnverifiedWrite(target.id, reason: reason)
                 throw ImrseError.replacementFailed
             }
         }
-        let selectedTextNoOpValidated = selectedTextOutcome?.allowsFallback ?? false
-
-        if !upfrontClipboard, !selectedTextNoOpValidated,
-           capabilities.canConsider(.valueRange),
-           let oldValue,
-           let expectedValue,
-           try attributeIsSettable(target.element, kAXValueAttribute) {
+        if plan == .valueRange, let oldValue, let expectedValue {
             let status = try VerifiedAction.perform(
                 verify: {
                     let stillCurrent = try self.currentSelection(target, allowingEmpty: true)
@@ -1984,8 +1981,7 @@ public final class MacSelectionAccess: SelectionAccess {
             throw ImrseError.replacementFailed
         }
 
-        guard (selectedTextOutcome?.allowsFallback ?? true),
-              capabilities.canConsider(.clipboard), before.range == range, sameText(before.text, expectedText) else {
+        guard plan == .clipboard, before.range == range, sameText(before.text, expectedText) else {
             throw ImrseError.replacementFailed
         }
         guard let prepareForClipboardPaste else { throw ImrseError.clipboardFailed }
@@ -2027,7 +2023,6 @@ public final class MacSelectionAccess: SelectionAccess {
             }
             clipboardValue = value
         } catch {
-            if selectedTextNoOpValidated { invalidateAfterUnverifiedWrite(target.id) }
             throw error
         }
         guard let displayRange = clipboardDisplayRange(range, proof: styleProof),

@@ -335,10 +335,9 @@ extension ReplacementDispatchStateTests {
         let dispatch = ReplacementDispatchState()
         var setters = 0
         var pastes = 0
-        let clipboard = QualifiedClipboardRoute.prefersClipboard(enabled: true,
-            applicationID: "ai.capy.desktop", role: "AXTextArea", intent: .replaceSelection,
-            verifiedWebArea: true)
-        if clipboard { try dispatch.perform { pastes += 1 } }
+        let plan = try SelectionWritePlan.choose(prefersQualifiedClipboard: true, clipboardEnabled: true,
+            selectedTextSettable: { true }, wholeValueAvailable: true, valueSettable: { true })
+        if plan == .clipboard { try dispatch.perform { pastes += 1 } }
         else { try dispatch.perform { setters += 1 } }
         #expect(setters == 0)
         #expect(pastes == 1)

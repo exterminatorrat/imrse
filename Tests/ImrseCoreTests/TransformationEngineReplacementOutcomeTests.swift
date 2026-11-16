@@ -86,6 +86,45 @@ struct TransformationEngineReplacementOutcomeTests {
         #expect(!engine.canUndo)
     }
 
+    @Test func clipboardOptOutPreservesReceiptWithoutDispatchThenRevalidatesWhenEnabled() async {
+        let original = snapshot("original")
+        let access = ScriptedSelectionAccess(target: original)
+        access.outcomes = [.applied(ReplacementReceipt(target: original, replacement: "rewritten", strategy: .clipboard))]
+        let engine = TransformationEngine(selectionAccess: access, textProvider: FixedTextProvider(output: "rewritten"))
+        engine.invoke()
+        engine.submit(instruction: "", provider: configuration)
+        await waitForState(engine, .succeeded(unchanged: false))
+        access.clipboardUndoDisabled = true
+        await engine.undo()
+        #expect(engine.state == .failed(.clipboardUndoDisabled))
+        #expect(engine.canUndo)
+        #expect(access.undoCount == 0)
+        #expect(engine.diagnostics.writeAttempt == nil)
+        access.clipboardUndoDisabled = false
+        await engine.undo()
+        #expect(access.undoCount == 1)
+        #expect(engine.state == .succeeded(unchanged: false))
+        #expect(!engine.canUndo)
+    }
+
+    @Test func clipboardReenableDoesNotBypassStaleTargetRefusal() async {
+        let original = snapshot("original")
+        let access = ScriptedSelectionAccess(target: original)
+        access.outcomes = [.applied(ReplacementReceipt(target: original, replacement: "rewritten", strategy: .clipboard))]
+        let engine = TransformationEngine(selectionAccess: access, textProvider: FixedTextProvider(output: "rewritten"))
+        engine.invoke()
+        engine.submit(instruction: "", provider: configuration)
+        await waitForState(engine, .succeeded(unchanged: false))
+        access.clipboardUndoDisabled = true
+        await engine.undo()
+        access.clipboardUndoDisabled = false
+        access.undoError = .staleSelection
+        await engine.undo()
+        #expect(access.undoCount == 1)
+        #expect(engine.state == .failed(.undoUnavailable))
+        #expect(!engine.canUndo)
+    }
+
     @Test func attemptedWriteSurvivesFailureCleanupAndResetsOnNewInvocation() async {
         let access = ScriptedSelectionAccess(target: snapshot("original"))
         var attempt = WriteAttemptDiagnostic(strategy: .selectedText)
@@ -236,6 +275,9 @@ private struct FixedTextProvider: TextProvider {
 private final class ScriptedSelectionAccess: SelectionAccess {
     var target: SelectionSnapshot
     var outcomes: [ReplacementOutcome] = []
+    var clipboardUndoDisabled = false
+    var undoCount = 0
+    var undoError: ImrseError?
     var replacementReason: SelectionFailureReason?
     var replacementAttempt: WriteAttemptDiagnostic?
     private(set) var lastWriteAttempt: WriteAttemptDiagnostic?
@@ -268,8 +310,14 @@ private final class ScriptedSelectionAccess: SelectionAccess {
         return outcomes.removeFirst()
     }
 
+    func isClipboardUndoDisabled(_ receipt: ReplacementReceipt) -> Bool {
+        receipt.strategy == .clipboard && clipboardUndoDisabled
+    }
+
     func undo(_ receipt: ReplacementReceipt) async throws {
+        undoCount += 1
         lastFailureReason = nil
+        if let undoError { throw undoError }
     }
 
     func discard(_ target: SelectionSnapshot) {

@@ -25,3 +25,11 @@ Candidate base: 48680121, retaining the subsequent focus diagnostic corrections.
 ## Follow-up, not claimed implemented
 
 Bounded read-only AX confirmation may improve asynchronous hosts, but cannot solve a persistent setter no-op by itself. An owned-focus-handoff suspension must retain the immutable original target and revalidate it strictly, and needs independent focus-loss reproduction first. Neither this candidate nor any finite matrix establishes universal host support.
+
+## Candidate 2 refinement
+
+The Debug candidate demonstrated clipboard-enabled successful replacements in the tested Vivaldi input, textarea and contenteditable, Capy composer, and Safari input. Verified receipt Undo passed for the tested Vivaldi/Capy flows. Native TextEdit remained functional. A strict clipboard-disabled Vivaldi control remained unchanged with accepted AX setter/original readback evidence. Cancellation and a different-field transition refused without altering the disposable fields. These bounded trials are not statistical reliability claims.
+
+Follow-up changes select one production write plan with lazy capability probes, and describe the opt-in as compatible clipboard editing rather than post-failure fallback. A newly observed setting-change edge case is handled explicitly: a clipboard receipt cannot be undone while clipboard editing is disabled. This is refused before mutation, and the engine preserves the receipt so enabling the setting permits a fresh, fully validated Undo attempt. Enabling does not override stale-target or changed-content checks.
+
+One existing Vision OCR-backed panel test fails on this Mac with e5rt error 13. This remains a disclosed test-environment verification gap; it was not weakened or deleted to obtain a green result.

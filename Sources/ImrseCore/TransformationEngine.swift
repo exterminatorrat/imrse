@@ -183,6 +183,19 @@ public final class TransformationEngine {
         }
 
         discardTarget()
+        if selectionAccess.isClipboardUndoDisabled(receipt) {
+            diagnostics.error = .clipboardUndoDisabled
+            diagnostics.selectionFailureReason = nil
+            diagnostics.writeAttempt = nil
+            diagnostics.replacementOutcome = nil
+            diagnostics.targetValid = nil
+            diagnostics.generation = "idle"
+            diagnostics.replacement = "failed"
+            // Configuration refusal is proven non-writing. Preserve this receipt;
+            // re-enabling only permits a future attempt, not bypassing validation.
+            transition(to: .failed(.clipboardUndoDisabled))
+            return
+        }
         undoReceipt = nil
         diagnostics.error = nil
         diagnostics.replacementOutcome = nil
