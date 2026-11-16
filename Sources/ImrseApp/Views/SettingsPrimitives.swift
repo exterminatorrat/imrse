@@ -420,7 +420,7 @@ struct ImrseMonochromeToggleStyle: ToggleStyle {
         }
         .buttonStyle(.plain)
         .animation(reduceMotion ? nil : .easeInOut(duration: 0.18), value: configuration.isOn)
-        .accessibilityLabel(configuration.label)
+        // ToggleStyle preserves the Toggle's accessible label and role.
         .accessibilityValue(configuration.isOn ? "On" : "Off")
     }
 
