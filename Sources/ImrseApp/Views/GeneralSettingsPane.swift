@@ -34,10 +34,9 @@ struct GeneralSettingsPane: View {
                         ImrseDivider()
 
                         ImrseLabeledRow("Show in menu bar", subtitle: "Keep imrse within easy reach.") {
-                            Toggle("", isOn: showInMenuBarBinding)
+                            Toggle("Show in menu bar", isOn: showInMenuBarBinding)
                                 .labelsHidden()
-                                .toggleStyle(.switch)
-                                .tint(.primary)
+                                .toggleStyle(ImrseMonochromeToggleStyle())
                                 .disabled(!model.canChangeSettings)
                         }
                     }
@@ -162,10 +161,9 @@ struct GeneralSettingsPane: View {
     @ViewBuilder
     private var loginControl: some View {
         if model.isPreviewMode {
-            Toggle("", isOn: .constant(false))
+            Toggle("Launch at login", isOn: .constant(false))
                 .labelsHidden()
-                .toggleStyle(.switch)
-                .tint(.primary)
+                .toggleStyle(ImrseMonochromeToggleStyle())
                 .disabled(true)
                 .help("Preview fixture; launch-at-login status is not queried.")
                 .accessibilityLabel("Launch at login preview fixture; status not queried")
@@ -187,13 +185,12 @@ struct GeneralSettingsPane: View {
                     .help("Ask macOS to register imrse at login.")
             }
         } else if loginStatus == .enabled || loginStatus == .notRegistered {
-            Toggle("", isOn: Binding(
+            Toggle("Launch at login", isOn: Binding(
                 get: { loginStatus == .enabled },
                 set: { enabled in setLoginItemEnabled(enabled) }
             ))
             .labelsHidden()
-            .toggleStyle(.switch)
-            .tint(.primary)
+            .toggleStyle(ImrseMonochromeToggleStyle())
             .disabled(!model.canChangeSettings)
             .accessibilityLabel("Launch at login")
         } else {

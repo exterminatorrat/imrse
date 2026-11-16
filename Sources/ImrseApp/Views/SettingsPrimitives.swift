@@ -395,6 +395,45 @@ struct SettingsKeycap: View {
     }
 }
 
+/// A monochrome switch with an explicitly white thumb in both states.
+/// A native tinted switch does not guarantee the requested thumb color across appearances.
+struct ImrseMonochromeToggleStyle: ToggleStyle {
+    @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.isEnabled) private var isEnabled
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    func makeBody(configuration: Configuration) -> some View {
+        Button {
+            configuration.isOn.toggle()
+        } label: {
+            Capsule()
+                .fill(trackColor(isOn: configuration.isOn).opacity(isEnabled ? 1 : 0.55))
+                .frame(width: 40, height: 24)
+                .overlay(alignment: .leading) {
+                    Circle()
+                        .fill(Color.white)
+                        .frame(width: 18, height: 18)
+                        .shadow(color: .black.opacity(0.14), radius: 1, y: 1)
+                        .padding(3)
+                        .offset(x: configuration.isOn ? 16 : 0)
+                }
+        }
+        .buttonStyle(.plain)
+        .animation(reduceMotion ? nil : .easeInOut(duration: 0.18), value: configuration.isOn)
+        // ToggleStyle preserves the Toggle's accessible label and role.
+        .accessibilityValue(configuration.isOn ? "On" : "Off")
+    }
+
+    private func trackColor(isOn: Bool) -> Color {
+        switch (colorScheme, isOn) {
+        case (.dark, true): Color(white: 0.43)
+        case (.dark, false): Color(white: 0.27)
+        case (_, true): Color(white: 0.22)
+        case (_, false): Color(white: 0.68)
+        }
+    }
+}
+
 struct ImrseLabeledRow<Content: View>: View {
     let title: String
     let subtitle: String?

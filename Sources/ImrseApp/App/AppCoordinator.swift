@@ -10,6 +10,9 @@ final class AppCoordinator: NSObject, NSMenuItemValidation {
     private let panelController: PillPanelController
     private let settingsWindowController = SettingsWindowController()
     private var statusItem: NSStatusItem?
+    private(set) var settingsNavigation: SettingsNavigationModel?
+    private var pendingSettingsTab: SettingsTab?
+    private var settingsAvailabilityObserver: AnyCancellable?
     private var configurationObserver: AnyCancellable?
     private var settingsAppearanceObserver: AnyCancellable?
     private var applicationResignObserver: AnyCancellable?
@@ -49,6 +52,11 @@ final class AppCoordinator: NSObject, NSMenuItemValidation {
             panelController?.hideForFocusHandoff()
         }
         guard !model.isPreviewMode else { return }
+        settingsAvailabilityObserver = model.$state
+            .dropFirst()
+            .sink { [weak self] _ in
+                Task { @MainActor [weak self] in self?.presentPendingSettingsIfPossible() }
+            }
         applicationResignObserver = NotificationCenter.default.publisher(for: NSApplication.didResignActiveNotification)
             .sink { [weak self] _ in
                 Task { @MainActor [weak self] in self?.reconcileDeferredApplicationResign() }
@@ -83,15 +91,27 @@ final class AppCoordinator: NSObject, NSMenuItemValidation {
             }
     }
 
-    func openSettings() {
-        guard model.canOpenSettings else { return }
+    func openSettings(tab: SettingsTab? = nil) {
+        guard model.canOpenSettings else {
+            // Never steal focus mid-replacement/undo; fulfill the click when the operation settles.
+            if !model.isTerminating { pendingSettingsTab = tab ?? .general }
+            return
+        }
+        pendingSettingsTab = nil
         model.prepareForSettings()
         let shouldCenterWindow = settingsWindowController.window == nil
         let window = settingsWindow()
+        if let tab { settingsNavigation?.selectedTab = tab }
         if shouldCenterWindow { window.center() }
+        if window.isMiniaturized { window.deminiaturize(nil) }
         NSApp.activate()
         window.makeKeyAndOrderFront(nil)
         synchronizeSettingsWindowVisibility()
+    }
+
+    private func presentPendingSettingsIfPossible() {
+        guard let tab = pendingSettingsTab, model.canOpenSettings else { return }
+        openSettings(tab: tab)
     }
 
     #if DEBUG
@@ -103,16 +123,14 @@ final class AppCoordinator: NSObject, NSMenuItemValidation {
 
     @objc func handleStatusItemClick(_ sender: NSStatusBarButton) {
         guard let event = NSApp.currentEvent else {
-            openSettings()
+            openSettings(tab: .general)
             return
         }
         switch MenuBarClickRoute.resolve(eventType: event.type, modifierFlags: event.modifierFlags) {
-        case .openSettings:
-            openSettings()
+        case .openSettings, nil:
+            openSettings(tab: .general)
         case .showContextMenu:
             NSMenu.popUpContextMenu(contextMenu, with: event, for: sender)
-        case nil:
-            break
         }
     }
 
@@ -129,7 +147,7 @@ final class AppCoordinator: NSObject, NSMenuItemValidation {
     }
 
     @objc func openSettingsFromMenuItem(_ sender: NSMenuItem) {
-        openSettings()
+        openSettings(tab: .general)
     }
 
     @objc func toggleResponseDetails(_ sender: NSMenuItem) {
@@ -174,10 +192,13 @@ final class AppCoordinator: NSObject, NSMenuItemValidation {
         let initialModelProvider: ModelProviderSection? = nil
         let previewColorScheme: ColorScheme? = nil
         #endif
+        let navigation = SettingsNavigationModel(initialTab: initialTab)
+        settingsNavigation = navigation
         let view = SettingsView(
             model: model,
             initialTab: initialTab,
-            initialModelProvider: initialModelProvider
+            initialModelProvider: initialModelProvider,
+            navigation: navigation
         )
             .frame(width: 900, height: 570)
             .preferredColorScheme(previewColorScheme)

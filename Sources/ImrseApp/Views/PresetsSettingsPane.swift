@@ -197,10 +197,9 @@ struct PresetsSettingsPane: View {
                         }
 
                         ImrseLabeledRow("Local only", subtitle: "Never send this preset to a cloud provider.") {
-                            Toggle("", isOn: $draft.localOnly)
+                            Toggle("Local only", isOn: $draft.localOnly)
                                 .labelsHidden()
-                                .toggleStyle(.switch)
-                                .tint(.primary)
+                                .toggleStyle(ImrseMonochromeToggleStyle())
                                 .disabled(!model.canChangeSettings)
                         }
 
