@@ -151,6 +151,7 @@ public final class MacSelectionAccess: SelectionAccess {
         let focusedSelection: NativeSelection
         let styleProof: ContenteditableClipboardProof?
         let insertionProof: CaretInsertionProof?
+        let valueProof: UndoValueProof?
     }
 
     private final class ObserverContext: @unchecked Sendable {
@@ -174,6 +175,7 @@ public final class MacSelectionAccess: SelectionAccess {
         let strategy: ReplacementStrategy
         let focusedSelection: NativeSelection
         let styleProof: ContenteditableClipboardProof?
+        var valueProof: UndoValueProof? = nil
     }
 
     private struct ClipboardDestination {
@@ -553,7 +555,8 @@ public final class MacSelectionAccess: SelectionAccess {
             replacementRange: replacementRange,
             focusedSelection: applied.focusedSelection,
             styleProof: applied.styleProof,
-            insertionProof: captured.insertionProof
+            insertionProof: captured.insertionProof,
+            valueProof: applied.valueProof
         )
         lastFailureReason = nil
         return receipt
@@ -585,62 +588,46 @@ public final class MacSelectionAccess: SelectionAccess {
                 )
                 else { throw ImrseError.undoUnavailable }
             }
-            if let styleProof = undoTarget.styleProof {
-                switch styleProof {
-                case .uniform: undoRoute = .uniform
-                case .structured: undoRoute = .structured
+            if let valueProof = undoTarget.valueProof {
+                guard valueProof.confirmsApplied(try wholeValue(undoTarget.handle.element, failure: .undoUnavailable)) else {
+                    throw ImrseError.undoUnavailable
                 }
-                try await undoContenteditable(
-                    undoTarget,
-                    receipt: receipt,
-                    currentSelection: current,
-                    styleProof: styleProof
-                )
-            } else if supportsPlainTextValueReplacement(undoTarget.handle.element, role: undoTarget.handle.role) {
-                try await undoPlainTextField(undoTarget, receipt: receipt, currentSelection: current)
-            } else {
-                undoRoute = .generic
-                let target = undoTarget.handle
-                let replacementSelection: NativeSelection
-                if current.range == undoTarget.replacementRange,
-                   sameText(current.text, receipt.replacement) {
-                    replacementSelection = current
-                } else {
-                    guard UTF16SelectionRange.isCollapsedCaret(
-                        current.range,
-                        selectedText: current.text,
-                        atEndOf: undoTarget.replacementRange
-                    ), let replacementText = try stringForRange(
-                        target.element,
-                        range: undoTarget.replacementRange,
-                        failure: .undoUnavailable
-                    ), sameText(replacementText, receipt.replacement),
-                    (try? attributeIsSettable(target.element, kAXSelectedTextRangeAttribute)) == true
-                    else {
-                        throw ImrseError.undoUnavailable
-                    }
-                    let beforeSelection = try currentSelection(target, allowingEmpty: true)
-                    guard sameSelection(beforeSelection, undoTarget.focusedSelection) else {
-                        throw ImrseError.undoUnavailable
-                    }
-                    let selectedRange = try axRangeValue(undoTarget.replacementRange, failure: .undoUnavailable)
-                    guard try setAttribute(target.element, kAXSelectedTextRangeAttribute, value: selectedRange) == .success else {
-                        throw ImrseError.undoUnavailable
-                    }
-                    replacementSelection = try await selection(
-                        afterSetting: undoTarget.replacementRange,
-                        text: receipt.replacement,
-                        on: target
-                    )
-                }
-                _ = try await applyReplacement(
-                    to: target,
-                    replacing: receipt.replacement,
-                    at: undoTarget.replacementRange,
-                    with: receipt.target.text,
-                    focusedSelection: replacementSelection
-                )
             }
+            let plan = UndoWritePlan(strategy: receipt.strategy)
+            try await plan.perform(
+                selectedText: {
+                    if self.supportsPlainTextValueReplacement(undoTarget.handle.element, role: undoTarget.handle.role) {
+                        try await self.undoPlainTextField(undoTarget, receipt: receipt, currentSelection: current)
+                    } else {
+                        let selected = try await self.selectReplacementForUndo(undoTarget, receipt: receipt, current: current)
+                        _ = try await self.applyReplacement(
+                            to: undoTarget.handle, replacing: receipt.replacement,
+                            at: undoTarget.replacementRange, with: receipt.target.text,
+                            focusedSelection: selected,
+                            requiredOriginalValue: undoTarget.valueProof?.applied,
+                            pinnedStrategy: .selectedText
+                        )
+                    }
+                },
+                valueRange: {
+                    guard undoTarget.valueProof != nil,
+                          self.supportsPlainTextValueReplacement(undoTarget.handle.element, role: undoTarget.handle.role)
+                    else { throw ImrseError.undoUnavailable }
+                    try await self.undoPlainTextField(undoTarget, receipt: receipt, currentSelection: current)
+                },
+                clipboard: {
+                    if let styleProof = undoTarget.styleProof {
+                        switch styleProof {
+                        case .uniform: self.undoRoute = .uniform
+                        case .structured: self.undoRoute = .structured
+                        }
+                        try await self.undoContenteditable(undoTarget, receipt: receipt,
+                            currentSelection: current, styleProof: styleProof)
+                    } else {
+                        try await self.undoClipboardPlain(undoTarget, receipt: receipt, currentSelection: current)
+                    }
+                }
+            )
             self.undoTarget = nil
             lastFailureReason = nil
         } catch let error as ImrseError {
@@ -654,6 +641,52 @@ public final class MacSelectionAccess: SelectionAccess {
             self.undoTarget = nil
             throw ImrseError.undoUnavailable
         }
+    }
+
+    /// Selection preparation is not a text-route probe. No text mutation occurs
+    /// until the exact receipt-bound route has passed its own final preflight.
+    private func selectReplacementForUndo(
+        _ undoTarget: UndoTarget, receipt: ReplacementReceipt, current: NativeSelection
+    ) async throws -> NativeSelection {
+        let target = undoTarget.handle
+        if current.range == undoTarget.replacementRange, sameText(current.text, receipt.replacement) {
+            return current
+        }
+        guard UTF16SelectionRange.isCollapsedCaret(current.range, selectedText: current.text,
+                atEndOf: undoTarget.replacementRange),
+              let replacementText = try stringForRange(target.element, range: undoTarget.replacementRange,
+                failure: .undoUnavailable), sameText(replacementText, receipt.replacement),
+              (try? attributeIsSettable(target.element, kAXSelectedTextRangeAttribute)) == true,
+              sameSelection(try currentSelection(target, allowingEmpty: true), current)
+        else { throw ImrseError.undoUnavailable }
+        let range = try axRangeValue(undoTarget.replacementRange, failure: .undoUnavailable)
+        guard try setAttribute(target.element, kAXSelectedTextRangeAttribute, value: range) == .success else {
+            throw ImrseError.undoUnavailable
+        }
+        return try await selection(afterSetting: undoTarget.replacementRange, text: receipt.replacement, on: target)
+    }
+
+    private func undoClipboardPlain(
+        _ undoTarget: UndoTarget, receipt: ReplacementReceipt, currentSelection: NativeSelection
+    ) async throws {
+        undoRoute = .generic
+        let target = undoTarget.handle
+        guard clipboardFallbackEnabled, let proof = undoTarget.valueProof,
+              proof.confirmsApplied(try wholeValue(target.element, failure: .undoUnavailable)),
+              let restored = replacing(proof.applied, range: undoTarget.replacementRange, with: receipt.target.text),
+              sameText(restored, proof.original),
+              clipboardTargetEligibility(target).permitted,
+              let prepareForClipboardPaste
+        else { throw ImrseError.undoUnavailable }
+        try requireTargetForeground(target)
+        let selected = try await selectReplacementForUndo(undoTarget, receipt: receipt, current: currentSelection)
+        try await prepareForClipboardPaste()
+        // paste performs the full destination, value, selection, ownership,
+        // event-permission and eligibility checks again before staging/posting.
+        _ = try await paste(receipt.target.text, to: target, replacing: receipt.replacement,
+            at: undoTarget.replacementRange, expectedSelection: selected,
+            oldValue: proof.applied, expectedValue: proof.original)
+        lastWriteAttempt?.readback = .expected
     }
 
     private func undoPlainTextField(
@@ -695,14 +728,21 @@ public final class MacSelectionAccess: SelectionAccess {
             throw ImrseError.undoUnavailable
         }
 
-        let selectedReplacement = currentSelection.range == undoTarget.replacementRange
-            && sameText(currentSelection.text, receipt.replacement)
-        let canWriteSelectedText = (try? attributeIsSettable(target.element, kAXSelectedTextAttribute)) == true
-        if selectedReplacement, canWriteSelectedText {
+        let mutationSelection: NativeSelection
+        if receipt.strategy == .selectedText {
+            guard (try? attributeIsSettable(target.element, kAXSelectedTextAttribute)) == true else {
+                throw ImrseError.undoUnavailable
+            }
+            mutationSelection = try await selectReplacementForUndo(undoTarget, receipt: receipt, current: currentSelection)
+        } else {
+            guard receipt.strategy == .valueRange else { throw ImrseError.undoUnavailable }
+            mutationSelection = currentSelection
+        }
+        if receipt.strategy == .selectedText {
             let status = try VerifiedAction.perform(
                 verify: {
                     let beforeWrite = try self.currentSelection(target, allowingEmpty: true)
-                    guard self.sameSelection(beforeWrite, currentSelection),
+                    guard self.sameSelection(beforeWrite, mutationSelection),
                           let valueBeforeWrite = try self.wholeValue(target.element, failure: .undoUnavailable),
                           self.sameText(valueBeforeWrite, currentValue)
                     else {
@@ -728,7 +768,7 @@ public final class MacSelectionAccess: SelectionAccess {
             let status = try VerifiedAction.perform(
                 verify: {
                     let beforeWrite = try self.currentSelection(target, allowingEmpty: true)
-                    guard self.sameSelection(beforeWrite, currentSelection),
+                    guard self.sameSelection(beforeWrite, mutationSelection),
                           let valueBeforeWrite = try self.wholeValue(target.element, failure: .undoUnavailable),
                           self.sameText(valueBeforeWrite, currentValue)
                     else {
@@ -751,6 +791,7 @@ public final class MacSelectionAccess: SelectionAccess {
             else {
                 throw ImrseError.undoUnavailable
             }
+            lastWriteAttempt?.readback = .expected
             let after = try self.currentSelection(target, allowingEmpty: true)
             if let proof = undoTarget.insertionProof {
                 guard sameText(restoredValue, proof.value) else { throw ImrseError.undoUnavailable }
@@ -1733,7 +1774,8 @@ public final class MacSelectionAccess: SelectionAccess {
         with replacement: String,
         focusedSelection: NativeSelection,
         requiredOriginalValue: String? = nil,
-        dispatch: ReplacementDispatchState? = nil
+        dispatch: ReplacementDispatchState? = nil,
+        pinnedStrategy: ReplacementStrategy? = nil
     ) async throws -> AppliedReplacement {
         guard !replacement.isEmpty else { throw ImrseError.emptyOutput }
         let before = try currentSelection(target, allowingEmpty: true)
@@ -1773,17 +1815,21 @@ public final class MacSelectionAccess: SelectionAccess {
             return result
         }
 
-        let upfrontClipboard = QualifiedClipboardRoute.isCandidate(
+        let upfrontClipboard = pinnedStrategy == nil && QualifiedClipboardRoute.isCandidate(
             enabled: clipboardFallbackEnabled, applicationID: target.applicationID,
             role: target.role, intent: target.intent
         ) && hasVerifiedWebAreaAncestor(target)
-        let plan = try SelectionWritePlan.choose(
+        let plan = try pinnedStrategy ?? SelectionWritePlan.choose(
             prefersQualifiedClipboard: upfrontClipboard,
             clipboardEnabled: clipboardFallbackEnabled,
             selectedTextSettable: { try self.attributeIsSettable(target.element, kAXSelectedTextAttribute) },
             wholeValueAvailable: allowsWholeValueWrite && oldValue != nil && expectedValue != nil,
             valueSettable: { try self.attributeIsSettable(target.element, kAXValueAttribute) }
         )
+        if pinnedStrategy == .selectedText,
+           try !attributeIsSettable(target.element, kAXSelectedTextAttribute) {
+            throw ImrseError.undoUnavailable
+        }
         // Diagnostic evidence only; never grants fallback or write authority.
         let diagnosticBaseline = oldValue ?? diagnosticWholeValue(target.element)
         var selectedTextFallbackBaseline: String?
@@ -1848,7 +1894,8 @@ public final class MacSelectionAccess: SelectionAccess {
                     ) {
                         lastWriteAttempt?.readback = .expected
                         selectedTextOutcome = .confirmedApplied(
-                            AppliedReplacement(strategy: .selectedText, focusedSelection: after, styleProof: nil)
+                            AppliedReplacement(strategy: .selectedText, focusedSelection: after, styleProof: nil,
+                                valueProof: UndoValueProof.make(original: oldValue, applied: expectedValue))
                         )
                     } else if SelectedTextReplacementValidation.permitsRangeOnlyConfirmation(
                         expectedValue: expectedValue
@@ -1975,7 +2022,8 @@ public final class MacSelectionAccess: SelectionAccess {
                     invalidateAfterUnverifiedWrite(target.id, reason: .replacementReadbackFailed)
                     throw ImrseError.replacementFailed
                 }
-                return AppliedReplacement(strategy: .valueRange, focusedSelection: after, styleProof: nil)
+                return AppliedReplacement(strategy: .valueRange, focusedSelection: after, styleProof: nil,
+                    valueProof: UndoValueProof(original: oldValue, applied: expectedValue))
             }
             invalidateAfterUnverifiedWrite(target.id, reason: .replacementEvidenceMismatch)
             throw ImrseError.replacementFailed
@@ -2043,7 +2091,8 @@ public final class MacSelectionAccess: SelectionAccess {
             dispatch: dispatch
         )
         lastWriteAttempt?.readback = .expected
-        return AppliedReplacement(strategy: .clipboard, focusedSelection: afterPaste, styleProof: styleProof)
+        return AppliedReplacement(strategy: .clipboard, focusedSelection: afterPaste, styleProof: styleProof,
+            valueProof: UndoValueProof(original: clipboardValue, applied: clipboardExpectedValue))
     }
 
     /// Read-only, bounded ancestry proof. A bundle ID alone never qualifies a field.
@@ -2093,6 +2142,7 @@ public final class MacSelectionAccess: SelectionAccess {
         dispatch: ReplacementDispatchState? = nil
     ) async throws -> NativeSelection {
         try dispatch?.requireUndispatched()
+        try SelectionMutationGate.requireAllowed(strategy: .clipboard, clipboardEnabled: clipboardFallbackEnabled)
         guard Self.eventPostingPermissionGranted else { throw ImrseError.permissionRequired }
         try requireTargetForeground(target)
         let entryEligibility = clipboardTargetEligibility(target, styleProof: styleProof)
@@ -2124,6 +2174,7 @@ public final class MacSelectionAccess: SelectionAccess {
             destination: destination,
             capture: { try ClipboardPasteboardTransaction.capture(from: pasteboard) },
             stage: { transaction in
+                try SelectionMutationGate.requireAllowed(strategy: .clipboard, clipboardEnabled: self.clipboardFallbackEnabled)
                 try self.requireTargetForeground(target)
                 let current = try self.currentSelection(target)
                 guard self.sameSelection(current, expectedSelection),
@@ -2159,6 +2210,7 @@ public final class MacSelectionAccess: SelectionAccess {
                     throw ImrseError.staleSelection
                 }
                 guard transaction.stillOwns(pasteboard) else { throw ImrseError.clipboardFailed }
+                try SelectionMutationGate.requireAllowed(strategy: .clipboard, clipboardEnabled: self.clipboardFallbackEnabled)
                 try dispatch?.requireUndispatched()
             },
             post: {
@@ -2653,6 +2705,10 @@ public final class MacSelectionAccess: SelectionAccess {
                 self.lastWriteAttempt?.setterStatus = status == .success ? .accepted : .rejected
             }
             return status
+        }
+        if attribute == kAXSelectedTextAttribute || attribute == kAXValueAttribute {
+            try SelectionMutationGate.requireAllowed(strategy: attribute == kAXSelectedTextAttribute ? .selectedText : .valueRange,
+                clipboardEnabled: clipboardFallbackEnabled)
         }
         let status = if let dispatch { try dispatch.perform(action) } else { action() }
         if status == .apiDisabled { throw failure(.axReadFailure, .permissionRequired) }
