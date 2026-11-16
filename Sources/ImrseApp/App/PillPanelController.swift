@@ -1,6 +1,7 @@
 #if os(macOS)
 import AppKit
 import Combine
+import ImrseCore
 import ImrseMac
 import ImrsePillCore
 import ImrsePillUI
@@ -23,6 +24,7 @@ final class PillPanelController {
             .sink { [weak self] lifecycle in
                 guard let self else { return }
                 let phase = lifecycle.phase
+                self.model.selectionAccess.focusObservationPresentationStage = Self.presentationStage(for: phase)
                 guard phase.isVisible else { self.hide(); return }
                 switch phase {
                 case .success, .failure:
@@ -39,6 +41,7 @@ final class PillPanelController {
     func present(afterCapturingTargetOn screen: NSScreen?) {
         guard model.pillModel.phase.isVisible else { return }
         let acceptsInputFocus = Self.acceptsInputFocus(for: model.pillModel.phase)
+        model.selectionAccess.focusObservationPresentationStage = Self.presentationStage(for: model.pillModel.phase)
         if acceptsInputFocus {
             presentationFocus.begin(model.selectionAccess.presentationFocusReturn)
         }
@@ -70,6 +73,17 @@ final class PillPanelController {
 
     static func acceptsInputFocus(for phase: PillPhase) -> Bool {
         phase == .input
+    }
+
+    static func presentationStage(for phase: PillPhase) -> NativeRefusalDiagnostic.PresentationStage {
+        switch phase {
+        case .hidden: return .hidden
+        case .input: return .input
+        case .processing: return .processing
+        case .applying: return .applying
+        case .success: return .success
+        case .failure: return .failure
+        }
     }
 
     static func dismissesOnForegroundEscape(for phase: PillPhase) -> Bool {

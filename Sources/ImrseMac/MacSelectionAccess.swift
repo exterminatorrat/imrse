@@ -192,6 +192,7 @@ public final class MacSelectionAccess: SelectionAccess {
 
     public var clipboardFallbackEnabled: Bool
     public var focusObservationPanelPhase: NativeRefusalDiagnostic.PanelPhase = .unavailable
+    public var focusObservationPresentationStage: NativeRefusalDiagnostic.PresentationStage = .unavailable
     public private(set) var capturedScreen: NSScreen?
     public private(set) var presentationFocusReturn: ApplicationFocusReturn?
     public private(set) var lastFailureReason: SelectionFailureReason?
@@ -241,6 +242,8 @@ public final class MacSelectionAccess: SelectionAccess {
         lastDocumentContextFailure = nil
         lastDocumentBindingDiagnostic = nil
         lastNativeRefusalDiagnostic = nil
+        focusObservationPanelPhase = .unavailable
+        focusObservationPresentationStage = .unavailable
         captureDeadline = clock.now.advanced(by: Self.captureBudget)
         defer {
             captureDeadline = nil
@@ -978,6 +981,7 @@ public final class MacSelectionAccess: SelectionAccess {
            let captured = capturedTarget,
            captured.snapshot.id == targetID {
             let panelPhase = focusObservationPanelPhase
+            let presentationStage = focusObservationPresentationStage
             let foreground = foregroundRelation(captured.handle)
             let previousFailureReason = lastFailureReason
             var focusRead: NativeRefusalDiagnostic.FocusRead?
@@ -997,7 +1001,8 @@ public final class MacSelectionAccess: SelectionAccess {
                 focus: outcome,
                 focusRead: focusRead,
                 foreground: foreground,
-                panelPhase: panelPhase
+                panelPhase: panelPhase,
+                presentationStage: presentationStage
             )
         }
         invalidateCapture(targetID, reason: reason)

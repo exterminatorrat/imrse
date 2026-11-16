@@ -1,5 +1,6 @@
 #if os(macOS)
 import AppKit
+import ImrseCore
 import ImrsePillCore
 import Testing
 @testable import ImrseApp
@@ -66,6 +67,35 @@ struct PillPanelFocusPolicyTests {
             PillPhase.hidden, .processing(id), .applying(id), .success(id), .failure(id, "Failure")
         ] {
             #expect(!PillPanelController.acceptsInputFocus(for: phase))
+        }
+    }
+
+    @Test func everyPillPhaseMapsToOnlyAFrozenPresentationStageName() {
+        let id = UUID()
+        let cases: [(PillPhase, NativeRefusalDiagnostic.PresentationStage)] = [
+            (.hidden, .hidden),
+            (.input, .input),
+            (.processing(id), .processing),
+            (.applying(id), .applying),
+            (.success(id), .success),
+            (.failure(id, "Provider failure"), .failure)
+        ]
+        for (phase, expected) in cases {
+            #expect(PillPanelController.presentationStage(for: phase) == expected)
+        }
+        #expect(Set(cases.map { PillPanelController.presentationStage(for: $0.0).rawValue })
+            == Set(["hidden", "input", "processing", "applying", "success", "failure"]))
+    }
+
+    @Test func presentationStageCarriesNoAssociatedRequestOrMessage() {
+        let id = UUID()
+        let message = "Provider failure"
+        let stages = [
+            PillPhase.processing(id), .applying(id), .success(id), .failure(id, message)
+        ].map { PillPanelController.presentationStage(for: $0) }
+        for stage in stages {
+            #expect(!stage.rawValue.contains(id.uuidString))
+            #expect(!stage.rawValue.contains(message))
         }
     }
 

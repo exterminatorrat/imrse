@@ -447,7 +447,8 @@ public struct DiagnosticMetadata: Equatable, Sendable {
                 focus: focus,
                 focusRead: focus == nil ? nil : diagnostic.focusRead,
                 foreground: focus == nil ? nil : diagnostic.foreground,
-                panelPhase: focus == nil ? nil : diagnostic.panelPhase
+                panelPhase: focus == nil ? nil : diagnostic.panelPhase,
+                presentationStage: focus == nil ? nil : diagnostic.presentationStage
             )
     }
 }

@@ -84,6 +84,9 @@ public enum DiagnosticReport {
         if let focusRead = diagnostic.focusRead { fields["focusRead"] = focusRead.rawValue }
         if let foreground = diagnostic.foreground { fields["foreground"] = foreground.rawValue }
         if let panelPhase = diagnostic.panelPhase { fields["panelPhase"] = panelPhase.rawValue }
+        if let presentationStage = diagnostic.presentationStage {
+            fields["presentationStage"] = presentationStage.rawValue
+        }
         return fields
     }
 

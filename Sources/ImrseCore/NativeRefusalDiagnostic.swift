@@ -59,6 +59,16 @@ public struct NativeRefusalDiagnostic: Equatable, Sendable {
         case handoffHideReturned
     }
 
+    public enum PresentationStage: String, Equatable, Sendable {
+        case unavailable
+        case hidden
+        case input
+        case processing
+        case applying
+        case success
+        case failure
+    }
+
     public struct Undo: Equatable, Sendable {
         public let route: UndoRoute
         public let stage: UndoStage
@@ -76,18 +86,21 @@ public struct NativeRefusalDiagnostic: Equatable, Sendable {
     public let focusRead: FocusRead?
     public let foreground: ForegroundRelation?
     public let panelPhase: PanelPhase?
+    public let presentationStage: PresentationStage?
 
     public init(
         undo: Undo? = nil,
         focus: FocusOutcome? = nil,
         focusRead: FocusRead? = nil,
         foreground: ForegroundRelation? = nil,
-        panelPhase: PanelPhase? = nil
+        panelPhase: PanelPhase? = nil,
+        presentationStage: PresentationStage? = nil
     ) {
         self.undo = undo
         self.focus = focus
         self.focusRead = focusRead
         self.foreground = foreground
         self.panelPhase = panelPhase
+        self.presentationStage = presentationStage
     }
 }
