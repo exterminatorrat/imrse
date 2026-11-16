@@ -7,8 +7,13 @@ final class ReplacementDispatchState {
 
     func perform<Output>(_ action: () -> Output) throws -> Output {
         try Task.checkCancellation()
+        try requireUndispatched()
         markDispatched()
         return action()
+    }
+
+    func requireUndispatched() throws {
+        guard !dispatched else { throw ImrseError.replacementFailed }
     }
 
     func markDispatched() {

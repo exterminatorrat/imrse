@@ -86,6 +86,25 @@ struct TransformationEngineReplacementOutcomeTests {
         #expect(!engine.canUndo)
     }
 
+    @Test func attemptedWriteSurvivesFailureCleanupAndResetsOnNewInvocation() async {
+        let access = ScriptedSelectionAccess(target: snapshot("original"))
+        var attempt = WriteAttemptDiagnostic(strategy: .selectedText)
+        attempt.setterStatus = .accepted
+        attempt.readback = .original
+        access.replacementAttempt = attempt
+        access.outcomes = [.unconfirmed(.replacementFailed)]
+        let engine = TransformationEngine(selectionAccess: access, textProvider: FixedTextProvider(output: "rewritten"))
+        engine.invoke()
+        engine.submit(instruction: "", provider: configuration)
+        await waitForState(engine, .failed(.replacementFailed))
+        #expect(access.lastWriteAttempt == nil)
+        #expect(engine.diagnostics.writeAttempt == attempt)
+        #expect(DiagnosticReport.render(engine.diagnostics).contains("writeAttempt"))
+        engine.dismiss()
+        engine.invoke()
+        #expect(engine.diagnostics.writeAttempt == nil)
+    }
+
     @Test func adapterFailureReasonSurvivesTheTargetDiscard() async {
         let access = ScriptedSelectionAccess(target: snapshot("original"))
         access.replacementReason = .replacementVerificationFailed
@@ -218,6 +237,8 @@ private final class ScriptedSelectionAccess: SelectionAccess {
     var target: SelectionSnapshot
     var outcomes: [ReplacementOutcome] = []
     var replacementReason: SelectionFailureReason?
+    var replacementAttempt: WriteAttemptDiagnostic?
+    private(set) var lastWriteAttempt: WriteAttemptDiagnostic?
     private(set) var lastFailureReason: SelectionFailureReason?
     private(set) var replaceCount = 0
     private(set) var discardCount = 0
@@ -240,6 +261,7 @@ private final class ScriptedSelectionAccess: SelectionAccess {
     func replace(_ target: SelectionSnapshot, with text: String) async -> ReplacementOutcome {
         replaceCount += 1
         lastFailureReason = replacementReason
+        lastWriteAttempt = replacementAttempt
         guard !outcomes.isEmpty else {
             return .applied(ReplacementReceipt(target: target, replacement: text, strategy: .selectedText))
         }
@@ -253,6 +275,7 @@ private final class ScriptedSelectionAccess: SelectionAccess {
     func discard(_ target: SelectionSnapshot) {
         discardCount += 1
         discarded.append(target.id)
+        lastWriteAttempt = nil
         lastFailureReason = nil
     }
 }

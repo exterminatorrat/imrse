@@ -186,10 +186,12 @@ public final class TransformationEngine {
         undoReceipt = nil
         diagnostics.error = nil
         diagnostics.replacementOutcome = nil
+        diagnostics.writeAttempt = nil
         diagnostics.replacement = "undoing"
         transition(to: .undoing)
         do {
             try await selectionAccess.undo(receipt)
+            diagnostics.writeAttempt = selectionAccess.lastWriteAttempt
             selectionAccess.discard(receipt.target)
             diagnostics.strategy = receipt.strategy
             diagnostics.error = nil
@@ -198,6 +200,7 @@ public final class TransformationEngine {
             diagnostics.replacement = "undone"
             transition(to: .succeeded(unchanged: false))
         } catch {
+            diagnostics.writeAttempt = selectionAccess.lastWriteAttempt
             let selectionFailureReason = selectionAccess.lastFailureReason
             selectionAccess.discard(receipt.target)
             let failure = Self.undoFailure(error)
@@ -266,6 +269,7 @@ public final class TransformationEngine {
             transition(to: .replacing)
             let outcome = await selectionAccess.replace(target, with: output)
             guard activeOperationID == operationID, state == .replacing else { return }
+            diagnostics.writeAttempt = selectionAccess.lastWriteAttempt
             diagnostics.replacementOutcome = outcome.status
             switch outcome {
             case .applied(let receipt):

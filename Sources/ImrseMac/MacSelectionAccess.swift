@@ -195,6 +195,7 @@ public final class MacSelectionAccess: SelectionAccess {
     public var focusObservationPresentationStage: NativeRefusalDiagnostic.PresentationStage = .unavailable
     public private(set) var capturedScreen: NSScreen?
     public private(set) var presentationFocusReturn: ApplicationFocusReturn?
+    public private(set) var lastWriteAttempt: WriteAttemptDiagnostic?
     public private(set) var lastFailureReason: SelectionFailureReason?
     public private(set) var lastDocumentContextFailure: DocumentContextFailure?
     public private(set) var lastDocumentBindingDiagnostic: DocumentBindingDiagnostic?
@@ -242,6 +243,7 @@ public final class MacSelectionAccess: SelectionAccess {
         lastDocumentContextFailure = nil
         lastDocumentBindingDiagnostic = nil
         lastNativeRefusalDiagnostic = nil
+        lastWriteAttempt = nil
         focusObservationPanelPhase = .unavailable
         focusObservationPresentationStage = .unavailable
         captureDeadline = clock.now.advanced(by: Self.captureBudget)
@@ -471,6 +473,7 @@ public final class MacSelectionAccess: SelectionAccess {
     }
 
     public func replace(_ target: SelectionSnapshot, with text: String) async -> ReplacementOutcome {
+        lastWriteAttempt = nil
         let dispatch = ReplacementDispatchState()
         do {
             try Task.checkCancellation()
@@ -557,6 +560,7 @@ public final class MacSelectionAccess: SelectionAccess {
     }
 
     public func undo(_ receipt: ReplacementReceipt) async throws {
+        lastWriteAttempt = nil
         lastFailureReason = nil
         lastNativeRefusalDiagnostic = nil
         defer { undoRoute = nil }
@@ -701,7 +705,7 @@ public final class MacSelectionAccess: SelectionAccess {
                     }
                 },
                 action: {
-                    try self.setAttribute(
+                    return try self.setAttribute(
                         target.element,
                         kAXSelectedTextAttribute,
                         value: receipt.target.text as CFString
@@ -884,6 +888,7 @@ public final class MacSelectionAccess: SelectionAccess {
     }
 
     public func discard(_ target: SelectionSnapshot) {
+        lastWriteAttempt = nil
         invalidateCapture(target.id, reason: .captureDiscarded)
         if undoTarget?.receipt.target.id == target.id { undoTarget = nil }
     }
@@ -1774,10 +1779,16 @@ public final class MacSelectionAccess: SelectionAccess {
             permitsWholeValueWrite: allowsWholeValueWrite,
             clipboardFallbackEnabled: clipboardFallbackEnabled
         )
+        let upfrontClipboard = QualifiedClipboardRoute.isCandidate(
+            enabled: clipboardFallbackEnabled, applicationID: target.applicationID,
+            role: target.role, intent: target.intent
+        ) && hasVerifiedWebAreaAncestor(target)
+        // Diagnostic evidence only; never grants fallback or write authority.
+        let diagnosticBaseline = oldValue ?? diagnosticWholeValue(target.element)
         var selectedTextFallbackBaseline: String?
         var selectedTextOutcome: SelectionMutationOutcome<AppliedReplacement>?
         if before.range == range, sameText(before.text, expectedText),
-           capabilities.canConsider(.selectedText) {
+           !upfrontClipboard, capabilities.canConsider(.selectedText) {
             let status = try VerifiedAction.perform(
                 verify: {
                     let current = try self.currentSelection(target, allowingEmpty: true)
@@ -1808,6 +1819,7 @@ public final class MacSelectionAccess: SelectionAccess {
                     )
                 }
             )
+            lastWriteAttempt?.setterStatus = status == .success ? .accepted : .rejected
             if status != .success {
                 selectedTextOutcome = .indeterminate(.replacementWriteRejected)
             } else {
@@ -1819,6 +1831,13 @@ public final class MacSelectionAccess: SelectionAccess {
                         fallbackBaseline: selectedTextFallbackBaseline,
                         read: { try self.wholeValue(target.element, failure: .replacementFailed) }
                     )
+                    let diagnosticAfterValue = afterValue ?? diagnosticWholeValue(target.element)
+                    lastWriteAttempt?.readback = diagnosticAfterValue.map { value in
+                        if let expectedValue, self.sameText(value, expectedValue) { return .expected }
+                        if let baseline = diagnosticBaseline,
+                           self.sameText(value, baseline) { return .original }
+                        return .other
+                    } ?? .unavailable
                     if SelectedTextReplacementValidation.confirms(
                         afterValue: afterValue,
                         expectedValue: expectedValue,
@@ -1827,6 +1846,7 @@ public final class MacSelectionAccess: SelectionAccess {
                         replacementRange: replacementRange,
                         replacement: replacement
                     ) {
+                        lastWriteAttempt?.readback = .expected
                         selectedTextOutcome = .confirmedApplied(
                             AppliedReplacement(strategy: .selectedText, focusedSelection: after, styleProof: nil)
                         )
@@ -1854,6 +1874,7 @@ public final class MacSelectionAccess: SelectionAccess {
                         guard self.sameSelection(verifiedSelection, after) else {
                             throw ImrseError.replacementFailed
                         }
+                        lastWriteAttempt?.readback = .expected
                         selectedTextOutcome = .confirmedApplied(
                             AppliedReplacement(
                                 strategy: .selectedText,
@@ -1884,7 +1905,9 @@ public final class MacSelectionAccess: SelectionAccess {
                         else {
                             throw ImrseError.replacementFailed
                         }
-                        selectedTextOutcome = .provedNotApplied
+                        // An unchanged synchronous read is not proof that an acknowledged
+                        // write can never arrive. Never paste after a dispatched AX write.
+                        selectedTextOutcome = .indeterminate(.replacementEvidenceMismatch)
                     } else {
                         selectedTextOutcome = .indeterminate(.replacementEvidenceMismatch)
                     }
@@ -1906,7 +1929,7 @@ public final class MacSelectionAccess: SelectionAccess {
         }
         let selectedTextNoOpValidated = selectedTextOutcome?.allowsFallback ?? false
 
-        if !selectedTextNoOpValidated,
+        if !upfrontClipboard, !selectedTextNoOpValidated,
            capabilities.canConsider(.valueRange),
            let oldValue,
            let expectedValue,
@@ -1922,7 +1945,7 @@ public final class MacSelectionAccess: SelectionAccess {
                     }
                 },
                 action: {
-                    try self.setAttribute(
+                    return try self.setAttribute(
                         target.element,
                         kAXValueAttribute,
                         value: expectedValue as CFString,
@@ -1930,6 +1953,7 @@ public final class MacSelectionAccess: SelectionAccess {
                     )
                 }
             )
+            lastWriteAttempt?.setterStatus = status == .success ? .accepted : .rejected
             guard status == .success else {
                 invalidateAfterUnverifiedWrite(target.id, reason: .replacementWriteRejected)
                 throw ImrseError.replacementFailed
@@ -1944,6 +1968,8 @@ public final class MacSelectionAccess: SelectionAccess {
                 invalidateAfterUnverifiedWrite(target.id, reason: .replacementReadbackFailed)
                 throw ImrseError.replacementFailed
             }
+            lastWriteAttempt?.readback = sameText(afterValue, expectedValue) ? .expected
+                : (sameText(afterValue, oldValue) ? .original : .other)
             if sameText(afterValue, expectedValue) {
                 let after: NativeSelection
                 do {
@@ -2021,7 +2047,33 @@ public final class MacSelectionAccess: SelectionAccess {
             styleProof: styleProof,
             dispatch: dispatch
         )
+        lastWriteAttempt?.readback = .expected
         return AppliedReplacement(strategy: .clipboard, focusedSelection: afterPaste, styleProof: styleProof)
+    }
+
+    /// Read-only, bounded ancestry proof. A bundle ID alone never qualifies a field.
+    private func hasVerifiedWebAreaAncestor(_ target: TargetHandle) -> Bool {
+        let priorFailure = lastFailureReason
+        defer { lastFailureReason = priorFailure }
+        let deadline = clock.now.advanced(by: .milliseconds(500))
+        return QualifiedClipboardRoute.verifiesWebArea(
+            root: target.element, hasBudget: { self.clock.now < deadline },
+            same: { self.sameElement($0, $1) },
+            isSameProcessAndWindow: { element in
+                guard self.hasProcessID(element, equalTo: target.processID),
+                      let window = try self.elementAttribute(element, kAXWindowAttribute, failure: .staleSelection)
+                else { return false }
+                return self.sameElement(window, target.window)
+            },
+            isWebArea: { try self.stringAttribute($0, kAXRoleAttribute, failure: .staleSelection) == "AXWebArea" },
+            parent: { try self.elementAttribute($0, kAXParentAttribute, failure: .staleSelection) }
+        )
+    }
+
+    private func diagnosticWholeValue(_ element: AXUIElement) -> String? {
+        let priorFailure = lastFailureReason
+        defer { lastFailureReason = priorFailure }
+        return try? wholeValue(element, failure: .replacementFailed)
     }
 
     private func invalidateAfterUnverifiedWrite(
@@ -2045,6 +2097,7 @@ public final class MacSelectionAccess: SelectionAccess {
         styleProof: ContenteditableClipboardProof? = nil,
         dispatch: ReplacementDispatchState? = nil
     ) async throws -> NativeSelection {
+        try dispatch?.requireUndispatched()
         guard Self.eventPostingPermissionGranted else { throw ImrseError.permissionRequired }
         try requireTargetForeground(target)
         let entryEligibility = clipboardTargetEligibility(target, styleProof: styleProof)
@@ -2111,10 +2164,13 @@ public final class MacSelectionAccess: SelectionAccess {
                     throw ImrseError.staleSelection
                 }
                 guard transaction.stillOwns(pasteboard) else { throw ImrseError.clipboardFailed }
+                try dispatch?.requireUndispatched()
             },
             post: {
                 keyDown.flags = .maskCommand
                 keyUp.flags = .maskCommand
+                self.lastWriteAttempt = WriteAttemptDiagnostic(strategy: .clipboard)
+                // No suspension between the final single-dispatch gate and posting.
                 dispatch?.markDispatched()
                 keyDown.postToPid(target.processID)
                 keyUp.postToPid(target.processID)
@@ -2591,7 +2647,18 @@ public final class MacSelectionAccess: SelectionAccess {
         dispatch: ReplacementDispatchState? = nil
     ) throws -> AXError {
         try configureAXMessaging(element)
-        let action = { AXUIElementSetAttributeValue(element, attribute as CFString, value) }
+        let action = {
+            if attribute == kAXSelectedTextAttribute {
+                self.lastWriteAttempt = WriteAttemptDiagnostic(strategy: .selectedText)
+            } else if attribute == kAXValueAttribute {
+                self.lastWriteAttempt = WriteAttemptDiagnostic(strategy: .valueRange)
+            }
+            let status = AXUIElementSetAttributeValue(element, attribute as CFString, value)
+            if attribute == kAXSelectedTextAttribute || attribute == kAXValueAttribute {
+                self.lastWriteAttempt?.setterStatus = status == .success ? .accepted : .rejected
+            }
+            return status
+        }
         let status = if let dispatch { try dispatch.perform(action) } else { action() }
         if status == .apiDisabled { throw failure(.axReadFailure, .permissionRequired) }
         return status

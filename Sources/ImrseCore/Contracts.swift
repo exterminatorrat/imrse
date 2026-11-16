@@ -168,6 +168,7 @@ public enum ReplacementOutcome: Equatable, Sendable {
 
 @MainActor public protocol SelectionAccess: AnyObject {
     var lastFailureReason: SelectionFailureReason? { get }
+    var lastWriteAttempt: WriteAttemptDiagnostic? { get }
     func capture() throws -> SelectionSnapshot
     func capture(intent: SelectionEditIntent) throws -> SelectionSnapshot
     func prepareForReplacement(_ target: SelectionSnapshot) async throws
@@ -180,6 +181,7 @@ public enum ReplacementOutcome: Equatable, Sendable {
 @MainActor
 public extension SelectionAccess {
     var lastFailureReason: SelectionFailureReason? { nil }
+    var lastWriteAttempt: WriteAttemptDiagnostic? { nil }
 
     func prepareForReplacement(_ target: SelectionSnapshot) async throws {}
 
@@ -424,6 +426,7 @@ public struct DiagnosticMetadata: Equatable, Sendable {
     public var documentContextFailure: DocumentContextFailure?
     public var documentBindingDiagnostic: DocumentBindingDiagnostic?
     public var nativeRefusalDiagnostic: NativeRefusalDiagnostic?
+    public var writeAttempt: WriteAttemptDiagnostic?
     public var targetValid: Bool?
     public var strategy: ReplacementStrategy?
     public var replacementOutcome: ReplacementOutcome.Status?

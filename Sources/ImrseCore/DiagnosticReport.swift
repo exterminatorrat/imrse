@@ -55,6 +55,12 @@ public enum DiagnosticReport {
         if let targetValid = metadata.targetValid { fields["targetValid"] = targetValid }
         if let strategy = metadata.strategy { fields["strategy"] = strategy.rawValue }
         if let outcome = metadata.replacementOutcome { fields["replacementOutcome"] = outcome.rawValue }
+        if let attempt = metadata.writeAttempt {
+            var write: [String: Any] = ["strategy": attempt.strategy.rawValue]
+            if let status = attempt.setterStatus { write["setterStatus"] = status.rawValue }
+            if let readback = attempt.readback { write["readback"] = readback.rawValue }
+            fields["writeAttempt"] = write
+        }
         if let nativeRefusal = metadata.nativeRefusalDiagnostic {
             fields["nativeRefusal"] = nativeRefusalFields(nativeRefusal)
         }

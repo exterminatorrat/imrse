@@ -312,3 +312,35 @@ struct ReplacementDispatchStateTests {
         #expect(outcome == .unconfirmed(.cancelled))
     }
 }
+
+extension ReplacementDispatchStateTests {
+    @Test func acknowledgedNativeWriteCannotDispatchSecondMutation() throws {
+        let dispatch = ReplacementDispatchState()
+        var setters = 0
+        var pastes = 0
+        try dispatch.perform { setters += 1 }
+        do {
+            try dispatch.perform { pastes += 1 }
+            Issue.record("An acknowledged native write must never be followed by paste")
+        } catch {
+            #expect(error as? ImrseError == .replacementFailed)
+        }
+        #expect(setters == 1)
+        #expect(pastes == 0)
+        #expect(dispatch.failure(ImrseError.replacementFailed, invalidatesPriorUndo: true)
+            == .unconfirmed(.replacementFailed))
+    }
+
+    @Test func qualifiedUpfrontRouteDoesNotDispatchNativeSetter() throws {
+        let dispatch = ReplacementDispatchState()
+        var setters = 0
+        var pastes = 0
+        let clipboard = QualifiedClipboardRoute.prefersClipboard(enabled: true,
+            applicationID: "ai.capy.desktop", role: "AXTextArea", intent: .replaceSelection,
+            verifiedWebArea: true)
+        if clipboard { try dispatch.perform { pastes += 1 } }
+        else { try dispatch.perform { setters += 1 } }
+        #expect(setters == 0)
+        #expect(pastes == 1)
+    }
+}
