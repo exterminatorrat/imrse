@@ -42,8 +42,10 @@ enum SettingsTab: String, CaseIterable, Hashable {
 struct SettingsView: View {
     @ObservedObject var model: AppModel
     @Environment(\.colorScheme) private var systemColorScheme
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var selectedTab: SettingsTab
     @State private var requestedPresetID: String?
+    @State private var isSidebarExpanded = true
     private let initialModelProvider: ModelProviderSection?
 
     init(model: AppModel, initialTab: SettingsTab = .general, initialModelProvider: ModelProviderSection? = nil) {
@@ -55,7 +57,15 @@ struct SettingsView: View {
 
     var body: some View {
         HStack(spacing: 0) {
+            // Keep the sidebar mounted so its contents do not restart during the transition.
             SettingsSidebar(selection: $selectedTab)
+                .frame(
+                    width: isSidebarExpanded ? ImrseSettingsMetrics.sidebarWidth : 0,
+                    alignment: .leading
+                )
+                .clipped()
+                .disabled(!isSidebarExpanded)
+                .accessibilityHidden(!isSidebarExpanded)
 
             selectedContent
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
@@ -64,8 +74,32 @@ struct SettingsView: View {
         .ignoresSafeArea()
         .background(ImrseSettingsPalette.window(effectiveColorScheme))
         .clipped()
+        .overlay(alignment: .topLeading) {
+            // This stays on the native traffic-light row in both sidebar states.
+            sidebarToggle
+                .padding(.leading, ImrseSettingsMetrics.sidebarWidth - 40)
+        }
         .tint(.primary)
         .preferredColorScheme(model.configuration.appearance.settingsColorScheme)
+    }
+
+    private var sidebarToggle: some View {
+        Button {
+            // A non-spring cubic curve settles without overshoot or rubber-banding.
+            withAnimation(reduceMotion ? nil : .timingCurve(0.22, 0, 0.18, 1, duration: 0.28)) {
+                isSidebarExpanded.toggle()
+            }
+        } label: {
+            Image(systemName: "sidebar.left")
+                .font(.system(size: 14, weight: .regular))
+                .foregroundStyle(.secondary)
+                .frame(width: 30, height: 28)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help(isSidebarExpanded ? "Hide Sidebar" : "Show Sidebar")
+        .accessibilityLabel(isSidebarExpanded ? "Hide sidebar" : "Show sidebar")
+        .accessibilityIdentifier("settings-sidebar-toggle")
     }
 
     @ViewBuilder
