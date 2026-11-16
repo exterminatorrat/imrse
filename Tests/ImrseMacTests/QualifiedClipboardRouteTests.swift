@@ -3,8 +3,19 @@ import XCTest
 import ImrseCore
 
 final class QualifiedClipboardRouteTests: XCTestCase {
+    func testChromeQualificationDoesNotAdmitOtherChromiumBundlesOrNativeChromeFields() {
+        for host in ["org.chromium.Chromium", "com.google.Chrome.beta", "com.google.Chrome.canary", "com.example.Chrome"] {
+            XCTAssertFalse(QualifiedClipboardRoute.prefersClipboard(enabled: true, applicationID: host,
+                role: "AXTextField", intent: .replaceSelection, verifiedWebArea: true))
+        }
+        XCTAssertFalse(QualifiedClipboardRoute.prefersClipboard(enabled: true, applicationID: "com.google.Chrome",
+            role: "AXTextField", intent: .replaceSelection, verifiedWebArea: false))
+        XCTAssertFalse(QualifiedClipboardRoute.prefersClipboard(enabled: true, applicationID: "com.google.Chrome",
+            role: "AXSecureTextField", intent: .replaceSelection, verifiedWebArea: true))
+    }
+
     func testRequiresEveryQualification() {
-        for host in ["com.apple.Safari", "com.vivaldi.Vivaldi", "ai.capy.desktop"] {
+        for host in ["com.apple.Safari", "com.vivaldi.Vivaldi", "ai.capy.desktop", "com.google.Chrome"] {
             for role in ["AXTextField", "AXTextArea"] {
                 XCTAssertTrue(QualifiedClipboardRoute.prefersClipboard(enabled: true, applicationID: host,
                     role: role, intent: .replaceSelection, verifiedWebArea: true))

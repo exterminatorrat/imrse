@@ -6,7 +6,7 @@ enum QualifiedClipboardRoute {
     static func isCandidate(enabled: Bool, applicationID: String, role: String,
                             intent: SelectionEditIntent) -> Bool {
         enabled && intent == .replaceSelection
-            && ["com.apple.Safari", "com.vivaldi.Vivaldi", "ai.capy.desktop"].contains(applicationID)
+            && ["com.apple.Safari", "com.vivaldi.Vivaldi", "ai.capy.desktop", "com.google.Chrome"].contains(applicationID)
             && ["AXTextField", "AXTextArea"].contains(role)
     }
     static func prefersClipboard(enabled: Bool, applicationID: String, role: String,
