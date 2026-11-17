@@ -5,8 +5,10 @@ import Foundation
 /// A fresh pasteboard version is NOT proof of its producer, selection scope, or write authority.
 @MainActor
 protocol ExplicitSelectionCopyHost: AnyObject {
-    /// Materialize only bounded, eager representations. Reject promises/lazy unsupported items.
-    /// The byte limit must be enforced BEFORE allocating data, not just by this coordinator.
+    /// Retain at most maximumBytes of eager representations; reject unsupported promises and
+    /// drop oversized materializations without retaining/returning them. NSPasteboard data APIs
+    /// may transiently allocate a representation before its length is known: this is a retained-
+    /// payload bound, NOT a guarantee on transient allocation or synchronous provider latency.
     func readClipboard(maximumBytes: Int) -> ExplicitCopyClipboardRead
     /// Must synchronously recheck exact foreground process + pinned target (including secure-field
     /// refusal) immediately before posting Cmd-C at most once. Never focus/activate or retry.
@@ -17,6 +19,21 @@ protocol ExplicitSelectionCopyHost: AnyObject {
     func restoreBackup(_ backup: ExplicitCopyClipboardSnapshot,
                        onlyIfOwned current: ExplicitCopyClipboardSnapshot,
                        operationID: UUID) -> ExplicitCopyRestore
+    /// Optional practical tier: independently revalidate original full baseline + exact selected
+    /// range, pinned control, and exact foreground. Not text search or clipboard-derived proof.
+    /// Must fail closed for missing/multiselection/proxy scope. No focus mutation or model call.
+    func verifyExpectedSource(_ source: String, for target: ExplicitCopyTarget) -> Bool
+    /// Optimistic, NOT producer-acknowledged/CAS restoration. Recheck current version and ALL
+    /// representations immediately before write, preserving every observed concurrent change.
+    /// Native check/write races and an indistinguishable concurrent identical copy remain possible.
+    func restoreBackupOptimistically(_ backup: ExplicitCopyClipboardSnapshot,
+                                     onlyIfCurrent current: ExplicitCopyClipboardSnapshot) -> ExplicitCopyRestore
+}
+
+extension ExplicitSelectionCopyHost {
+    func verifyExpectedSource(_ source: String, for target: ExplicitCopyTarget) -> Bool { false }
+    func restoreBackupOptimistically(_ backup: ExplicitCopyClipboardSnapshot,
+                                     onlyIfCurrent current: ExplicitCopyClipboardSnapshot) -> ExplicitCopyRestore { .uncertain }
 }
 
 struct ExplicitCopyTarget: Equatable, Sendable {
@@ -60,16 +77,24 @@ enum ExplicitCopyRestore: Equatable, Sendable { case restored, ownershipLost, un
 enum ExplicitCopyStopReason: Error, Equatable, Sendable {
     case alreadyUsed, cancelled, targetRefused, backupUnavailable, unsupportedClipboard, clipboardTooLarge
     case clipboardChangedBeforeDispatch, dispatchUncertain, noFreshChange, emptyCopy, malformedText
-    case clipboardUnavailableAfterDispatch, ambiguousVersion, copyTooLarge, deadlineExceeded
+    case clipboardUnavailableAfterDispatch, ambiguousVersion, copyTooLarge, deadlineExceeded, invalidExpectedSource, expectedSourceMismatch
 }
 enum ExplicitCopyBackupDisposition: Equatable, Sendable {
-    case notNeeded, restored, retainedUnresolved, concurrentClipboardPreserved, expiredOrDiscarded
+    case notNeeded, restored, optimisticallyRestored, retainedUnresolved, concurrentClipboardPreserved, expiredOrDiscarded
+}
+enum ExplicitCopyRecoveryOutcome: Equatable, Sendable {
+    case restored, notNeeded
+    /// Includes an unconfirmed restoration attempt. Backup stays retained; never infer no write.
+    case refused
 }
 enum ExplicitCopyOutcome: Equatable, Sendable {
     case notDispatched(ExplicitCopyStopReason)
     case unresolved(ExplicitCopyStopReason, backup: ExplicitCopyBackupDisposition)
     /// Candidate is session-only. `targetAcknowledged` never proves one editor selection/range.
     case candidate(id: UUID, targetAcknowledged: Bool, backup: ExplicitCopyBackupDisposition)
+    /// Text matched an independently revalidated source, not an acknowledged clipboard producer.
+    /// Still grants no target-write authority; restoration has the explicitly optimistic limit.
+    case expectedSourceMatchedCandidate(id: UUID, backup: ExplicitCopyBackupDisposition)
 }
 
 /// One-use bounded Cmd-C transaction coordinator. All capabilities are injected for mock tests.
@@ -82,7 +107,10 @@ final class ExplicitSelectionCopy {
     nonisolated static let maximumTextBytes = 1_048_576
     private(set) var outcome: ExplicitCopyOutcome?
     private(set) var isRunning = false
-    private var used = false, cancelled = false
+    private var used = false, cancelled = false, isRecovering = false
+    private var cancellationEpoch: UInt64 = 0
+    // Expected-source recovery stores target identity only, never the original source string.
+    private var recoveryTarget: ExplicitCopyTarget?
     private let host: any ExplicitSelectionCopyHost
     private let now: @MainActor () -> ContinuousClock.Instant
     private let pause: @MainActor () async throws -> Void
@@ -114,18 +142,58 @@ final class ExplicitSelectionCopy {
         return candidate.text
     }
     /// Cancellation never authorizes restoration or replay of a potentially late copy event.
+    /// Drop candidate/source exposure, but preserve an unresolved user's clipboard backup.
     func cancel() {
         cancelled = true
-        candidate = nil
-        if !isRunning { discardRetainedData() }
+        cancellationEpoch &+= 1
+        clearCandidate()
     }
-    /// Explicitly abandon recovery data. Does not mutate the actual clipboard or reset one-use state.
+    /// Explicitly abandon recovery data AFTER the caller obtained a recovery/abandon decision.
+    /// Does not mutate the actual clipboard or reset one-use state. Never called by TTL/cancel.
     func discardRetainedData() {
-        guard !isRunning else { cancelled = true; return }
-        expiryTask?.cancel(); expiryTask = nil; expiry = nil; backup = nil; candidate = nil
+        guard !isRunning, !isRecovering else { cancel(); return }
+        clearCandidate(); backup = nil; recoveryTarget = nil
     }
 
-    func run(target: ExplicitCopyTarget) async -> ExplicitCopyOutcome {
+    private func clearCandidate() {
+        expiryTask?.cancel(); expiryTask = nil; expiry = nil; candidate = nil
+    }
+
+    /// Explicit recovery preflight only: no Cmd-C, model request, editor paste, candidate export,
+    /// or one-use reset. Prior cancellation preserves this independently validated recovery path.
+    /// Host must validate against its pinned source/baseline fingerprint, NOT the new clipboard.
+    func attemptExplicitRecovery() -> ExplicitCopyRecoveryOutcome {
+        guard !isRunning, !isRecovering else { return .refused }
+        guard let original = backup else { return .notNeeded }
+        guard let target = recoveryTarget else { return .refused }
+        isRecovering = true
+        defer { isRecovering = false }
+        let deadline = now().advanced(by: timeout), epoch = cancellationEpoch
+        func permitted() -> Bool { cancellationEpoch == epoch && !Task.isCancelled && now() < deadline }
+        guard permitted() else { return .refused }
+        let firstRead = host.readClipboard(maximumBytes: Self.maximumClipboardBytes)
+        guard permitted(), case .snapshot(let fresh) = firstRead, fresh.isBounded,
+              fresh.version > original.version, case .success(let text) = Self.decodeText(fresh) else { return .refused }
+        let sourceMatches = host.verifyExpectedSource(text, for: target)
+        guard permitted(), sourceMatches else { return .refused }
+        let secondRead = host.readClipboard(maximumBytes: Self.maximumClipboardBytes)
+        guard permitted(), case .snapshot(let current) = secondRead, current.isBounded,
+              current.sameClipboard(as: fresh) else { return .refused }
+        let targetStillMatches = host.verifyExpectedSource(text, for: target)
+        guard permitted(), targetStillMatches else { return .refused }
+        // The native adapter rechecks all current bytes/version AFTER the verifier's possible
+        // delay. This remains optimistic, not atomic CAS or clipboard-producer attribution.
+        switch host.restoreBackupOptimistically(original, onlyIfCurrent: current) {
+        case .restored:
+            // Truthfully acknowledge completed recovery, even if a synchronous host returns late.
+            // No further action or candidate publication follows that late completion.
+            backup = nil; recoveryTarget = nil
+            return .restored
+        case .ownershipLost, .uncertain: return .refused
+        }
+    }
+
+    func run(target: ExplicitCopyTarget, expectedSource: String? = nil) async -> ExplicitCopyOutcome {
         guard !used else { return .notDispatched(.alreadyUsed) }
         used = true; isRunning = true
         let deadline = now().advanced(by: timeout)
@@ -133,6 +201,9 @@ final class ExplicitSelectionCopy {
         guard !cancelled, !Task.isCancelled else { return end(.notDispatched(.cancelled)) }
         guard target.processID > 0, !target.applicationID.isEmpty, target.applicationID.utf8.count <= 256 else {
             return end(.notDispatched(.targetRefused))
+        }
+        if let expectedSource, expectedSource.isEmpty || expectedSource.utf8.count > Self.maximumTextBytes {
+            return end(.notDispatched(.invalidExpectedSource))
         }
         if let reason = stopReason(deadline: deadline) { return end(.notDispatched(reason)) }
         let original: ExplicitCopyClipboardSnapshot
@@ -154,12 +225,18 @@ final class ExplicitSelectionCopy {
             return end(.notDispatched(.clipboardChangedBeforeDispatch))
         }
         guard !cancelled, !Task.isCancelled else { return end(.notDispatched(.cancelled)) }
+        if let expectedSource {
+            let matches = host.verifyExpectedSource(expectedSource, for: target)
+            if let reason = stopReason(deadline: deadline) { return end(.notDispatched(reason)) }
+            guard matches else { return end(.notDispatched(.targetRefused)) }
+        }
         backup = original
+        recoveryTarget = expectedSource == nil ? nil : target
         let operationID = UUID()
-        if let reason = stopReason(deadline: deadline) { backup = nil; return end(.notDispatched(reason)) }
+        if let reason = stopReason(deadline: deadline) { backup = nil; recoveryTarget = nil; return end(.notDispatched(reason)) }
         switch host.dispatchCopyOnce(ifTargetMatches: target, operationID: operationID) {
         case .notDispatched:
-            backup = nil
+            backup = nil; recoveryTarget = nil
             return end(.notDispatched(stopReason(deadline: deadline) ?? .targetRefused))
         case .uncertain: return end(.unresolved(stopReason(deadline: deadline) ?? .dispatchUncertain, backup: .retainedUnresolved))
         case .dispatched: break
@@ -182,31 +259,62 @@ final class ExplicitSelectionCopy {
                     break // unchanged clipboard is never a successful copy, even if it already held selected text.
                 }
                 guard fresh.version > original.version else { return end(.unresolved(.ambiguousVersion, backup: .retainedUnresolved)) }
-                // Source attribution is independent of version freshness. Never restore an unattributed
-                // clipboard item: it might be the user's concurrent copy rather than our Cmd-C.
-                let acknowledged = fresh.acknowledgedCopyID == operationID
+                // Source attribution is independent of version freshness. With no independently
+                // expected source, an unattributed item may be the user's concurrent copy: do not restore.
+                // The optional expected-source tier explicitly accepts a weaker, optimistic restore policy.
+                // Expected-source matching is a different tier, NEVER fabricated producer acknowledgment.
+                let acknowledged = expectedSource == nil && fresh.acknowledgedCopyID == operationID
                 let text = Self.decodeText(fresh)
+                if let expectedSource {
+                    switch text {
+                    case .failure(let reason): return end(.unresolved(reason, backup: .retainedUnresolved))
+                    case .success(let value):
+                        guard value.utf16.elementsEqual(expectedSource.utf16) else {
+                            return end(.unresolved(.expectedSourceMismatch, backup: .retainedUnresolved))
+                        }
+                    }
+                    if let reason = stopReason(deadline: deadline) { return end(.unresolved(reason, backup: .retainedUnresolved)) }
+                    let matches = host.verifyExpectedSource(expectedSource, for: target)
+                    if let reason = stopReason(deadline: deadline) { return end(.unresolved(reason, backup: .retainedUnresolved)) }
+                    guard matches else { return end(.unresolved(.targetRefused, backup: .retainedUnresolved)) }
+                }
                 let disposition: ExplicitCopyBackupDisposition
-                if acknowledged {
+                if acknowledged || expectedSource != nil {
                     // A second exact check closes common user-copy races, NOT the native CAS gap.
-                    guard !cancelled, !Task.isCancelled else { return end(.unresolved(.cancelled, backup: .retainedUnresolved)) }
                     if let reason = stopReason(deadline: deadline) { return end(.unresolved(reason, backup: .retainedUnresolved)) }
                     let currentRead = host.readClipboard(maximumBytes: Self.maximumClipboardBytes)
                     if let reason = stopReason(deadline: deadline) { return end(.unresolved(reason, backup: .retainedUnresolved)) }
                     if case .snapshot(let current) = currentRead,
-                       current.isBounded, current.sameClipboard(as: fresh), current.acknowledgedCopyID == operationID {
+                       current.isBounded, current.sameClipboard(as: fresh),
+                       expectedSource != nil || current.acknowledgedCopyID == operationID {
+                        if let expectedSource {
+                            let matches = host.verifyExpectedSource(expectedSource, for: target)
+                            if let reason = stopReason(deadline: deadline) { return end(.unresolved(reason, backup: .retainedUnresolved)) }
+                            guard matches else { return end(.unresolved(.targetRefused, backup: .retainedUnresolved)) }
+                        }
                         if let reason = stopReason(deadline: deadline) { return end(.unresolved(reason, backup: .retainedUnresolved)) }
-                        switch host.restoreBackup(original, onlyIfOwned: fresh, operationID: operationID) {
-                        case .restored: disposition = .restored; backup = nil
+                        let restoration = expectedSource != nil
+                            ? host.restoreBackupOptimistically(original, onlyIfCurrent: fresh)
+                            : host.restoreBackup(original, onlyIfOwned: fresh, operationID: operationID)
+                        switch restoration {
+                        case .restored:
+                            disposition = expectedSource != nil ? .optimisticallyRestored : .restored; backup = nil; recoveryTarget = nil
                         case .ownershipLost: disposition = .concurrentClipboardPreserved
                         case .uncertain: disposition = .retainedUnresolved
                         }
                     } else { disposition = .concurrentClipboardPreserved }
                 } else { disposition = .retainedUnresolved }
                 if let reason = stopReason(deadline: deadline) { return end(.unresolved(reason, backup: disposition)) }
+                if let expectedSource {
+                    let matches = host.verifyExpectedSource(expectedSource, for: target)
+                    if let reason = stopReason(deadline: deadline) { return end(.unresolved(reason, backup: disposition)) }
+                    guard matches else { return end(.unresolved(.targetRefused, backup: disposition)) }
+                }
+                if let reason = stopReason(deadline: deadline) { return end(.unresolved(reason, backup: disposition)) }
                 switch text {
                 case .success(let value):
                     let id = UUID(); candidate = (id, value)
+                    if expectedSource != nil { return end(.expectedSourceMatchedCandidate(id: id, backup: disposition)) }
                     return end(.candidate(id: id, targetAcknowledged: acknowledged, backup: disposition))
                 case .failure(let reason): return end(.unresolved(reason, backup: disposition))
                 }
@@ -236,15 +344,18 @@ final class ExplicitSelectionCopy {
     }
     private func end(_ final: ExplicitCopyOutcome) -> ExplicitCopyOutcome {
         outcome = final
-        if backup != nil || candidate != nil {
+        // Candidate text expires; unresolved original clipboard backup has a different lifecycle.
+        // Native integration must retain this single bounded transaction and refuse new copies
+        // until explicit recovery/abandon. This in-memory backup is not crash-persistent.
+        if candidate != nil {
             expiry = now().advanced(by: retention)
             expiryTask = Task { [weak self, retention] in
                 do { try await Task.sleep(for: retention) } catch { return }
-                self?.discardRetainedData()
+                self?.clearCandidate()
             }
         }
         return final
     }
-    private func expireIfNeeded() { if let expiry, now() >= expiry { discardRetainedData() } }
+    private func expireIfNeeded() { if let expiry, now() >= expiry { clearCandidate() } }
 }
 #endif

@@ -2,6 +2,7 @@ import Foundation
 
 public enum TransformationState: Equatable, Sendable {
     case idle
+    case capturing
     case ready
     case generating
     case replacing
@@ -23,6 +24,9 @@ public final class TransformationEngine {
     public static let maximumInstructionUTF8Bytes = 65_536
     public static let maximumOutputUTF8Bytes = 1_048_576
 
+    /// Cancellation revokes publication, but source-copy ownership survives until the adapter returns.
+    public private(set) var isPreparingSourceCopy = false
+    public var hasPendingSourceCopyRecovery: Bool { selectionAccess.hasPendingSourceCopyRecovery }
     public private(set) var state = TransformationState.idle
     public private(set) var diagnostics = DiagnosticMetadata()
     public private(set) var responseMetadata: ResponseMetadata?
@@ -35,7 +39,7 @@ public final class TransformationEngine {
     public var onChange: (@MainActor (TransformationState) -> Void)?
     public var onPrepareReplacement: (@MainActor () -> Void)?
     public var canUndo: Bool {
-        undoReceipt != nil && state != .generating && state != .replacing && state != .undoing
+        undoReceipt != nil && !isPreparingSourceCopy && !hasPendingSourceCopyRecovery && state != .capturing && state != .generating && state != .replacing && state != .undoing
     }
 
     private let selectionAccess: any SelectionAccess
@@ -44,6 +48,8 @@ public final class TransformationEngine {
     private var sourceDeadline: ContinuousClock.Instant?
     private var sourceExpiryTask: Task<Void, Never>?
     private var activeOperationID: UUID?
+    private var captureTask: Task<Void, Never>?
+    private var captureOperationID: UUID?
     private var generationTask: Task<Void, Never>?
     private var undoReceipt: ReplacementReceipt?
     private var pendingResponseMetadata: ResponseMetadata?
@@ -82,15 +88,28 @@ public final class TransformationEngine {
     }
 
     public func invoke(intent: SelectionEditIntent) {
-        if state == .generating {
+        invoke(intent: intent, explicitSourceCopy: false)
+    }
+
+    /// Only custom replacement entry opts into source-copy preparation before input UI.
+    public func invokeWithExplicitSourceCopy(intent: SelectionEditIntent = .replaceSelection) {
+        invoke(intent: intent, explicitSourceCopy: intent == .replaceSelection && selectionAccess.supportsExplicitSourceCopy)
+    }
+
+    private func invoke(intent: SelectionEditIntent, explicitSourceCopy: Bool) {
+        if state == .generating || state == .capturing {
             cancel()
             return
         }
-        guard state == .idle else { return }
+        guard state == .idle, !isPreparingSourceCopy else { return }
         clearRetainedOutput()
         responseMetadata = nil
         pendingResponseMetadata = nil
         diagnostics = DiagnosticMetadata()
+        guard !hasPendingSourceCopyRecovery else {
+            fail(.clipboardPending)
+            return
+        }
 
         let snapshot: SelectionSnapshot
         do {
@@ -120,6 +139,38 @@ public final class TransformationEngine {
         }
 
         target = snapshot
+        if explicitSourceCopy {
+            let operationID = UUID()
+            captureOperationID = operationID
+            isPreparingSourceCopy = true
+            captureTask = Task { [weak self] in
+                guard let self else { return }
+                defer {
+                    self.captureTask = nil
+                    self.isPreparingSourceCopy = false
+                    // Settlement is separate from UI state: cancelled work may still own a backup.
+                    self.onChange?(self.state)
+                }
+                guard self.isCapturing(operationID) else { return }
+                do {
+                    try await self.selectionAccess.prepareExplicitSourceCopy(snapshot)
+                    guard self.isCapturing(operationID) else { return }
+                    guard !self.hasPendingSourceCopyRecovery else { throw ImrseError.clipboardPending }
+                    self.captureOperationID = nil
+                    self.finishCapture(snapshot)
+                } catch {
+                    guard self.isCapturing(operationID) else { return }
+                    self.captureOperationID = nil
+                    self.fail(Self.validationFailure(error), selectionFailureReason: self.selectionAccess.lastFailureReason)
+                }
+            }
+            transition(to: .capturing)
+        } else {
+            finishCapture(snapshot)
+        }
+    }
+
+    private func finishCapture(_ snapshot: SelectionSnapshot) {
         sourceDeadline = now().advanced(by: .seconds(180))
         let sourceID = snapshot.id
         sourceExpiryTask = Task { [weak self] in
@@ -204,7 +255,8 @@ public final class TransformationEngine {
 
     public func cancel() {
         clearRetainedOutput()
-        guard state == .ready || state == .generating else { return }
+        guard state == .ready || state == .generating || state == .capturing else { return }
+        invalidateCapture()
         invalidateGeneration(cancelTask: true)
         responseMetadata = nil
         pendingResponseMetadata = nil
@@ -218,6 +270,7 @@ public final class TransformationEngine {
     public func dismiss() {
         guard state != .replacing, state != .undoing else { return }
         clearRetainedOutput()
+        invalidateCapture()
         if state == .generating { invalidateGeneration(cancelTask: true) }
         responseMetadata = nil
         pendingResponseMetadata = nil
@@ -227,7 +280,7 @@ public final class TransformationEngine {
     }
 
     public func undo() async {
-        guard state != .generating, state != .replacing, state != .undoing else { return }
+        guard !isPreparingSourceCopy, !hasPendingSourceCopyRecovery, state != .capturing, state != .generating, state != .replacing, state != .undoing else { return }
         clearRetainedOutput()
         guard let receipt = undoReceipt else {
             fail(.undoUnavailable)
@@ -483,6 +536,15 @@ public final class TransformationEngine {
         activeOperationID = nil
         generationTask = nil
         if cancelTask { task?.cancel() }
+    }
+
+    private func isCapturing(_ id: UUID) -> Bool {
+        captureOperationID == id && state == .capturing && !Task.isCancelled
+    }
+
+    private func invalidateCapture() {
+        captureOperationID = nil
+        captureTask?.cancel()
     }
 
     private func discardTarget() {

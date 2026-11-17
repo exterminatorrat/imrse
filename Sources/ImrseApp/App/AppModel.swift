@@ -281,12 +281,12 @@ final class AppModel: ObservableObject {
     }
 
     var isProcessing: Bool {
-        if undoTask != nil { return true }
+        if undoTask != nil || engine.isPreparingSourceCopy { return true }
         #if DEBUG
         if previewState == .generating || previewState == .replacing { return true }
         #endif
         return switch state {
-        case .generating, .replacing, .undoing: true
+        case .capturing, .generating, .replacing, .undoing: true
         default: false
         }
     }
@@ -678,11 +678,19 @@ final class AppModel: ObservableObject {
         case .replacing, .undoing:
             terminationReplies.append(reply)
             return .terminateLater
-        case .generating, .ready:
+        case .capturing, .generating, .ready:
             engine.cancel()
             engine.dismiss()
         case .idle, .succeeded, .failed:
             engine.dismiss()
+        }
+        if engine.isPreparingSourceCopy {
+            terminationReplies.append(reply)
+            return .terminateLater
+        }
+        if engine.hasPendingSourceCopyRecovery {
+            cancelTerminationForSourceCopyRecovery()
+            return .terminateCancel
         }
         if localModelOperationPending {
             terminationReplies.append(reply)
@@ -1756,7 +1764,7 @@ final class AppModel: ObservableObject {
 
     private func handleEngineState(_ state: TransformationState) {
         switch state {
-        case .ready, .generating:
+        case .capturing, .ready, .generating:
             latestResponseMetadata = nil
         case .succeeded(_), .failed(_):
             if self.state != .undoing {
@@ -1812,6 +1820,7 @@ final class AppModel: ObservableObject {
     private static func lifecycleStateName(_ state: TransformationState) -> String {
         return switch state {
         case .idle: "idle"
+        case .capturing: "capturing"
         case .ready: "ready"
         case .generating: "generating"
         case .replacing: "replacing"
@@ -1967,9 +1976,19 @@ final class AppModel: ObservableObject {
         finishTerminationIfSettled()
     }
 
+    private func cancelTerminationForSourceCopyRecovery() {
+        // A settled task can still own an original clipboard backup. Never silently
+        // destroy it or leave termination waiting for a task that no longer exists.
+        terminationRequested = false
+        isTerminating = false
+        updatePermissionStatusRefreshTask()
+        requestShortcutMonitorRefreshIfInactive()
+    }
+
     private func finishTerminationIfSettled() {
         guard !terminationReplies.isEmpty,
               undoTask == nil,
+              !engine.isPreparingSourceCopy,
               managedLocalModelOperationTask == nil,
               officialAccountOperationIDs.isEmpty,
               officialAccountDeletionProviderIDs.isEmpty,
@@ -1978,6 +1997,11 @@ final class AppModel: ObservableObject {
         else { return }
         let replies = terminationReplies
         terminationReplies = []
+        if engine.hasPendingSourceCopyRecovery {
+            cancelTerminationForSourceCopyRecovery()
+            replies.forEach { $0(.terminateCancel) }
+            return
+        }
         engine.dismiss()
         replies.forEach { $0(.terminateNow) }
     }

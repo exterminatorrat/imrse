@@ -1,4 +1,4 @@
-# Pinned custom-input session (experimental, not yet native-qualified)
+# Pinned custom-input session (experimental; limited native evidence)
 
 User contract: at double-Control invocation, capture an immutable copy of the selected text. Instruction entry operates on that copy. Submission sends that selected text and instruction to the chosen provider, not the full-field baseline. Cancellation discards the session. Return targets the original field, never whichever field happens to be current.
 
@@ -12,6 +12,6 @@ Complete generated output is retained in memory for a bounded explicit-copy acce
 
 Cmd-C fallback is not yet wired. Where AX lacks both selected-range/whole-value evidence, copying may obtain model input but cannot prove a safe automatic destination. Such a tier needs explicit manual output, not blind paste. No capture fallback should read old clipboard contents as if they were freshly copied text.
 
-The current running user process has a retained pending clipboard transaction. Source/unit work does not migrate or recover that memory. Do not restart it or overwrite the clipboard without the owner's decision. Native end-to-end testing remains blocked until that state is safely resolved.
+Historical pending-clipboard incident: the owner explicitly authorized discarding the old in-memory backup, and that failed/idle app was normally quit without restoring over the current system clipboard. Later synthetic tests ended without pending recovery. This is not a recovery feature or proof that the original paste was confirmed. See [the paused development checkpoint](development-paused-20261117.md) for current evidence and remaining limitations.
 
 Source admission expires after 180 seconds in instruction entry, with a monotonic check both on Submit and immediately before provider invocation. This is not a hard provider timeout or secure-memory erasure claim: an already-started provider task may retain its immutable request until it settles. Complete failed-application output has a separate 180-second bounded backend retention window. No user-accessible fallback UI is added in this change.

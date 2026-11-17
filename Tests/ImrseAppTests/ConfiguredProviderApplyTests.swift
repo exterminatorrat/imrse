@@ -249,7 +249,7 @@ private func terminalState(from states: AsyncStream<TransformationState>) async 
         switch state {
         case .succeeded, .failed:
             return state
-        case .idle, .ready, .generating, .replacing, .undoing:
+        case .idle, .capturing, .ready, .generating, .replacing, .undoing:
             continue
         }
     }

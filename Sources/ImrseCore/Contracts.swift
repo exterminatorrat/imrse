@@ -173,6 +173,10 @@ public enum ReplacementOutcome: Equatable, Sendable {
     var lastWriteAttempt: WriteAttemptDiagnostic? { get }
     func capture() throws -> SelectionSnapshot
     func capture(intent: SelectionEditIntent) throws -> SelectionSnapshot
+    /// Opt-in capture preparation; ordinary/preset capture remains synchronous.
+    var supportsExplicitSourceCopy: Bool { get }
+    var hasPendingSourceCopyRecovery: Bool { get }
+    func prepareExplicitSourceCopy(_ target: SelectionSnapshot) async throws
     func prepareForReplacement(_ target: SelectionSnapshot) async throws
     func validate(_ target: SelectionSnapshot) throws
     func replace(_ target: SelectionSnapshot, with text: String) async -> ReplacementOutcome
@@ -186,6 +190,9 @@ public enum ReplacementOutcome: Equatable, Sendable {
 public extension SelectionAccess {
     var lastFailureReason: SelectionFailureReason? { nil }
     var lastWriteAttempt: WriteAttemptDiagnostic? { nil }
+    var supportsExplicitSourceCopy: Bool { false }
+    var hasPendingSourceCopyRecovery: Bool { false }
+    func prepareExplicitSourceCopy(_ target: SelectionSnapshot) async throws {}
     func isClipboardUndoDisabled(_ receipt: ReplacementReceipt) -> Bool { false }
 
     func prepareForReplacement(_ target: SelectionSnapshot) async throws {}

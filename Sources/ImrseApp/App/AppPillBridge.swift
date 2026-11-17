@@ -16,6 +16,7 @@ final class AppPillBridge {
     private let screenAfterCapture: () -> NSScreen?
     private let fallbackScreen: () -> NSScreen?
     private var captureInProgress = false
+    private var capturePresetID: String?
     private var captureFallbackScreen: NSScreen?
     private var activeSubmissionID: UUID?
     private var activeIntent: SelectionEditIntent = .replaceSelection
@@ -82,11 +83,15 @@ final class AppPillBridge {
     func invoke(intent: SelectionEditIntent, presetID: String? = nil) {
         guard acceptsActions else { return }
         if pill.phase == .input { return }
+        if engine.state == .capturing {
+            dismiss()
+            return
+        }
         if engine.state == .generating {
             pill.dismiss()
             return
         }
-        guard engine.state != .replacing, engine.state != .undoing else { return }
+        guard !engine.isPreparingSourceCopy, engine.state != .replacing, engine.state != .undoing else { return }
         if let presetID, !presets.contains(where: { $0.id == presetID }) {
             pill.showCaptureFailure(message: ImrseError.invalidPreset.message)
             onPresent?(fallbackScreen())
@@ -95,16 +100,21 @@ final class AppPillBridge {
 
         captureFallbackScreen = fallbackScreen()
         captureInProgress = true
+        capturePresetID = presetID
         activeIntent = intent
         if engine.state != .idle { engine.dismiss() }
-        engine.invoke(intent: intent)
-        captureInProgress = false
-
-        guard engine.state == .ready else {
-            captureFallbackScreen = nil
-            return
+        if presetID == nil {
+            engine.invokeWithExplicitSourceCopy(intent: intent)
+        } else {
+            engine.invoke(intent: intent)
         }
+    }
 
+    private func presentCapturedInput() {
+        guard captureInProgress, engine.state == .ready else { return }
+        captureInProgress = false
+        let presetID = capturePresetID
+        capturePresetID = nil
         updatePresentationSettings()
         pill.present()
         let screen = screenAfterCapture() ?? captureFallbackScreen
@@ -138,8 +148,11 @@ final class AppPillBridge {
     }
 
     func dismiss() {
+        captureInProgress = false
+        capturePresetID = nil
+        captureFallbackScreen = nil
         switch engine.state {
-        case .ready:
+        case .ready, .capturing:
             engine.dismiss()
         default:
             break
@@ -197,6 +210,10 @@ final class AppPillBridge {
 
     private func handle(_ state: TransformationState) {
         switch state {
+        case .ready:
+            onStateChange?(state)
+            presentCapturedInput()
+            return
         case .replacing:
             if let activeSubmissionID { pill.generated(activeSubmissionID) }
         case .succeeded(let unchanged):
@@ -215,6 +232,7 @@ final class AppPillBridge {
                 restoreAfterClipboardFocusHandoff()
             } else if captureInProgress {
                 captureInProgress = false
+                capturePresetID = nil
                 pill.showCaptureFailure(message: error.message)
                 onPresent?(captureFallbackScreen)
                 captureFallbackScreen = nil
