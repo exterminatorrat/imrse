@@ -268,24 +268,7 @@ public final class MacSelectionAccess: SelectionAccess {
         }
         let application = AXUIElementCreateApplication(processID)
         try configureAXMessaging(application, failure: .applicationUnreachable)
-        guard let element = try AccessibilityFocusAcquisition.acquire(
-            readApplicationRole: {
-                _ = try self.stringAttribute(application, kAXRoleAttribute, failure: .applicationUnreachable)
-            },
-            requestManualAccessibility: { try self.requestManualAccessibility(on: application) },
-            hasTimeForRetry: { self.hasCaptureTimeForFocusRetry() },
-            readFocusedElement: {
-                try self.elementAttribute(application, kAXFocusedUIElementAttribute, failure: .applicationUnreachable)
-            },
-            validate: { element in
-                guard try !self.isSecure(element, in: application) else {
-                    throw self.failure(.protectedTarget, .secureInput)
-                }
-            },
-            waitBeforeRetry: {
-                Thread.sleep(forTimeInterval: Double(Self.focusRetryDelayMilliseconds) / 1_000.0)
-            }
-        ) else {
+        guard let element = try acquireCaptureFocus(application) else {
             throw failure(.focusedElementUnavailable, .noSelection)
         }
         guard let role = try stringAttribute(element, kAXRoleAttribute, failure: .noSelection) else {
@@ -1057,6 +1040,33 @@ public final class MacSelectionAccess: SelectionAccess {
             )
         }
         invalidateCapture(targetID, reason: reason)
+    }
+
+    /// Observe only the reads already required for capture. No extra AX probe,
+    /// focus mutation, delay, or fallback is introduced for diagnostics.
+    private func acquireCaptureFocus(_ application: AXUIElement) throws -> AXUIElement? {
+        try CaptureFocusEvidence.acquire(
+            readApplicationRole: {
+                _ = try self.stringAttribute(application, kAXRoleAttribute, failure: .applicationUnreachable)
+            },
+            requestManualAccessibility: { try self.requestManualAccessibility(on: application) },
+            hasTimeForRetry: { self.hasCaptureTimeForFocusRetry() },
+            readFocusedElement: { record in
+                try self.elementAttribute(application, kAXFocusedUIElementAttribute, failure: .applicationUnreachable,
+                    onRead: record)
+            },
+            validate: { element in
+                guard try !self.isSecure(element, in: application) else {
+                    throw self.failure(.protectedTarget, .secureInput)
+                }
+            },
+            waitBeforeRetry: {
+                Thread.sleep(forTimeInterval: Double(Self.focusRetryDelayMilliseconds) / 1_000.0)
+            },
+            publish: { evidence in
+                self.lastNativeRefusalDiagnostic = evidence.map { NativeRefusalDiagnostic(captureFocus: $0) }
+            }
+        )
     }
 
     private func focusedElementRead(_ application: AXUIElement) -> FocusedElementRead {
@@ -2889,11 +2899,14 @@ public final class MacSelectionAccess: SelectionAccess {
     private func elementAttribute(
         _ element: AXUIElement,
         _ attribute: String,
-        failure: ImrseError
+        failure: ImrseError,
+        onRead: (NativeRefusalDiagnostic.FocusRead) -> Void = { _ in }
     ) throws -> AXUIElement? {
         try configureAXMessaging(element)
         var value: CFTypeRef?
         let status = AXUIElementCopyAttributeValue(element, attribute as CFString, &value)
+        onRead(NativeRefusalClassification.focusRead(status: status, hasValue: value != nil,
+            isElement: value.map { CFGetTypeID($0) == AXUIElementGetTypeID() } ?? false))
         if status == .attributeUnsupported || status == .noValue { return nil }
         guard status == .success else {
             throw self.failure(.axReadFailure, AccessibilityStatusClassification.failure(for: status, default: failure))

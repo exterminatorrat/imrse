@@ -78,6 +78,14 @@ public enum DiagnosticReport {
 
     private static func nativeRefusalFields(_ diagnostic: NativeRefusalDiagnostic) -> [String: Any] {
         var fields: [String: Any] = [:]
+        if let capture = diagnostic.captureFocus, (1...128).contains(capture.attempts) {
+            fields["captureFocus"] = [
+                "firstRead": capture.firstRead.rawValue,
+                "lastRead": capture.lastRead.rawValue,
+                "attempts": capture.attempts,
+                "retryBudgetEnded": capture.retryBudgetEnded
+            ] as [String: Any]
+        }
         if let undo = diagnostic.undo {
             var undoFields: [String: Any] = [
                 "route": undo.route.rawValue,

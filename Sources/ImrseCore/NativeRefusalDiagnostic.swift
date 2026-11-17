@@ -81,6 +81,19 @@ public struct NativeRefusalDiagnostic: Equatable, Sendable {
         }
     }
 
+    public struct CaptureFocus: Equatable, Sendable {
+        public let firstRead: FocusRead
+        public let lastRead: FocusRead
+        public let attempts: Int
+        public let retryBudgetEnded: Bool
+        public init(firstRead: FocusRead, lastRead: FocusRead, attempts: Int,
+                    retryBudgetEnded: Bool) {
+            self.firstRead = firstRead; self.lastRead = lastRead; self.attempts = attempts
+            self.retryBudgetEnded = retryBudgetEnded
+        }
+    }
+
+    public let captureFocus: CaptureFocus?
     public let undo: Undo?
     public let focus: FocusOutcome?
     public let focusRead: FocusRead?
@@ -89,6 +102,7 @@ public struct NativeRefusalDiagnostic: Equatable, Sendable {
     public let presentationStage: PresentationStage?
 
     public init(
+        captureFocus: CaptureFocus? = nil,
         undo: Undo? = nil,
         focus: FocusOutcome? = nil,
         focusRead: FocusRead? = nil,
@@ -96,6 +110,7 @@ public struct NativeRefusalDiagnostic: Equatable, Sendable {
         panelPhase: PanelPhase? = nil,
         presentationStage: PresentationStage? = nil
     ) {
+        self.captureFocus = captureFocus
         self.undo = undo
         self.focus = focus
         self.focusRead = focusRead
