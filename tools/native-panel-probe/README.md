@@ -1,0 +1,11 @@
+# Native panel routing probe: source only
+
+Do not run until the owner explicitly approves this newly built diagnostic. No executable has been built or launched as part of adding these sources.
+
+Purpose: distinguish native AppKit text-field routing from the existing SwiftUI-hosted instruction panel, without changing Imrse's capture policy. This probe does not access editors, AX, clipboard, providers/models, network, or external processes. It requests no app activation. It creates only its own temporary nonactivating panel and empty synthetic field.
+
+The output is bounded closed event names and booleans; no typed text is logged. `matchesSyntheticQA` reports only equality to the fixed synthetic string. `ownFieldChanged` can occur on own-field changes; it does not establish physical keyboard input by itself. The operator must verify exact own PID and control and use actual q/a keys, never Enter/Send. AppKit's `makeFirstResponder` return and AX focused metadata are not sufficient proof of keyboard routing.
+
+For the explicitly approved bounded trial: use noneditable Calculator or Finder as the foreground host, with no user document, editable selection, or AI prompt, a fresh own process with a hard external 45-second timeout, no CUA activation during the live control, and read-only exact-PID control identification. The native panel's internal deadline is 30 seconds, but an external owned-process timeout is still required. Stop if q/a goes to the host; stop without rescuing focus. Escape should close only this panel. Do not alter focus to rescue the trial or automatically retry. Compare against the already-recorded SwiftUI control, accurately labeling differences; a native-field pass is feasibility evidence, not a product fix or target-safety proof.
+
+The source and supervisor require independent review before execution. Pin the compiled binary hash and manifest externally before launch. Supervisor exit zero establishes process cleanup only, not functional success; routing success requires actual q/a key evidence and an Escape event. Remove the compiled diagnostic after collecting evidence. Preserve the user's active app/configuration and the verified Imrse preset candidate. No installation, security changes, model request, or target replacement is part of this probe.

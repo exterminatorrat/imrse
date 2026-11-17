@@ -8,6 +8,10 @@ The native boundary is `ImrseMac`; business logic must not import AppKit. The `.
 
 Target validation is a precondition, not a convenience. Check application identity/liveness, element identity, protected input state, selected range and text. If the user changes apps or targets during generation, refuse to write. The fact that a panel temporarily owns focus is not permission to activate any app the user later left for another one.
 
+`AXDocument` is optional URL metadata, not a document-generation token. When a window advertises it but successfully returns an empty string, replace-selection capture may instead retain the exact editor, its nearest same-process/same-window ancestor WebArea and that WebArea's bounded, nonempty typed `AXURL`. This is an explicit alternative binding, not empty-as-unavailable decoding. Revalidation requires the window metadata to remain successful-empty, resolves ancestry from the retained editor, and requires the same WebArea and exact URL before replacement, during readback and for receipt Undo. Missing, malformed, changed or unreadable bindings refuse; other window-document read errors do not enter this path, and caret insertion does not use it. Traversal is depth- and cooperatively time-bounded on revalidation as well as capture.
+
+These checks establish observable target continuity, not hidden application-model ownership. A same-node, same-URL semantic draft transition that preserves all exposed selection evidence cannot be distinguished through those AX values alone. No notification-delivery or universal web-editor compatibility guarantee is implied; actual original-field replacement/readback/Undo and navigation cases still require native qualification.
+
 AX calls can block; their native timeout should remain bounded. Some hosts expose neither selected text nor a reliable range. No reliable capture means no transformation. Clipboard copying of a selection is not a fallback capture strategy.
 
 ## Replacement

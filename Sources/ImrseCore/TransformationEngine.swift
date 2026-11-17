@@ -2,6 +2,7 @@ import Foundation
 
 public enum TransformationState: Equatable, Sendable {
     case idle
+    case capturing
     case ready
     case generating
     case replacing
@@ -10,32 +11,76 @@ public enum TransformationState: Equatable, Sendable {
     case failed(ImrseError)
 }
 
+/// Session-only recovery result. Contains no captured source, target, or provider data.
+/// This is not proof that an editor write succeeded and grants no paste authority.
+public struct RetainedGeneratedOutput: Equatable, Sendable {
+    public let id: UUID
+    public let result: String
+}
+
 @MainActor
 public final class TransformationEngine {
     public static let maximumSelectionUTF8Bytes = 1_048_576
     public static let maximumInstructionUTF8Bytes = 65_536
     public static let maximumOutputUTF8Bytes = 1_048_576
 
+    /// Cancellation revokes publication, but source-copy ownership survives until the adapter returns.
+    public private(set) var isPreparingSourceCopy = false
+    public var hasPendingSourceCopyRecovery: Bool { selectionAccess.hasPendingSourceCopyRecovery }
     public private(set) var state = TransformationState.idle
     public private(set) var diagnostics = DiagnosticMetadata()
     public private(set) var responseMetadata: ResponseMetadata?
+    /// Available only after automatic application failed. Read/export never writes clipboard.
+    public var retainedGeneratedOutput: RetainedGeneratedOutput? {
+        expireRetainedOutputIfNeeded()
+        guard case .failed = state else { return nil }
+        return storedGeneratedOutput
+    }
     public var onChange: (@MainActor (TransformationState) -> Void)?
     public var onPrepareReplacement: (@MainActor () -> Void)?
     public var canUndo: Bool {
-        undoReceipt != nil && state != .generating && state != .replacing && state != .undoing
+        undoReceipt != nil && !isPreparingSourceCopy && !hasPendingSourceCopyRecovery && state != .capturing && state != .generating && state != .replacing && state != .undoing
     }
 
     private let selectionAccess: any SelectionAccess
     private let textProvider: any TextProvider
     private var target: SelectionSnapshot?
+    private var sourceDeadline: ContinuousClock.Instant?
+    private var sourceExpiryTask: Task<Void, Never>?
     private var activeOperationID: UUID?
+    private var captureTask: Task<Void, Never>?
+    private var captureOperationID: UUID?
     private var generationTask: Task<Void, Never>?
     private var undoReceipt: ReplacementReceipt?
     private var pendingResponseMetadata: ResponseMetadata?
+    private var storedGeneratedOutput: RetainedGeneratedOutput?
+    private var retainedOutputDeadline: ContinuousClock.Instant?
+    private var retainedOutputExpiryTask: Task<Void, Never>?
+    private let retainedOutputLifetime: Duration
+    private let now: @MainActor () -> ContinuousClock.Instant
 
     public init(selectionAccess: any SelectionAccess, textProvider: any TextProvider) {
         self.selectionAccess = selectionAccess
         self.textProvider = textProvider
+        retainedOutputLifetime = .seconds(180)
+        now = { ContinuousClock.now }
+    }
+
+    // Internal timing seam; production callers cannot disable retention bounds.
+    init(selectionAccess: any SelectionAccess, textProvider: any TextProvider,
+         retainedOutputLifetime: Duration,
+         now: @escaping @MainActor () -> ContinuousClock.Instant) {
+        self.selectionAccess = selectionAccess
+        self.textProvider = textProvider
+        self.retainedOutputLifetime = retainedOutputLifetime
+        self.now = now
+    }
+
+    /// Future explicit Copy Result boundary. A stale UI result ID cannot export a newer result.
+    /// No clipboard operation, automatic retry, target reactivation, or success claim occurs.
+    public func resultForExplicitCopy(outputID: UUID) -> String? {
+        guard let output = retainedGeneratedOutput, output.id == outputID else { return nil }
+        return output.result
     }
 
     public func invoke() {
@@ -43,14 +88,28 @@ public final class TransformationEngine {
     }
 
     public func invoke(intent: SelectionEditIntent) {
-        if state == .generating {
+        invoke(intent: intent, explicitSourceCopy: false)
+    }
+
+    /// Only custom replacement entry opts into source-copy preparation before input UI.
+    public func invokeWithExplicitSourceCopy(intent: SelectionEditIntent = .replaceSelection) {
+        invoke(intent: intent, explicitSourceCopy: intent == .replaceSelection && selectionAccess.supportsExplicitSourceCopy)
+    }
+
+    private func invoke(intent: SelectionEditIntent, explicitSourceCopy: Bool) {
+        if state == .generating || state == .capturing {
             cancel()
             return
         }
-        guard state == .idle else { return }
+        guard state == .idle, !isPreparingSourceCopy else { return }
+        clearRetainedOutput()
         responseMetadata = nil
         pendingResponseMetadata = nil
         diagnostics = DiagnosticMetadata()
+        guard !hasPendingSourceCopyRecovery else {
+            fail(.clipboardPending)
+            return
+        }
 
         let snapshot: SelectionSnapshot
         do {
@@ -80,6 +139,45 @@ public final class TransformationEngine {
         }
 
         target = snapshot
+        if explicitSourceCopy {
+            let operationID = UUID()
+            captureOperationID = operationID
+            isPreparingSourceCopy = true
+            captureTask = Task { [weak self] in
+                guard let self else { return }
+                defer {
+                    self.captureTask = nil
+                    self.isPreparingSourceCopy = false
+                    // Settlement is separate from UI state: cancelled work may still own a backup.
+                    self.onChange?(self.state)
+                }
+                guard self.isCapturing(operationID) else { return }
+                do {
+                    try await self.selectionAccess.prepareExplicitSourceCopy(snapshot)
+                    guard self.isCapturing(operationID) else { return }
+                    guard !self.hasPendingSourceCopyRecovery else { throw ImrseError.clipboardPending }
+                    self.captureOperationID = nil
+                    self.finishCapture(snapshot)
+                } catch {
+                    guard self.isCapturing(operationID) else { return }
+                    self.captureOperationID = nil
+                    self.fail(Self.validationFailure(error), selectionFailureReason: self.selectionAccess.lastFailureReason)
+                }
+            }
+            transition(to: .capturing)
+        } else {
+            finishCapture(snapshot)
+        }
+    }
+
+    private func finishCapture(_ snapshot: SelectionSnapshot) {
+        sourceDeadline = now().advanced(by: .seconds(180))
+        let sourceID = snapshot.id
+        sourceExpiryTask = Task { [weak self] in
+            do { try await Task.sleep(for: .seconds(180)) } catch { return }
+            guard let self, self.state == .ready, self.target?.id == sourceID else { return }
+            self.fail(.timeout)
+        }
         diagnostics.error = nil
         diagnostics.generation = "idle"
         diagnostics.replacement = "idle"
@@ -93,6 +191,8 @@ public final class TransformationEngine {
         fallbackProvider: ProviderConfiguration? = nil
     ) {
         guard state == .ready, let target else { return }
+        guard let sourceDeadline, now() < sourceDeadline else { fail(.timeout); return }
+        clearRetainedOutput()
         responseMetadata = nil
         pendingResponseMetadata = nil
         if target.intent == .insertAtCaret,
@@ -154,7 +254,9 @@ public final class TransformationEngine {
     }
 
     public func cancel() {
-        guard state == .ready || state == .generating else { return }
+        clearRetainedOutput()
+        guard state == .ready || state == .generating || state == .capturing else { return }
+        invalidateCapture()
         invalidateGeneration(cancelTask: true)
         responseMetadata = nil
         pendingResponseMetadata = nil
@@ -167,6 +269,8 @@ public final class TransformationEngine {
 
     public func dismiss() {
         guard state != .replacing, state != .undoing else { return }
+        clearRetainedOutput()
+        invalidateCapture()
         if state == .generating { invalidateGeneration(cancelTask: true) }
         responseMetadata = nil
         pendingResponseMetadata = nil
@@ -176,19 +280,36 @@ public final class TransformationEngine {
     }
 
     public func undo() async {
-        guard state != .generating, state != .replacing, state != .undoing else { return }
+        guard !isPreparingSourceCopy, !hasPendingSourceCopyRecovery, state != .capturing, state != .generating, state != .replacing, state != .undoing else { return }
+        clearRetainedOutput()
         guard let receipt = undoReceipt else {
             fail(.undoUnavailable)
             return
         }
 
         discardTarget()
+        if selectionAccess.isClipboardUndoDisabled(receipt) {
+            diagnostics.error = .clipboardUndoDisabled
+            diagnostics.selectionFailureReason = nil
+            diagnostics.writeAttempt = nil
+            diagnostics.replacementOutcome = nil
+            diagnostics.targetValid = nil
+            diagnostics.generation = "idle"
+            diagnostics.replacement = "failed"
+            // Configuration refusal is proven non-writing. Preserve this receipt;
+            // re-enabling only permits a future attempt, not bypassing validation.
+            transition(to: .failed(.clipboardUndoDisabled))
+            return
+        }
         undoReceipt = nil
         diagnostics.error = nil
+        diagnostics.replacementOutcome = nil
+        diagnostics.writeAttempt = nil
         diagnostics.replacement = "undoing"
         transition(to: .undoing)
         do {
             try await selectionAccess.undo(receipt)
+            diagnostics.writeAttempt = selectionAccess.lastWriteAttempt
             selectionAccess.discard(receipt.target)
             diagnostics.strategy = receipt.strategy
             diagnostics.error = nil
@@ -197,6 +318,7 @@ public final class TransformationEngine {
             diagnostics.replacement = "undone"
             transition(to: .succeeded(unchanged: false))
         } catch {
+            diagnostics.writeAttempt = selectionAccess.lastWriteAttempt
             let selectionFailureReason = selectionAccess.lastFailureReason
             selectionAccess.discard(receipt.target)
             let failure = Self.undoFailure(error)
@@ -215,6 +337,7 @@ public final class TransformationEngine {
     ) async {
         do {
             guard isGenerating(operationID) else { return }
+            guard let sourceDeadline, now() < sourceDeadline else { throw ImrseError.timeout }
             let stream = try await textProvider.stream(request)
             guard isGenerating(operationID) else { return }
 
@@ -244,14 +367,18 @@ public final class TransformationEngine {
             onPrepareReplacement?()
             guard isGenerating(operationID) else { return }
             do {
+                try await selectionAccess.prepareForReplacement(target)
+                guard isGenerating(operationID) else { return }
                 try selectionAccess.validate(target)
                 diagnostics.targetValid = true
             } catch {
+                guard isGenerating(operationID) else { return }
                 let selectionFailureReason = selectionAccess.lastFailureReason
                 diagnostics.targetValid = false
                 finish(
                     operationID,
                     failure: Self.validationFailure(error),
+                    generatedOutput: output,
                     selectionFailureReason: selectionFailureReason
                 )
                 return
@@ -260,15 +387,25 @@ public final class TransformationEngine {
 
             diagnostics.replacement = "running"
             transition(to: .replacing)
-            do {
-                let receipt = try await selectionAccess.replace(target, with: output)
-                guard activeOperationID == operationID, state == .replacing else { return }
+            let outcome = await selectionAccess.replace(target, with: output)
+            guard activeOperationID == operationID, state == .replacing else { return }
+            diagnostics.writeAttempt = selectionAccess.lastWriteAttempt
+            diagnostics.replacementOutcome = outcome.status
+            switch outcome {
+            case .applied(let receipt):
                 guard receipt.target == target,
                       receipt.target.text.utf16.elementsEqual(target.text.utf16),
                       receipt.replacement.utf16.elementsEqual(output.utf16)
                 else {
-                    diagnostics.replacement = "failed"
-                    finish(operationID, failure: .replacementFailed, replacementFailed: true)
+                    diagnostics.replacementOutcome = .unconfirmed
+                    diagnostics.targetValid = false
+                    finish(
+                        operationID,
+                        failure: .replacementFailed,
+                        generatedOutput: output,
+                        replacementFailed: true,
+                        invalidatesPriorUndo: true
+                    )
                     return
                 }
                 if let previousReceipt = undoReceipt {
@@ -284,16 +421,29 @@ public final class TransformationEngine {
                 diagnostics.generation = "complete"
                 diagnostics.replacement = "replaced"
                 transition(to: .succeeded(unchanged: false))
-            } catch {
-                guard activeOperationID == operationID, state == .replacing else { return }
+            case .notWritten(let error, let invalidatesPriorUndo):
                 let selectionFailureReason = selectionAccess.lastFailureReason
                 let failure = Self.replacementFailure(error)
                 if failure == .targetLost || failure == .staleSelection { diagnostics.targetValid = false }
                 finish(
                     operationID,
                     failure: failure,
+                    generatedOutput: output,
                     replacementFailed: true,
-                    selectionFailureReason: selectionFailureReason
+                    selectionFailureReason: selectionFailureReason,
+                    invalidatesPriorUndo: invalidatesPriorUndo
+                )
+            case .unconfirmed(let error):
+                let selectionFailureReason = selectionAccess.lastFailureReason
+                let failure = Self.replacementFailure(error)
+                diagnostics.targetValid = false
+                finish(
+                    operationID,
+                    failure: failure == .staleSelection ? .replacementFailed : failure,
+                    generatedOutput: output,
+                    replacementFailed: true,
+                    selectionFailureReason: selectionFailureReason,
+                    invalidatesPriorUndo: true
                 )
             }
         } catch {
@@ -317,13 +467,20 @@ public final class TransformationEngine {
     private func finish(
         _ operationID: UUID,
         failure: ImrseError,
+        generatedOutput: String? = nil,
         replacementFailed: Bool = false,
-        selectionFailureReason: SelectionFailureReason? = nil
+        selectionFailureReason: SelectionFailureReason? = nil,
+        invalidatesPriorUndo: Bool = false
     ) {
         guard activeOperationID == operationID else { return }
+        clearRetainedOutput()
+        if failure != .cancelled, let generatedOutput,
+           generatedOutput.utf8.count <= Self.maximumOutputUTF8Bytes {
+            retainGeneratedOutput(generatedOutput)
+        }
         invalidateGeneration(cancelTask: false)
         pendingResponseMetadata = nil
-        if replacementFailed && failure == .clipboardPending {
+        if invalidatesPriorUndo {
             if let previousReceipt = undoReceipt {
                 selectionAccess.discard(previousReceipt.target)
             }
@@ -338,6 +495,7 @@ public final class TransformationEngine {
     }
 
     private func fail(_ failure: ImrseError, selectionFailureReason: SelectionFailureReason? = nil) {
+        clearRetainedOutput()
         responseMetadata = nil
         pendingResponseMetadata = nil
         discardTarget()
@@ -348,6 +506,31 @@ public final class TransformationEngine {
         transition(to: .failed(failure))
     }
 
+    private func retainGeneratedOutput(_ result: String) {
+        let output = RetainedGeneratedOutput(id: UUID(), result: result)
+        storedGeneratedOutput = output
+        retainedOutputDeadline = now().advanced(by: retainedOutputLifetime)
+        let outputID = output.id
+        retainedOutputExpiryTask = Task { [weak self, retainedOutputLifetime] in
+            do { try await Task.sleep(for: retainedOutputLifetime) } catch { return }
+            guard let self, self.storedGeneratedOutput?.id == outputID else { return }
+            self.clearRetainedOutput()
+            self.onChange?(self.state)
+        }
+    }
+
+    private func expireRetainedOutputIfNeeded() {
+        guard let deadline = retainedOutputDeadline, now() >= deadline else { return }
+        clearRetainedOutput()
+    }
+
+    private func clearRetainedOutput() {
+        retainedOutputExpiryTask?.cancel()
+        retainedOutputExpiryTask = nil
+        retainedOutputDeadline = nil
+        storedGeneratedOutput = nil
+    }
+
     private func invalidateGeneration(cancelTask: Bool) {
         let task = generationTask
         activeOperationID = nil
@@ -355,7 +538,19 @@ public final class TransformationEngine {
         if cancelTask { task?.cancel() }
     }
 
+    private func isCapturing(_ id: UUID) -> Bool {
+        captureOperationID == id && state == .capturing && !Task.isCancelled
+    }
+
+    private func invalidateCapture() {
+        captureOperationID = nil
+        captureTask?.cancel()
+    }
+
     private func discardTarget() {
+        sourceExpiryTask?.cancel()
+        sourceExpiryTask = nil
+        sourceDeadline = nil
         guard let target else { return }
         self.target = nil
         selectionAccess.discard(target)
@@ -414,13 +609,14 @@ public final class TransformationEngine {
     }
 
     private static func validationFailure(_ error: any Error) -> ImrseError {
-        (error as? ImrseError) ?? .targetLost
+        if error is CancellationError { return .cancelled }
+        return (error as? ImrseError) ?? .targetLost
     }
 
     private static func replacementFailure(_ error: any Error) -> ImrseError {
         guard let error = error as? ImrseError else { return .replacementFailed }
         return switch error {
-        case .targetLost, .staleSelection, .clipboardFailed, .clipboardPending, .permissionRequired: error
+        case .targetLost, .staleSelection, .clipboardFailed, .clipboardPending, .permissionRequired, .cancelled, .unsupportedEditor: error
         default: .replacementFailed
         }
     }

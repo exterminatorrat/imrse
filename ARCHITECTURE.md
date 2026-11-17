@@ -18,11 +18,17 @@ The shortcut handler invokes the engine on MainActor. `SelectionAccess.capture` 
 
 The app never types partial responses into a host. There is no content history, persistent transformation queue, background job service or content telemetry.
 
+`SelectionAccess.replace` returns an explicit `ReplacementOutcome`. `applied` carries a verified receipt; `notWritten` requires that no host mutation was dispatched; `unconfirmed` means a dispatch occurred without a verified receipt. AX error names do not prove whether a write happened. A per-call native dispatch record becomes uncertain immediately before an AX setter or paste command, and never resets after dispatch, even when an intermediate readback permits the existing fallback path. Unconfirmed results and mismatched receipts remove the previous Undo receipt. A no-dispatch failure preserves it unless the independent clipboard-recovery gate explicitly invalidates it.
+
+Clipboard staging/restoration and host mutation are separate facts. A `notWritten` result can still have pending clipboard recovery, and changing the outcome never clears that transaction. Diagnostics report only the closed outcome status, not receipt contents. Unchanged model output bypasses replacement and does not manufacture an applied outcome. These contracts do not establish native host compatibility or future Undo eligibility.
+
 Provider dispatch distinguishes compatible API endpoints, official ChatGPT-account Responses inference and managed local generation. Account models are filtered against account availability. Local-only permits native inference/loopback, never remote fallback; a ChatGPT primary cannot silently fall back to remote API-key billing. Only completed final output is released for host validation, not reasoning/commentary or token-budget exhaustion.
 
 ## Concurrency and ownership
 
 Selection and presentation are MainActor-isolated because macOS responder and AX handles belong to a single adapter owner. Providers and credential stores are Sendable. Generation is an owned cancellable task, not detached work. Cancellation invalidates the active operation before releasing captured content, so late responses cannot commit. Replacement is a small commit phase: do not interrupt a write halfway through or let a second operation start before the first adapter settles.
+
+The native forward-write boundary checks cancellation before starting an AX write; clipboard posting keeps its existing immediate pre-dispatch check. This prevents new dispatch after cancellation is observed, not a late effect from a command already dispatched. Cancellation does not promise host rollback or cancel pending clipboard recovery.
 
 Targets are opaque snapshot IDs in Core. The AX element and any platform verification details live in the native registry. A receipt contains only the original selection, completed replacement and strategy. No host document is retained in the engine. Undo must revalidate the replacement, application and target; stale targets fail closed.
 

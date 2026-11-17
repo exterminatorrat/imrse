@@ -12,6 +12,204 @@ import XCTest
 
 @MainActor
 final class AppPillBridgeTests: XCTestCase {
+    func testPendingSourceRecoveryInvocationShowsOnlyFailureWithoutCapture() {
+        let selection = RecordingSelectionAccess()
+        selection.supportsExplicitSourceCopy = true
+        selection.hasPendingSourceCopyRecovery = true
+        let provider = RecordingTextProvider(output: "updated")
+        let preset = Preset(id: "direct", name: "Direct", instruction: "Synthetic")
+        let (bridge, pill) = makeBridge(selection: selection, provider: provider, presets: [preset])
+        var phases: [PillPhase] = []
+        bridge.onPresent = { _ in phases.append(pill.phase) }
+        for presetID in [nil, nil, preset.id] as [String?] {
+            bridge.invoke(presetID: presetID)
+            XCTAssertEqual(bridge.engine.state, .failed(.clipboardPending))
+            guard case .failure = pill.phase else { return XCTFail("Recovery must present existing failure UI") }
+        }
+        XCTAssertEqual(phases.count, 3)
+        XCTAssertTrue(phases.allSatisfy { if case .failure = $0 { return true }; return false })
+        XCTAssertEqual(selection.captureCount, 0)
+        XCTAssertTrue(selection.sourcePreparations.isEmpty)
+        XCTAssertTrue(provider.requests.isEmpty)
+        XCTAssertEqual(selection.replaceCount, 0)
+    }
+
+    func testExplicitCopyHoldsInputUntilReadyWithoutStartingProvider() async {
+        let selection = RecordingSelectionAccess()
+        selection.supportsExplicitSourceCopy = true
+        let provider = RecordingTextProvider(output: "updated")
+        let (bridge, pill) = makeBridge(selection: selection, provider: provider)
+        var presentations = 0
+        bridge.onPresent = { _ in presentations += 1 }
+        bridge.invoke()
+        XCTAssertEqual(bridge.engine.state, .capturing)
+        XCTAssertEqual(pill.phase, .hidden)
+        XCTAssertEqual(presentations, 0)
+        await waitUntil { selection.sourcePreparations.count == 1 }
+        selection.sourcePreparations[0].resume()
+        await waitUntil { bridge.engine.state == .ready }
+        XCTAssertEqual(pill.phase, .input)
+        XCTAssertEqual(presentations, 1)
+        XCTAssertTrue(provider.requests.isEmpty)
+        bridge.dismiss()
+    }
+
+    func testExplicitCopyDismissAndReinvokeIgnoreLateCompletion() async {
+        let selection = RecordingSelectionAccess()
+        selection.supportsExplicitSourceCopy = true
+        let provider = RecordingTextProvider(output: "updated")
+        let (bridge, pill) = makeBridge(selection: selection, provider: provider)
+        var presentations = 0
+        bridge.onPresent = { _ in presentations += 1 }
+        bridge.invoke()
+        await waitUntil { selection.sourcePreparations.count == 1 }
+        bridge.dismiss()
+        bridge.invoke()
+        for _ in 0..<20 { await Task.yield() }
+        XCTAssertEqual(selection.sourcePreparations.count, 1)
+        XCTAssertEqual(bridge.engine.state, .idle)
+        selection.sourcePreparations[0].resume()
+        await waitUntil { !bridge.engine.isPreparingSourceCopy }
+        XCTAssertEqual(pill.phase, .hidden)
+        XCTAssertEqual(presentations, 0)
+        bridge.invoke()
+        await waitUntil { selection.sourcePreparations.count == 2 }
+        selection.sourcePreparations[1].resume()
+        await waitUntil { bridge.engine.state == .ready }
+        XCTAssertEqual(presentations, 1)
+        XCTAssertTrue(provider.requests.isEmpty)
+        bridge.dismiss()
+    }
+
+    func testExplicitCopyFailureShowsOneFailureAndPresetBypassesPreparation() async {
+        let selection = RecordingSelectionAccess()
+        selection.supportsExplicitSourceCopy = true
+        let provider = RecordingTextProvider(output: "updated")
+        let preset = Preset(id: "direct", name: "Direct", instruction: "Synthetic")
+        let (bridge, pill) = makeBridge(selection: selection, provider: provider, presets: [preset])
+        var presentations = 0
+        bridge.onPresent = { _ in presentations += 1 }
+        bridge.invoke()
+        await waitUntil { selection.sourcePreparations.count == 1 }
+        selection.sourcePreparations[0].resume(throwing: ImrseError.clipboardFailed)
+        await waitUntil { bridge.engine.state == .failed(.clipboardFailed) }
+        guard case .failure = pill.phase else { return XCTFail("Expected failure, not input") }
+        XCTAssertEqual(presentations, 1)
+        XCTAssertTrue(provider.requests.isEmpty)
+        bridge.invoke(presetID: preset.id)
+        await waitUntil { bridge.engine.state == .succeeded(unchanged: false) }
+        XCTAssertEqual(selection.sourcePreparations.count, 1)
+        XCTAssertEqual(provider.requests.count, 1)
+    }
+
+    func testDirectPresetPresentsOnlyNonKeyProcessingAndDispatchesOnce() async {
+        let selection = RecordingSelectionAccess()
+        let provider = RecordingTextProvider(output: "updated")
+        let preset = Preset(id: "direct", name: "Direct", instruction: "Synthetic instruction")
+        let (bridge, pill) = makeBridge(selection: selection, provider: provider, presets: [preset])
+        var phases: [PillPhase] = []
+        bridge.onPresent = { _ in
+            phases.append(pill.phase)
+            XCTAssertFalse(PillPanelController.acceptsInputFocus(for: pill.phase))
+        }
+        bridge.invoke(presetID: preset.id)
+        guard case .processing = phases.first else { return XCTFail("First presentation must be processing") }
+        XCTAssertEqual(phases.count, 1)
+        XCTAssertTrue(provider.requests.isEmpty)
+        await waitUntil { bridge.engine.state == .succeeded(unchanged: false) }
+        XCTAssertEqual(provider.requests.count, 1)
+        XCTAssertEqual(selection.replaceCount, 1)
+        // Reuse the previous success/feedback panel without an input-key presentation.
+        bridge.invoke(presetID: preset.id)
+        await waitUntil { selection.replaceCount == 2 }
+        XCTAssertTrue(phases.allSatisfy { !PillPanelController.acceptsInputFocus(for: $0) })
+        XCTAssertEqual(provider.requests.count, 2)
+    }
+
+    func testDirectPresetRouteFailurePresentsOneNonKeyFailureWithoutProvider() {
+        let selection = RecordingSelectionAccess()
+        let provider = RecordingTextProvider(output: "updated")
+        let preset = Preset(id: "direct", name: "Direct", instruction: "Synthetic", providerID: "missing")
+        let (bridge, pill) = makeBridge(selection: selection, provider: provider, presets: [preset])
+        var phases: [PillPhase] = []
+        bridge.onPresent = { _ in phases.append(pill.phase) }
+        bridge.invoke(presetID: preset.id)
+        XCTAssertEqual(phases.count, 1)
+        guard case .failure = phases.first else { return XCTFail("Route failure must be presented directly") }
+        XCTAssertFalse(PillPanelController.acceptsInputFocus(for: pill.phase))
+        XCTAssertTrue(provider.requests.isEmpty)
+        XCTAssertEqual(selection.replaceCount, 0)
+        bridge.invoke(presetID: preset.id)
+        XCTAssertEqual(phases.count, 2)
+        XCTAssertTrue(phases.allSatisfy { !PillPanelController.acceptsInputFocus(for: $0) })
+    }
+
+    func testDirectPresetPresentationCanCancelBeforeProviderStarts() async {
+        let selection = RecordingSelectionAccess()
+        let provider = RecordingTextProvider(output: "updated")
+        let preset = Preset(id: "direct", name: "Direct", instruction: "Synthetic")
+        let (bridge, pill) = makeBridge(selection: selection, provider: provider, presets: [preset])
+        bridge.onPresent = { _ in
+            XCTAssertFalse(PillPanelController.acceptsInputFocus(for: pill.phase))
+            pill.dismiss()
+        }
+        bridge.invoke(presetID: preset.id)
+        await Task.yield()
+        XCTAssertEqual(pill.phase, .hidden)
+        XCTAssertTrue(provider.requests.isEmpty)
+        XCTAssertEqual(selection.replaceCount, 0)
+    }
+
+    func testDirectPresetStillRefusesTargetDriftBeforeWrite() async {
+        for failure in [ImrseError.staleSelection, .targetLost, .secureInput] {
+            let selection = RecordingSelectionAccess()
+            selection.onValidate = { throw failure }
+            let provider = RecordingTextProvider(output: "updated")
+            let preset = Preset(id: "direct", name: "Direct", instruction: "Synthetic")
+            let (bridge, pill) = makeBridge(selection: selection, provider: provider, presets: [preset])
+            bridge.onPresent = { _ in XCTAssertFalse(PillPanelController.acceptsInputFocus(for: pill.phase)) }
+            bridge.invoke(presetID: preset.id)
+            await waitUntil { if case .failed = bridge.engine.state { return true }; return false }
+            XCTAssertEqual(selection.replaceCount, 0)
+            XCTAssertEqual(provider.requests.count, 1)
+        }
+    }
+
+    func testDirectPresetUnknownAndCaptureFailureNeverPresentInputOrStartProvider() {
+        for captureFails in [false, true] {
+            let selection = RecordingSelectionAccess(captureError: captureFails ? .noSelection : nil)
+            let provider = RecordingTextProvider(output: "updated")
+            let preset = Preset(id: "direct", name: "Direct", instruction: "Synthetic")
+            let (bridge, pill) = makeBridge(selection: selection, provider: provider, presets: [preset])
+            var phases: [PillPhase] = []
+            bridge.onPresent = { _ in phases.append(pill.phase) }
+            bridge.invoke(presetID: captureFails ? preset.id : "unknown")
+            XCTAssertEqual(phases.count, 1)
+            guard case .failure = phases.first else { return XCTFail("Expected non-key failure") }
+            XCTAssertFalse(PillPanelController.acceptsInputFocus(for: pill.phase))
+            XCTAssertTrue(provider.requests.isEmpty)
+            XCTAssertEqual(selection.replaceCount, 0)
+            XCTAssertEqual(selection.captureCount, captureFails ? 1 : 0)
+        }
+    }
+
+    func testDirectPresetRepeatedShortcutCancelsWithoutAnotherCaptureOrRequest() async {
+        let selection = RecordingSelectionAccess()
+        let provider = RecordingTextProvider(output: "updated")
+        let preset = Preset(id: "direct", name: "Direct", instruction: "Synthetic")
+        let (bridge, pill) = makeBridge(selection: selection, provider: provider, presets: [preset])
+        var presentations = 0
+        bridge.onPresent = { _ in presentations += 1 }
+        bridge.invoke(presetID: preset.id)
+        bridge.invoke(presetID: preset.id)
+        await Task.yield()
+        XCTAssertEqual(presentations, 1)
+        XCTAssertEqual(selection.captureCount, 1)
+        XCTAssertTrue(provider.requests.isEmpty)
+        XCTAssertEqual(selection.replaceCount, 0)
+        XCTAssertEqual(pill.phase, .hidden)
+    }
+
     func testPillGeometryTokensMatchSharedContract() {
         XCTAssertEqual(PillTokens.width, 360)
         XCTAssertEqual(PillTokens.height, 52)
@@ -435,6 +633,35 @@ final class AppPillBridgeTests: XCTestCase {
     }
 
     #if DEBUG
+    func testTerminationWaitsForCancelledSourcePreparationAndRespectsPendingBackup() async {
+        for pendingBackup in [false, true] {
+            let selection = RecordingSelectionAccess()
+            selection.supportsExplicitSourceCopy = true
+            let provider = RecordingTextProvider(output: "updated")
+            let engine = TransformationEngine(selectionAccess: selection, textProvider: provider)
+            let model = AppModel(testEngine: engine)
+            engine.invokeWithExplicitSourceCopy()
+            await waitUntil { selection.sourcePreparations.count == 1 }
+            var replies: [NSApplication.TerminateReply] = []
+            XCTAssertEqual(model.requestTermination { replies.append($0) }, .terminateLater)
+            XCTAssertTrue(engine.isPreparingSourceCopy)
+            XCTAssertTrue(replies.isEmpty)
+            engine.invokeWithExplicitSourceCopy()
+            XCTAssertEqual(selection.captureCount, 1)
+            selection.hasPendingSourceCopyRecovery = pendingBackup
+            selection.sourcePreparations[0].resume()
+            await waitUntil { !replies.isEmpty }
+            XCTAssertEqual(replies, [pendingBackup ? .terminateCancel : .terminateNow])
+            XCTAssertFalse(engine.isPreparingSourceCopy)
+            XCTAssertTrue(provider.requests.isEmpty)
+            if pendingBackup {
+                XCTAssertFalse(model.isTerminating)
+                XCTAssertEqual(model.requestTermination { replies.append($0) }, .terminateCancel)
+                XCTAssertEqual(replies.count, 1)
+            }
+        }
+    }
+
     func testTerminationDuringReplacementWaitsWithoutCancellingCommit() async {
         let selection = RecordingSelectionAccess(holdReplacement: true)
         let provider = RecordingTextProvider(output: "updated")
@@ -912,6 +1139,13 @@ final class AppPillBridgeTests: XCTestCase {
 
 @MainActor
 private final class RecordingSelectionAccess: SelectionAccess {
+    var supportsExplicitSourceCopy = false
+    var hasPendingSourceCopyRecovery = false
+    var sourcePreparations: [CheckedContinuation<Void, any Error>] = []
+    func prepareExplicitSourceCopy(_ target: SelectionSnapshot) async throws {
+        try await withCheckedThrowingContinuation { sourcePreparations.append($0) }
+    }
+
     let snapshot = SelectionSnapshot(
         applicationID: "test.application",
         processID: 123,
@@ -969,14 +1203,14 @@ private final class RecordingSelectionAccess: SelectionAccess {
 
     func validate(_ target: SelectionSnapshot) throws { try onValidate?() }
 
-    func replace(_ target: SelectionSnapshot, with text: String) async throws -> ReplacementReceipt {
+    func replace(_ target: SelectionSnapshot, with text: String) async -> ReplacementOutcome {
         replaceCount += 1
         replacedTargets.append(target)
         if holdReplacement {
             await withCheckedContinuation { replacementContinuation = $0 }
         }
-        if let replacementError { throw replacementError }
-        return ReplacementReceipt(target: target, replacement: text, strategy: .selectedText)
+        if let replacementError { return .notWritten(replacementError, invalidatesPriorUndo: false) }
+        return .applied(ReplacementReceipt(target: target, replacement: text, strategy: .selectedText))
     }
 
     func undo(_ receipt: ReplacementReceipt) async throws {

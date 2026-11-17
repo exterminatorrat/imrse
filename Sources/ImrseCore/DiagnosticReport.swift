@@ -4,13 +4,19 @@ public enum DiagnosticReport {
     private static let generationStages: Set<String> = ["idle", "running", "complete", "failed", "cancelled"]
     private static let replacementStages: Set<String> = ["idle", "running", "replaced", "unchanged", "undoing", "undone", "failed"]
 
-    public static func render(_ metadata: DiagnosticMetadata) -> String {
+    public static func render(_ metadata: DiagnosticMetadata,
+                              lastCaptureFocusObservation: CaptureFocusObservation? = nil) -> String {
         var fields: [String: Any] = [
             "accessibilityGranted": metadata.accessibilityGranted,
             "eventMonitoringActive": metadata.eventMonitoringActive,
             "generation": generationStages.contains(metadata.generation) ? metadata.generation : "unknown",
             "replacement": replacementStages.contains(metadata.replacement) ? metadata.replacement : "unknown"
         ]
+        if let observation = lastCaptureFocusObservation {
+            var eventFields = nativeRefusalFields(observation.evidence)
+            eventFields["event"] = "captureInvalidatedByFocusObservation"
+            fields["lastCaptureFocusObservation"] = eventFields
+        }
         if let applicationID = metadata.applicationID {
             fields["applicationID"] = safeString(applicationID, maximumScalars: 128)
         }
@@ -23,8 +29,57 @@ public enum DiagnosticReport {
         if let selectionFailureReason = metadata.selectionFailureReason {
             fields["selectionFailureReason"] = selectionFailureReason.rawValue
         }
+        if metadata.selectionFailureReason == .documentContextUnavailable,
+           let documentContextFailure = metadata.documentContextFailure {
+            fields["documentContextFailure"] = documentContextFailure.rawValue
+            if documentContextFailure == .emptyValue,
+               let diagnostic = metadata.documentBindingDiagnostic {
+                var binding: [String: Any] = ["ancestorResult": diagnostic.ancestorResult.rawValue]
+                if let depth = diagnostic.candidateDepth,
+                   (0...DocumentBindingDiagnostic.maximumAncestorDepth).contains(depth) {
+                    binding["candidateDepth"] = depth
+                }
+                if let read = diagnostic.candidateURLRead {
+                    binding["candidateURLRead"] = read.rawValue
+                }
+                if let comparison = diagnostic.comparison {
+                    var equality: [String: Any] = [
+                        "windowUnchanged": comparison.windowUnchanged,
+                        "editorUnchanged": comparison.editorUnchanged
+                    ]
+                    if let unchanged = comparison.webAreaUnchanged {
+                        equality["webAreaUnchanged"] = unchanged
+                    }
+                    if let unchanged = comparison.urlUnchanged {
+                        equality["urlUnchanged"] = unchanged
+                    }
+                    binding["comparison"] = equality
+                }
+                fields["documentBinding"] = binding
+            }
+        }
         if let targetValid = metadata.targetValid { fields["targetValid"] = targetValid }
         if let strategy = metadata.strategy { fields["strategy"] = strategy.rawValue }
+        if let outcome = metadata.replacementOutcome { fields["replacementOutcome"] = outcome.rawValue }
+        if let attempt = metadata.writeAttempt {
+            var write: [String: Any] = ["strategy": attempt.strategy.rawValue]
+            if let status = attempt.setterStatus { write["setterStatus"] = status.rawValue }
+            if let readback = attempt.readback { write["readback"] = readback.rawValue }
+            if let confirmation = attempt.clipboardConfirmation {
+                var evidence: [String: Any] = ["phase": confirmation.phase.rawValue,
+                    "sampleCount": confirmation.sampleCount, "elapsedMilliseconds": confirmation.elapsedMilliseconds]
+                if let outcome = confirmation.outcome { evidence["outcome"] = outcome.rawValue }
+                if let read = confirmation.failedRead {
+                    evidence["failedRead"] = ["operation": read.operation.rawValue,
+                        "attribute": read.attribute.rawValue, "status": read.status.rawValue]
+                }
+                write["clipboardConfirmation"] = evidence
+            }
+            fields["writeAttempt"] = write
+        }
+        if let nativeRefusal = metadata.nativeRefusalDiagnostic {
+            fields["nativeRefusal"] = nativeRefusalFields(nativeRefusal)
+        }
         if let providerName = metadata.providerName {
             fields["providerName"] = safeString(providerName, maximumScalars: 128)
         }
@@ -35,6 +90,40 @@ public enum DiagnosticReport {
 
         let data = (try? JSONSerialization.data(withJSONObject: fields, options: [.sortedKeys])) ?? Data("{}".utf8)
         return String(data: data, encoding: .utf8) ?? "{}"
+    }
+
+    private static func nativeRefusalFields(_ diagnostic: NativeRefusalDiagnostic) -> [String: Any] {
+        var fields: [String: Any] = [:]
+        if let capture = diagnostic.captureFocus, (1...128).contains(capture.attempts) {
+            fields["captureFocus"] = [
+                "firstRead": capture.firstRead.rawValue,
+                "lastRead": capture.lastRead.rawValue,
+                "attempts": capture.attempts,
+                "retryBudgetEnded": capture.retryBudgetEnded
+            ] as [String: Any]
+        }
+        if let undo = diagnostic.undo {
+            var undoFields: [String: Any] = [
+                "route": undo.route.rawValue,
+                "stage": undo.stage.rawValue
+            ]
+            if let style = undo.style { undoFields["style"] = style.rawValue }
+            fields["undo"] = undoFields
+        }
+        if let site = diagnostic.focusSite { fields["focusSite"] = site.rawValue }
+        if let ownership = diagnostic.panelOwnership {
+            fields["panelOwnership"] = ["isKey": ownership.isKey,
+                "ownAppActive": ownership.ownAppActive,
+                "activationRequested": ownership.activationRequested]
+        }
+        if let focus = diagnostic.focus { fields["focus"] = focus.rawValue }
+        if let focusRead = diagnostic.focusRead { fields["focusRead"] = focusRead.rawValue }
+        if let foreground = diagnostic.foreground { fields["foreground"] = foreground.rawValue }
+        if let panelPhase = diagnostic.panelPhase { fields["panelPhase"] = panelPhase.rawValue }
+        if let presentationStage = diagnostic.presentationStage {
+            fields["presentationStage"] = presentationStage.rawValue
+        }
+        return fields
     }
 
     private static func safeString(_ value: String, maximumScalars: Int) -> String {

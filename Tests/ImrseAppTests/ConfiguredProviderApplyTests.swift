@@ -249,7 +249,7 @@ private func terminalState(from states: AsyncStream<TransformationState>) async 
         switch state {
         case .succeeded, .failed:
             return state
-        case .idle, .ready, .generating, .replacing, .undoing:
+        case .idle, .capturing, .ready, .generating, .replacing, .undoing:
             continue
         }
     }
@@ -321,10 +321,10 @@ private final class SyntheticSelectionAccess: SelectionAccess {
         guard !isStale, target == snapshot else { throw ImrseError.staleSelection }
     }
 
-    func replace(_ target: SelectionSnapshot, with text: String) async throws -> ReplacementReceipt {
+    func replace(_ target: SelectionSnapshot, with text: String) async -> ReplacementOutcome {
         writes.append(Write(target: target, replacement: text))
         currentSelectionText = text
-        return ReplacementReceipt(target: target, replacement: text, strategy: .selectedText)
+        return .applied(ReplacementReceipt(target: target, replacement: text, strategy: .selectedText))
     }
 
     func undo(_ receipt: ReplacementReceipt) async throws {

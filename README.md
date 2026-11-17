@@ -279,6 +279,8 @@ A recent locally validated app bundle contains both `arm64` and `x86_64` slices.
 
 Replacement checks are bounded to measured targets: disposable plain text in TextEdit and input/textarea fixtures in Safari, Chrome, and Vivaldi. Rich-text editors, web `contenteditable` fields, and other unmeasured apps are not claimed as supported.
 
+An empty window `AXDocument` URL no longer has to be the only capture authority: replace-selection can use a retained editor-bound WebArea and its nonempty typed URL, rechecked at every existing target-validation boundary including Undo. This does not enable caret insertion, change clipboard preferences, or qualify Capy/ChatGPT editing by itself. See [capture and target lifetime](MACOS_INTEGRATION.md#capture-and-target-lifetime) for the exact binding and its observable-target limitation.
+
 **Last recorded verification.** The provider/capture source change passed all four CI checks. Local verification reported 88 focused tests and a strict 390-test suite (one opt-in probe skipped, zero failures); app resources and the ad-hoc signature passed packaging checks. One app was deployed on macOS 26.2 with its previous bundle retained for rollback. No per-provider live sign-in or inference result, or live privacy CLI probe, is claimed.
 
 See the [verification report](VERIFICATION.md) for test scope, [remaining macOS gates](UNVERIFIED_MACOS.md) for what is still unverified, and the [web editor investigation roadmap](docs/web-editor-roadmap.md) for future validation gates; the roadmap is not a support commitment.
@@ -295,6 +297,12 @@ See the [verification report](VERIFICATION.md) for test scope, [remaining macOS 
 - **macOS asks for a login-Keychain password:** Review the app and prompt locally. This is separate from Accessibility and Input Monitoring; check those permissions separately in System Settings. Do not share your password or delete Keychain items as a workaround.
 
 When reporting a problem, use disposable non-sensitive text. Never include selected or generated text, passwords, API keys, tokens, or confidential content in issues. An ad-hoc download may be blocked by Gatekeeper. Only for an app you have independently confirmed is the expected, unmodified, nonmalicious build from a source you trust, Apple may offer **Open Anyway** in **System Settings → Privacy & Security** after the first blocked launch. Review the alert and confirm **Open** yourself; managed Macs may disallow this app-specific exception. It does not verify the publisher or make the app notarized. See Apple's [Open Anyway instructions](https://support.apple.com/en-us/102445). Never disable Gatekeeper globally, strip quarantine flags, bypass a suspected tampered or malicious app, or automate security or Keychain consent.
+
+### Opt-in document-binding diagnostics
+
+For an owned, non-sensitive test draft, an approved build can inspect the selected editor's parent chain after an empty-window-document refusal. This does not enable editing or bypass the refusal. Fully quit the agreed installed copy first, then launch it with `open /Applications/imrse.app --args --document-binding-diagnostics`. Use **Settings → Advanced → Diagnostics → View…** after capture. Fully quit and relaunch normally to disable the probe; no configuration or provider setting is changed.
+
+The probe is off by default, stays within the selected editor's process/window and existing capture deadline, and walks at most 64 ancestors. It reports only closed status/type classifications, bounded depth and equality/change booleans. At most one previous sample's element handles and bounded URL value are held privately in memory for comparison; URLs, titles, text, stable identifiers and hashes are never included in the report. Missing comparisons remain unknown. A matching URL or element is an observation, not proof of a document-instance lifetime or editor support.
 
 ## Engineering and license
 

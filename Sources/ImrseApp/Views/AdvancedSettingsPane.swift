@@ -26,7 +26,7 @@ struct AdvancedSettingsPane: View {
                     detail: "Control activation timing and selected-text replacement."
                 ) {
                     VStack(spacing: 12) {
-                        ImrseLabeledRow("Allow clipboard fallback") {
+                        ImrseLabeledRow("Allow compatible clipboard editing") {
                             Toggle("", isOn: clipboardFallbackBinding)
                                 .labelsHidden()
                                 .toggleStyle(.switch)
@@ -35,8 +35,8 @@ struct AdvancedSettingsPane: View {
                         }
 
                         SettingsHint(
-                            title: "Clipboard fallback",
-                            detail: "Uses the clipboard only when Accessibility can't replace selected text.",
+                            title: "Compatible clipboard editing",
+                            detail: "Uses the clipboard in compatible fields where direct editing is unreliable. If an edit cannot be verified, imrse stops rather than trying again.",
                             symbol: "clipboard"
                         )
 

@@ -8,6 +8,14 @@ public enum ProviderKind: String, Codable, CaseIterable, Sendable {
     case anthropic, openRouterAccount, huggingFaceAccount, githubCopilot
 }
 public enum ReplacementStrategy: String, Codable, Sendable { case selectedText, valueRange, clipboard }
+public enum DocumentContextFailure: String, Equatable, Sendable {
+    case attributeUnsupported
+    case unexpectedNoValuePayload
+    case missingValue
+    case unexpectedValueType
+    case emptyValue
+    case valueTooLong
+}
 public enum SelectionFailureReason: String, Equatable, Sendable {
     case frontmostApplicationUnavailable
     case ownApplicationFocused
@@ -23,6 +31,17 @@ public enum SelectionFailureReason: String, Equatable, Sendable {
     case selectedTextLengthMismatch
     case captureChangedDuringSetup
     case captureInvalidated
+    case instructionCaptureMissing
+    case instructionTicketMissing
+    case instructionTicketExpiredOrInvalid
+    case instructionNotReturning
+    case instructionPanelNotReleased
+    case instructionProcessChanged
+    case focusReturnInvalid
+    case focusReturnForegroundMissing
+    case focusReturnOtherApplication
+    case focusReturnActivationRejected
+    case focusReturnTimedOut
     case captureObservedFocusChange
     case captureObservedSelectionChange
     case captureObservedValueChange
@@ -42,6 +61,8 @@ public enum SelectionFailureReason: String, Equatable, Sendable {
     case axReadFailure
     case axValueTypeMismatch
     case protectedTarget
+    case virtualizedEditorSurface
+    case surfaceMetadataUnavailable
     case replacementVerificationFailed
     case replacementWriteRejected
     case replacementReadbackFailed
@@ -138,12 +159,40 @@ public struct ReplacementReceipt: Equatable, Sendable {
     }
 }
 
+public enum ReplacementOutcome: Equatable, Sendable {
+    public enum Status: String, Equatable, Sendable {
+        case applied
+        case notWritten
+        case unconfirmed
+    }
+
+    case applied(ReplacementReceipt)
+    case notWritten(ImrseError, invalidatesPriorUndo: Bool)
+    case unconfirmed(ImrseError)
+
+    public var status: Status {
+        switch self {
+        case .applied: .applied
+        case .notWritten: .notWritten
+        case .unconfirmed: .unconfirmed
+        }
+    }
+}
+
 @MainActor public protocol SelectionAccess: AnyObject {
     var lastFailureReason: SelectionFailureReason? { get }
+    var lastWriteAttempt: WriteAttemptDiagnostic? { get }
     func capture() throws -> SelectionSnapshot
     func capture(intent: SelectionEditIntent) throws -> SelectionSnapshot
+    /// Opt-in capture preparation; ordinary/preset capture remains synchronous.
+    var supportsExplicitSourceCopy: Bool { get }
+    var hasPendingSourceCopyRecovery: Bool { get }
+    func prepareExplicitSourceCopy(_ target: SelectionSnapshot) async throws
+    func prepareForReplacement(_ target: SelectionSnapshot) async throws
     func validate(_ target: SelectionSnapshot) throws
-    func replace(_ target: SelectionSnapshot, with text: String) async throws -> ReplacementReceipt
+    func replace(_ target: SelectionSnapshot, with text: String) async -> ReplacementOutcome
+    /// Read-only configuration gate; does not validate or mutate the target.
+    func isClipboardUndoDisabled(_ receipt: ReplacementReceipt) -> Bool
     func undo(_ receipt: ReplacementReceipt) async throws
     func discard(_ target: SelectionSnapshot)
 }
@@ -151,6 +200,13 @@ public struct ReplacementReceipt: Equatable, Sendable {
 @MainActor
 public extension SelectionAccess {
     var lastFailureReason: SelectionFailureReason? { nil }
+    var lastWriteAttempt: WriteAttemptDiagnostic? { nil }
+    var supportsExplicitSourceCopy: Bool { false }
+    var hasPendingSourceCopyRecovery: Bool { false }
+    func prepareExplicitSourceCopy(_ target: SelectionSnapshot) async throws {}
+    func isClipboardUndoDisabled(_ receipt: ReplacementReceipt) -> Bool { false }
+
+    func prepareForReplacement(_ target: SelectionSnapshot) async throws {}
 
     func capture(intent: SelectionEditIntent) throws -> SelectionSnapshot {
         guard intent == .replaceSelection else { throw ImrseError.insertionUnavailable }
@@ -329,7 +385,7 @@ public protocol CredentialStore: Sendable {
 public enum ImrseError: String, Error, Codable, CaseIterable, Sendable {
     case noSelection, insertionUnavailable, secureInput, selectionTooLarge, instructionTooLarge, missingInstruction
     case targetLost, staleSelection, replacementFailed, clipboardFailed, undoUnavailable
-    case applicationUnreachable
+    case applicationUnreachable, unsupportedEditor
     case providerUnavailable, localModelUnavailable, authentication, missingCredentials
     case accountNotConnected, accountAuthentication
     case copilotRuntimeUnavailable, copilotRuntimeIncompatible, copilotAuthentication
@@ -337,7 +393,7 @@ public enum ImrseError: String, Error, Codable, CaseIterable, Sendable {
     case rateLimited, timeout, network, server, malformedResponse, interruptedStream
     case emptyOutput, outputTooLarge, invalidConfiguration, missingModel, invalidPreset
     case permissionRequired, shortcutConflict, cancelled
-    case clipboardPending
+    case clipboardPending, clipboardUndoDisabled
 
     public var message: String {
         switch self {
@@ -349,10 +405,12 @@ public enum ImrseError: String, Error, Codable, CaseIterable, Sendable {
         case .missingInstruction: "Enter an instruction before inserting text"
         case .targetLost: "The original text field is unavailable"
         case .applicationUnreachable: "Couldn't reach this app. Try again, or quit and reopen it"
+        case .unsupportedEditor: "This editor isn't supported for automatic edits"
         case .staleSelection: "The selection changed. Nothing was replaced"
         case .replacementFailed: "Couldn't replace the selection"
         case .clipboardFailed: "Couldn't paste safely"
         case .clipboardPending: "Paste unconfirmed. Clipboard recovery is pending; further clipboard edits are blocked. Quitting imrse can lose the saved clipboard and leave generated text on it."
+        case .clipboardUndoDisabled: "Turn on compatible clipboard editing to undo this change"
         case .undoUnavailable: "The text changed. Undo isn't safe"
         case .providerUnavailable: "Choose a model in Settings"
         case .localModelUnavailable: "The local model is unavailable"
@@ -390,12 +448,51 @@ public struct DiagnosticMetadata: Equatable, Sendable {
     public var role: String?
     public var selectionLength: Int?
     public var selectionFailureReason: SelectionFailureReason?
+    public var documentContextFailure: DocumentContextFailure?
+    public var documentBindingDiagnostic: DocumentBindingDiagnostic?
+    public var nativeRefusalDiagnostic: NativeRefusalDiagnostic?
+    public var writeAttempt: WriteAttemptDiagnostic?
     public var targetValid: Bool?
     public var strategy: ReplacementStrategy?
+    public var replacementOutcome: ReplacementOutcome.Status?
     public var providerName: String?
     public var model: String?
     public var generation = "idle"
     public var replacement = "idle"
     public var error: ImrseError?
     public init() {}
+
+    public mutating func attachNativeRefusal(_ diagnostic: NativeRefusalDiagnostic?) {
+        guard error != nil, let diagnostic else {
+            nativeRefusalDiagnostic = nil
+            return
+        }
+        let observedFocus = error == .targetLost && selectionFailureReason == .captureObservedFocusChange
+            && diagnostic.focus != nil
+        let validationReasons: Set<SelectionFailureReason> = [
+            .focusedElementChanged, .focusedElementUnavailable, .axReadFailure,
+            .axMessagingFailure, .axValueTypeMismatch
+        ]
+        let validationFocus = (error == .staleSelection || error == .targetLost)
+            && (diagnostic.focusSite == .targetAnchor || diagnostic.focusSite == .editableHost)
+            && (selectionFailureReason.map(validationReasons.contains) == true)
+        let includeFocus = observedFocus || validationFocus
+        let focus = includeFocus ? diagnostic.focus : nil
+        let captureReasons: Set<SelectionFailureReason> = [
+            .focusedElementUnavailable, .axReadFailure, .axMessagingFailure, .axValueTypeMismatch, .protectedTarget
+        ]
+        let capture = selectionFailureReason.map(captureReasons.contains) == true ? diagnostic.captureFocus : nil
+        nativeRefusalDiagnostic = diagnostic.undo == nil && !includeFocus && capture == nil
+            ? nil : NativeRefusalDiagnostic(
+                focusSite: includeFocus ? diagnostic.focusSite : nil,
+                panelOwnership: includeFocus ? diagnostic.panelOwnership : nil,
+                captureFocus: capture,
+                undo: diagnostic.undo,
+                focus: focus,
+                focusRead: !includeFocus ? nil : diagnostic.focusRead,
+                foreground: !includeFocus ? nil : diagnostic.foreground,
+                panelPhase: !includeFocus ? nil : diagnostic.panelPhase,
+                presentationStage: !includeFocus ? nil : diagnostic.presentationStage
+            )
+    }
 }

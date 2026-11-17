@@ -6,7 +6,7 @@ import XCTest
 final class TransformationEngineTests: XCTestCase {
     func testUnconfirmedClipboardReplacementHasExplicitFailureAndNoUndoReceipt() async {
         let access = StubSelectionAccess(target: snapshot(text: "original"))
-        access.replacementError = .clipboardPending
+        access.unconfirmedError = .clipboardPending
         let engine = TransformationEngine(
             selectionAccess: access,
             textProvider: ScriptedTextProvider(fragments: ["rewritten"])
@@ -36,6 +36,7 @@ final class TransformationEngineTests: XCTestCase {
         let secondTarget = snapshot(text: "second source")
         access.target = secondTarget
         access.replacementError = .clipboardPending
+        access.invalidatesPriorUndo = true
         engine.invoke()
         engine.submit(instruction: "", provider: providerConfiguration)
         await waitForState(engine, .failed(.clipboardPending))
@@ -173,6 +174,7 @@ final class TransformationEngineTests: XCTestCase {
     func testReplacementFailureRecordsAdapterReasonWithoutChangingError() async {
         let access = StubSelectionAccess(target: snapshot(text: "original"))
         access.replacementError = .clipboardPending
+        access.invalidatesPriorUndo = true
         access.replacementFailureReason = .replacementVerificationFailed
         let engine = TransformationEngine(
             selectionAccess: access,
@@ -1112,11 +1114,13 @@ private final class StubSelectionAccess: SelectionAccess {
     var validationError: ImrseError?
     var validationFailureReason: SelectionFailureReason?
     var replacementError: ImrseError?
+    var unconfirmedError: ImrseError?
+    var invalidatesPriorUndo = false
     var replacementFailureReason: SelectionFailureReason?
     var undoError: ImrseError?
     var undoFailureReason: SelectionFailureReason?
     var holdReplacement = false
-    private var replacementContinuation: CheckedContinuation<ReplacementReceipt, any Error>?
+    private var replacementContinuation: CheckedContinuation<ReplacementOutcome, Never>?
     private(set) var lastFailureReason: SelectionFailureReason?
     private(set) var captureCount = 0
     private(set) var replacedText: [String] = []
@@ -1147,16 +1151,20 @@ private final class StubSelectionAccess: SelectionAccess {
         guard target.id == self.target.id else { throw ImrseError.targetLost }
     }
 
-    func replace(_ target: SelectionSnapshot, with text: String) async throws -> ReplacementReceipt {
+    func replace(_ target: SelectionSnapshot, with text: String) async -> ReplacementOutcome {
         replacedText.append(text)
+        if let unconfirmedError {
+            lastFailureReason = replacementFailureReason
+            return .unconfirmed(unconfirmedError)
+        }
         if let replacementError {
             lastFailureReason = replacementFailureReason
-            throw replacementError
+            return .notWritten(replacementError, invalidatesPriorUndo: invalidatesPriorUndo)
         }
         lastFailureReason = nil
         let receipt = ReplacementReceipt(target: target, replacement: text, strategy: .selectedText)
-        guard holdReplacement else { return receipt }
-        return try await withCheckedThrowingContinuation { replacementContinuation = $0 }
+        guard holdReplacement else { return .applied(receipt) }
+        return await withCheckedContinuation { replacementContinuation = $0 }
     }
 
     func undo(_ receipt: ReplacementReceipt) async throws {
@@ -1176,7 +1184,7 @@ private final class StubSelectionAccess: SelectionAccess {
 
     func completeReplacement() {
         let receipt = ReplacementReceipt(target: target, replacement: replacedText.last ?? "", strategy: .selectedText)
-        replacementContinuation?.resume(returning: receipt)
+        replacementContinuation?.resume(returning: .applied(receipt))
         replacementContinuation = nil
     }
 }

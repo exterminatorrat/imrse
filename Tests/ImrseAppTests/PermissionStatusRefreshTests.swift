@@ -298,8 +298,8 @@ private final class TestPermissionSelectionAccess: SelectionAccess {
 
     func capture() throws -> SelectionSnapshot { selection }
     func validate(_ target: SelectionSnapshot) throws {}
-    func replace(_ target: SelectionSnapshot, with text: String) async throws -> ReplacementReceipt {
-        ReplacementReceipt(target: target, replacement: text, strategy: .selectedText)
+    func replace(_ target: SelectionSnapshot, with text: String) async -> ReplacementOutcome {
+        .applied(ReplacementReceipt(target: target, replacement: text, strategy: .selectedText))
     }
     func undo(_ receipt: ReplacementReceipt) async throws {}
     func discard(_ target: SelectionSnapshot) {}

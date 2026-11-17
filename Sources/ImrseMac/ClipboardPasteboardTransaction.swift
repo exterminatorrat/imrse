@@ -215,13 +215,14 @@ final class ClipboardPasteRecovery<Transaction, Destination> {
 
     var isBlocked: Bool { active || pending != nil }
 
+    @discardableResult
     func recover(
         terminationConfirmed: (Destination) -> Bool,
         writeConfirmed: (Destination) throws -> Bool,
         restore: (inout Transaction) throws -> Bool
-    ) throws {
+    ) throws -> ClipboardRecoveryResult {
         guard !active else { throw ImrseError.clipboardPending }
-        guard var retained = pending else { return }
+        guard var retained = pending else { return .notNeeded }
         guard !retained.requiresConsumptionProof
                 || terminationConfirmed(retained.destination)
                 || (try? writeConfirmed(retained.destination)) == true
@@ -235,6 +236,7 @@ final class ClipboardPasteRecovery<Transaction, Destination> {
             throw ImrseError.clipboardPending
         }
         pending = nil
+        return .restoredClipboardBackup
     }
 
     func perform<Output>(
