@@ -49,12 +49,18 @@ enum ImrseSettingsPalette {
 }
 
 enum SettingsScrollEdgeCue {
-    static let height: CGFloat = 24
-    static let fadeDistance: CGFloat = 12
+    // A small, low-opacity material veil just below the scrolling content's top edge.
+    // Keep it shallow so it cannot read as a second titlebar or a heavy grey band.
+    static let height: CGFloat = 16
+    static let fadeDistance: CGFloat = 18
 
     static func opacity(for scrollOffset: CGFloat, usesOpaqueFallback: Bool = false) -> Double {
         if usesOpaqueFallback { return scrollOffset < -1 ? 1 : 0 }
-        return Double(min(max(-scrollOffset / fadeDistance, 0), 1))
+
+        // Ease in and out as content first moves beneath the window chrome.
+        // This avoids a visible snap when scrollOffset crosses zero.
+        let progress = Double(min(max(-scrollOffset / fadeDistance, 0), 1))
+        return progress * progress * (3 - 2 * progress)
     }
 }
 
@@ -206,8 +212,9 @@ struct SettingsScrollView<Content: View>: View {
                     .mask {
                         LinearGradient(
                             stops: [
-                                .init(color: .black, location: 0),
-                                .init(color: .black.opacity(0.7), location: 0.45),
+                                .init(color: .black.opacity(0.28), location: 0),
+                                .init(color: .black.opacity(0.22), location: 0.24),
+                                .init(color: .black.opacity(0.10), location: 0.58),
                                 .init(color: .clear, location: 1)
                             ],
                             startPoint: .top,
