@@ -82,3 +82,10 @@ Diagnostic-only follow-up records the refusal site (observer, target anchor, edi
 An editableHost refusal with no focus outcome means resolution was unavailable, not that a different identity was observed. Only an actually resolved unequal host is labeled differentAnchor; the original refusal/error and read count are unchanged.
 
 The report's separate `lastCaptureFocusObservation` is historical evidence from the actual observer invalidation event, independent of the current error/generation state. It allows capture-only diagnostics without a model request, and may remain visible after cancel. It resets at the next capture attempt, never represents current target validity, and is stored separately from first-refusal evidence. It excludes Undo/capture-read fields. Actual refusal attachment now carries the new closed fields only when its current error and failure reason match the recorded validation site.
+
+
+## Preset-only non-key presentation
+
+The activation-removal experiment is NOT included: a CUA-free control routed synthetic q/a into the disposable host instead of the instruction field. CUA observation had activated Imrse in the earlier apparent success. Original explicit activation is retained for manual input.
+
+A separate concrete defect exists in direct preset invocation: it presented an unused key input panel before immediately submitting the preset. The bounded fix captures exactly as before, initializes/submits the explicit preset synchronously, then presents only its visible processing/failure phase. Unknown or vanished preset refuses; manual instruction input is unchanged. No observer or target proof is bypassed. New tests first reproduced input-key presentation, then cover one provider/write dispatch, reused success/failure presentation, route failure, cancel before provider starts, and pre-write target/security refusal. Native direct-preset qualification remains required; custom-input focus loss is unresolved.

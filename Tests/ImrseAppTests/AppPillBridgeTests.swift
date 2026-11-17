@@ -12,6 +12,114 @@ import XCTest
 
 @MainActor
 final class AppPillBridgeTests: XCTestCase {
+    func testDirectPresetPresentsOnlyNonKeyProcessingAndDispatchesOnce() async {
+        let selection = RecordingSelectionAccess()
+        let provider = RecordingTextProvider(output: "updated")
+        let preset = Preset(id: "direct", name: "Direct", instruction: "Synthetic instruction")
+        let (bridge, pill) = makeBridge(selection: selection, provider: provider, presets: [preset])
+        var phases: [PillPhase] = []
+        bridge.onPresent = { _ in
+            phases.append(pill.phase)
+            XCTAssertFalse(PillPanelController.acceptsInputFocus(for: pill.phase))
+        }
+        bridge.invoke(presetID: preset.id)
+        guard case .processing = phases.first else { return XCTFail("First presentation must be processing") }
+        XCTAssertEqual(phases.count, 1)
+        XCTAssertTrue(provider.requests.isEmpty)
+        await waitUntil { bridge.engine.state == .succeeded(unchanged: false) }
+        XCTAssertEqual(provider.requests.count, 1)
+        XCTAssertEqual(selection.replaceCount, 1)
+        // Reuse the previous success/feedback panel without an input-key presentation.
+        bridge.invoke(presetID: preset.id)
+        await waitUntil { selection.replaceCount == 2 }
+        XCTAssertTrue(phases.allSatisfy { !PillPanelController.acceptsInputFocus(for: $0) })
+        XCTAssertEqual(provider.requests.count, 2)
+    }
+
+    func testDirectPresetRouteFailurePresentsOneNonKeyFailureWithoutProvider() {
+        let selection = RecordingSelectionAccess()
+        let provider = RecordingTextProvider(output: "updated")
+        let preset = Preset(id: "direct", name: "Direct", instruction: "Synthetic", providerID: "missing")
+        let (bridge, pill) = makeBridge(selection: selection, provider: provider, presets: [preset])
+        var phases: [PillPhase] = []
+        bridge.onPresent = { _ in phases.append(pill.phase) }
+        bridge.invoke(presetID: preset.id)
+        XCTAssertEqual(phases.count, 1)
+        guard case .failure = phases.first else { return XCTFail("Route failure must be presented directly") }
+        XCTAssertFalse(PillPanelController.acceptsInputFocus(for: pill.phase))
+        XCTAssertTrue(provider.requests.isEmpty)
+        XCTAssertEqual(selection.replaceCount, 0)
+        bridge.invoke(presetID: preset.id)
+        XCTAssertEqual(phases.count, 2)
+        XCTAssertTrue(phases.allSatisfy { !PillPanelController.acceptsInputFocus(for: $0) })
+    }
+
+    func testDirectPresetPresentationCanCancelBeforeProviderStarts() async {
+        let selection = RecordingSelectionAccess()
+        let provider = RecordingTextProvider(output: "updated")
+        let preset = Preset(id: "direct", name: "Direct", instruction: "Synthetic")
+        let (bridge, pill) = makeBridge(selection: selection, provider: provider, presets: [preset])
+        bridge.onPresent = { _ in
+            XCTAssertFalse(PillPanelController.acceptsInputFocus(for: pill.phase))
+            pill.dismiss()
+        }
+        bridge.invoke(presetID: preset.id)
+        await Task.yield()
+        XCTAssertEqual(pill.phase, .hidden)
+        XCTAssertTrue(provider.requests.isEmpty)
+        XCTAssertEqual(selection.replaceCount, 0)
+    }
+
+    func testDirectPresetStillRefusesTargetDriftBeforeWrite() async {
+        for failure in [ImrseError.staleSelection, .targetLost, .secureInput] {
+            let selection = RecordingSelectionAccess()
+            selection.onValidate = { throw failure }
+            let provider = RecordingTextProvider(output: "updated")
+            let preset = Preset(id: "direct", name: "Direct", instruction: "Synthetic")
+            let (bridge, pill) = makeBridge(selection: selection, provider: provider, presets: [preset])
+            bridge.onPresent = { _ in XCTAssertFalse(PillPanelController.acceptsInputFocus(for: pill.phase)) }
+            bridge.invoke(presetID: preset.id)
+            await waitUntil { if case .failed = bridge.engine.state { return true }; return false }
+            XCTAssertEqual(selection.replaceCount, 0)
+            XCTAssertEqual(provider.requests.count, 1)
+        }
+    }
+
+    func testDirectPresetUnknownAndCaptureFailureNeverPresentInputOrStartProvider() {
+        for captureFails in [false, true] {
+            let selection = RecordingSelectionAccess(captureError: captureFails ? .noSelection : nil)
+            let provider = RecordingTextProvider(output: "updated")
+            let preset = Preset(id: "direct", name: "Direct", instruction: "Synthetic")
+            let (bridge, pill) = makeBridge(selection: selection, provider: provider, presets: [preset])
+            var phases: [PillPhase] = []
+            bridge.onPresent = { _ in phases.append(pill.phase) }
+            bridge.invoke(presetID: captureFails ? preset.id : "unknown")
+            XCTAssertEqual(phases.count, 1)
+            guard case .failure = phases.first else { return XCTFail("Expected non-key failure") }
+            XCTAssertFalse(PillPanelController.acceptsInputFocus(for: pill.phase))
+            XCTAssertTrue(provider.requests.isEmpty)
+            XCTAssertEqual(selection.replaceCount, 0)
+            XCTAssertEqual(selection.captureCount, captureFails ? 1 : 0)
+        }
+    }
+
+    func testDirectPresetRepeatedShortcutCancelsWithoutAnotherCaptureOrRequest() async {
+        let selection = RecordingSelectionAccess()
+        let provider = RecordingTextProvider(output: "updated")
+        let preset = Preset(id: "direct", name: "Direct", instruction: "Synthetic")
+        let (bridge, pill) = makeBridge(selection: selection, provider: provider, presets: [preset])
+        var presentations = 0
+        bridge.onPresent = { _ in presentations += 1 }
+        bridge.invoke(presetID: preset.id)
+        bridge.invoke(presetID: preset.id)
+        await Task.yield()
+        XCTAssertEqual(presentations, 1)
+        XCTAssertEqual(selection.captureCount, 1)
+        XCTAssertTrue(provider.requests.isEmpty)
+        XCTAssertEqual(selection.replaceCount, 0)
+        XCTAssertEqual(pill.phase, .hidden)
+    }
+
     func testPillGeometryTokensMatchSharedContract() {
         XCTAssertEqual(PillTokens.width, 360)
         XCTAssertEqual(PillTokens.height, 52)

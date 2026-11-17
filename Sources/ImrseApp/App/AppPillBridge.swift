@@ -109,13 +109,21 @@ final class AppPillBridge {
         pill.present()
         let screen = screenAfterCapture() ?? captureFallbackScreen
         lastPresentationScreen = screen
-        onPresent?(screen)
         captureFallbackScreen = nil
 
-        if let presetID, let index = pill.presets.firstIndex(where: { $0.id == presetID }) {
+        if let presetID {
+            // A direct preset has no instruction-entry step. Resolve and submit it
+            // before presenting so the panel never briefly requests input focus.
+            guard let index = pill.presets.firstIndex(where: { $0.id == presetID }) else {
+                engine.rejectSubmission(.invalidPreset)
+                pill.showCaptureFailure(message: ImrseError.invalidPreset.message)
+                onPresent?(screen)
+                return
+            }
             pill.applyPreset(at: index)
             pill.submit()
         }
+        if pill.phase.isVisible { onPresent?(screen) }
     }
 
     @discardableResult
