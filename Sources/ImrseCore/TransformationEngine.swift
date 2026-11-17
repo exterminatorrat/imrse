@@ -462,7 +462,7 @@ public final class TransformationEngine {
     private static func replacementFailure(_ error: any Error) -> ImrseError {
         guard let error = error as? ImrseError else { return .replacementFailed }
         return switch error {
-        case .targetLost, .staleSelection, .clipboardFailed, .clipboardPending, .permissionRequired, .cancelled: error
+        case .targetLost, .staleSelection, .clipboardFailed, .clipboardPending, .permissionRequired, .cancelled, .unsupportedEditor: error
         default: .replacementFailed
         }
     }

@@ -271,6 +271,7 @@ public final class MacSelectionAccess: SelectionAccess {
         guard let element = try acquireCaptureFocus(application) else {
             throw failure(.focusedElementUnavailable, .noSelection)
         }
+        try requireSupportedEditorSurface(element, applicationID: runningApplication.bundleIdentifier ?? "")
         guard let role = try stringAttribute(element, kAXRoleAttribute, failure: .noSelection) else {
             throw failure(.roleUnavailable, .noSelection)
         }
@@ -357,6 +358,9 @@ public final class MacSelectionAccess: SelectionAccess {
         }
         let targetRole = hostBinding?.role ?? role
         let targetElement = hostBinding?.element ?? element
+        if !sameElement(targetElement, element) {
+            try requireSupportedEditorSurface(targetElement, applicationID: runningApplication.bundleIdentifier ?? "")
+        }
         let windowContext = try captureWindowContext(
             for: element,
             editor: targetElement,
@@ -615,9 +619,9 @@ public final class MacSelectionAccess: SelectionAccess {
             lastFailureReason = nil
         } catch let error as ImrseError {
             if error == .staleSelection || error == .secureInput || error == .targetLost
-                || error == .undoUnavailable || error == .insertionUnavailable {
+                || error == .undoUnavailable || error == .insertionUnavailable || error == .unsupportedEditor {
                 self.undoTarget = nil
-                throw ImrseError.undoUnavailable
+                throw error == .unsupportedEditor ? error : ImrseError.undoUnavailable
             }
             throw error
         } catch {
@@ -1427,6 +1431,47 @@ public final class MacSelectionAccess: SelectionAccess {
         return host
     }
 
+    /// Deny identified virtualized/proxy editors before any mutation route.
+    /// Missing optional markers do not establish that an unknown editor is safe.
+    private func requireSupportedEditorSurface(_ element: AXUIElement, applicationID: String) throws {
+        if EditorSurfaceScope.classify(applicationID: applicationID, roleDescription: nil, domClasses: []) == .recognizedProxy {
+            throw failure(.virtualizedEditorSurface, .unsupportedEditor)
+        }
+        let description: String?
+        let classes: [String]
+        let priorFailure = lastFailureReason
+        do {
+            description = try stringAttribute(element, kAXRoleDescriptionAttribute, failure: .unsupportedEditor)
+            try EditorSurfaceScope.requireBoundedDescription(description)
+            classes = try editorDOMClasses(element)
+        } catch ImrseError.permissionRequired {
+            throw ImrseError.permissionRequired
+        } catch {
+            if lastFailureReason != priorFailure { throw ImrseError.unsupportedEditor }
+            throw failure(.surfaceMetadataUnavailable, .unsupportedEditor)
+        }
+        do {
+            try EditorSurfaceScope.requireAllowed(applicationID: applicationID, roleDescription: description, domClasses: classes)
+        } catch {
+            throw failure(.virtualizedEditorSurface, .unsupportedEditor)
+        }
+    }
+
+    private func editorDOMClasses(_ element: AXUIElement) throws -> [String] {
+        try configureAXMessaging(element, failure: .unsupportedEditor)
+        var raw: CFTypeRef?
+        let status = AXUIElementCopyAttributeValue(element, "AXDOMClassList" as CFString, &raw)
+        if status == .attributeUnsupported || status == .noValue { return [] }
+        if status == .apiDisabled { throw ImrseError.permissionRequired }
+        guard status == .success else {
+            throw failure(.axReadFailure, AccessibilityStatusClassification.failure(for: status, default: .unsupportedEditor))
+        }
+        guard let raw, CFGetTypeID(raw) == CFArrayGetTypeID() else {
+            throw failure(.axValueTypeMismatch, .unsupportedEditor)
+        }
+        return try EditorSurfaceScope.decodeDOMClasses(raw)
+    }
+
     private func validateSelectionTarget(_ target: TargetHandle) throws {
         guard Self.accessibilityPermissionGranted else { throw ImrseError.permissionRequired }
         guard !IsSecureEventInputEnabled(), try !isSecure(target.anchor, in: target.application) else {
@@ -1438,6 +1483,10 @@ public final class MacSelectionAccess: SelectionAccess {
         }
         guard sameElement(focused, target.anchor) else {
             throw failure(.focusedElementChanged, .staleSelection)
+        }
+        try requireSupportedEditorSurface(target.anchor, applicationID: target.applicationID)
+        if !sameElement(target.anchor, target.element) {
+            try requireSupportedEditorSurface(target.element, applicationID: target.applicationID)
         }
         guard try stringAttribute(target.element, kAXRoleAttribute, failure: .targetLost) == target.role else {
             throw failure(.roleChanged, .staleSelection)

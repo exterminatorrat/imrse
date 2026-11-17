@@ -50,6 +50,8 @@ public enum SelectionFailureReason: String, Equatable, Sendable {
     case axReadFailure
     case axValueTypeMismatch
     case protectedTarget
+    case virtualizedEditorSurface
+    case surfaceMetadataUnavailable
     case replacementVerificationFailed
     case replacementWriteRejected
     case replacementReadbackFailed
@@ -365,7 +367,7 @@ public protocol CredentialStore: Sendable {
 public enum ImrseError: String, Error, Codable, CaseIterable, Sendable {
     case noSelection, insertionUnavailable, secureInput, selectionTooLarge, instructionTooLarge, missingInstruction
     case targetLost, staleSelection, replacementFailed, clipboardFailed, undoUnavailable
-    case applicationUnreachable
+    case applicationUnreachable, unsupportedEditor
     case providerUnavailable, localModelUnavailable, authentication, missingCredentials
     case accountNotConnected, accountAuthentication
     case copilotRuntimeUnavailable, copilotRuntimeIncompatible, copilotAuthentication
@@ -385,6 +387,7 @@ public enum ImrseError: String, Error, Codable, CaseIterable, Sendable {
         case .missingInstruction: "Enter an instruction before inserting text"
         case .targetLost: "The original text field is unavailable"
         case .applicationUnreachable: "Couldn't reach this app. Try again, or quit and reopen it"
+        case .unsupportedEditor: "This editor isn't supported for automatic edits"
         case .staleSelection: "The selection changed. Nothing was replaced"
         case .replacementFailed: "Couldn't replace the selection"
         case .clipboardFailed: "Couldn't paste safely"
