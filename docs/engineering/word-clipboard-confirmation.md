@@ -51,3 +51,23 @@ names/PIDs. Each sample and phase clears stale read metadata; only an actual
 thrown axReadFailure can publish read evidence. The confirmation context is
 cleared in defer and the engine snapshots the report before target cleanup.
 Bookkeeping has CPU cost but read/retry/mutation policy remains unchanged.
+
+## Recovery-only backend API (no new UI)
+
+`MacSelectionAccess.recoverClipboardIfSafe()` now exposes the same existing
+recovery preflight without requiring a new replacement or Undo. It reports only
+`notNeeded` or `restoredClipboardBackup`; uncertainty/active paste/ownership loss
+still throws and retains the pending transaction. It never posts keys, captures
+new text, generates output, creates an Undo receipt, or changes an editor.
+For a dispatched unconfirmed paste, exact consumption or original-process
+termination proof is still mandatory. Never-dispatched or already-confirmed
+transactions retain the existing restoration-only policy. Pasteboard ownership
+is always required. It does not force quit applications, close documents, restore
+focus or overwrite a later user copy. Existing replacement/Undo calls reuse this
+same method. There is no new app action/UI wiring yet; future caller must request
+this action explicitly and report failures truthfully. No claim that the original
+paste succeeded follows solely from restoration via termination.
+A later explicit recovery request may retry restoration after an earlier
+restoration failure only if the unchanged proof and ownership gates still pass.
+This is not a retry of the paste or source edit. No automatic recovery loop is
+introduced.

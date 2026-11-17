@@ -283,3 +283,45 @@ final class ClipboardPasteRecoveryTests: XCTestCase {
         }
     }
 }
+
+extension ClipboardPasteRecoveryTests {
+    func testRecoveryOnlyNoPendingHasNoEffectsAndReportsNotNeeded() throws {
+        let recovery = ClipboardPasteRecovery<Bool, Int>()
+        var probes = 0, restores = 0
+        let result = try recovery.recover(terminationConfirmed: { _ in probes += 1; return false }, writeConfirmed: { _ in probes += 1; return false }, restore: { _ in restores += 1; return true })
+        XCTAssertEqual(result, .notNeeded); XCTAssertEqual(probes, 0); XCTAssertEqual(restores, 0)
+    }
+
+    func testRecoveryOnlyRequiresConsumptionOrTerminationAndOwnershipWithoutAnotherPost() async throws {
+        for termination in [false, true] {
+            let recovery = ClipboardPasteRecovery<Bool, Int>()
+            var posts = 0, restores = 0
+            do {
+                let _: String = try await recovery.perform(destination: 7, capture: { false }, stage: { $0 = true }, verify: { _ in }, post: { posts += 1 }, confirm: { throw ImrseError.replacementFailed }, hasMutated: { $0 }, restore: { _ in restores += 1; return true })
+                XCTFail("expected uncertainty")
+            } catch { XCTAssertEqual(error as? ImrseError, .clipboardPending) }
+            XCTAssertThrowsError(try recovery.recover(terminationConfirmed: { _ in false }, writeConfirmed: { _ in false }, restore: { _ in restores += 1; return true }))
+            XCTAssertEqual(restores, 0); XCTAssertTrue(recovery.isBlocked)
+            XCTAssertThrowsError(try recovery.recover(terminationConfirmed: { $0 == 7 && termination }, writeConfirmed: { $0 == 7 && !termination }, restore: { _ in restores += 1; return false }))
+            XCTAssertTrue(recovery.isBlocked)
+            let result = try recovery.recover(terminationConfirmed: { $0 == 7 && termination }, writeConfirmed: { $0 == 7 && !termination }, restore: { _ in restores += 1; return true })
+            XCTAssertEqual(result, .restoredClipboardBackup); XCTAssertFalse(recovery.isBlocked)
+            XCTAssertEqual(posts, 1); XCTAssertEqual(restores, 2)
+            XCTAssertEqual(try recovery.recover(terminationConfirmed: { _ in XCTFail("no retained destination"); return true }, writeConfirmed: { _ in XCTFail("no retained destination"); return true }, restore: { _ in XCTFail("no retained backup"); return true }), .notNeeded)
+        }
+    }
+}
+
+extension ClipboardPasteRecoveryTests {
+    func testRecoveryOnlyDuringActivePasteDoesNotProbeOrRestore() async throws {
+        let recovery = ClipboardPasteRecovery<Bool, Int>()
+        var probes = 0, recoveryRestores = 0, posts = 0
+        let result = try await recovery.perform(destination: 1, capture: { false }, stage: { $0 = true }, verify: { _ in }, post: { posts += 1 }, confirm: {
+            XCTAssertThrowsError(try recovery.recover(terminationConfirmed: { _ in probes += 1; return true }, writeConfirmed: { _ in probes += 1; return true }, restore: { _ in recoveryRestores += 1; return true })) { error in
+                XCTAssertEqual(error as? ImrseError, .clipboardPending)
+            }
+            return "confirmed"
+        }, hasMutated: { $0 }, restore: { _ in true })
+        XCTAssertEqual(result, "confirmed"); XCTAssertEqual(posts, 1); XCTAssertEqual(probes, 0); XCTAssertEqual(recoveryRestores, 0)
+    }
+}

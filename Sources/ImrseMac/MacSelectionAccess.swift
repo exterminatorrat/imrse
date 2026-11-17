@@ -486,7 +486,7 @@ public final class MacSelectionAccess: SelectionAccess {
         with text: String,
         dispatch: ReplacementDispatchState
     ) async throws -> ReplacementReceipt {
-        try recoverPendingClipboard()
+        try recoverClipboardIfSafe()
         try validate(target)
         guard let captured = capturedTarget, captured.snapshot.id == target.id else {
             throw ImrseError.targetLost
@@ -560,7 +560,7 @@ public final class MacSelectionAccess: SelectionAccess {
         lastNativeRefusalDiagnostic = nil
         defer { undoRoute = nil }
         guard !isClipboardUndoDisabled(receipt) else { throw ImrseError.clipboardUndoDisabled }
-        try recoverPendingClipboard()
+        try recoverClipboardIfSafe()
         guard let undoTarget, sameReceipt(receipt, undoTarget.receipt) else {
             throw ImrseError.undoUnavailable
         }
@@ -2317,7 +2317,12 @@ public final class MacSelectionAccess: SelectionAccess {
         return afterPaste
     }
 
-    private func recoverPendingClipboard() throws {
+    /// Explicit recovery-only backend action for a future caller-controlled UI.
+    /// Restores only an owned retained backup after existing safe-to-restore checks
+    /// (exact write/termination proof when consumption is uncertain). Never posts a key, captures a new target,
+    /// generates text, creates an Undo receipt, or forces recovery on uncertainty.
+    @discardableResult
+    public func recoverClipboardIfSafe() throws -> ClipboardRecoveryResult {
         try clipboardRecovery.recover(
             terminationConfirmed: { destination in
                 destination.identity.confirmsTermination(
