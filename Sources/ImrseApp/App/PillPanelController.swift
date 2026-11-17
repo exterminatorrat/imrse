@@ -12,6 +12,7 @@ final class PillPanelController {
     static let panelStyleMask: NSWindow.StyleMask = [.borderless, .nonactivatingPanel]
     private let model: AppModel
     private var panel: ImrsePanel?
+    private var presentationActivationRequested = false
     private var keyMonitor: Any?
     private var foregroundEscapeMonitor: Any?
     private var subscription: AnyCancellable?
@@ -20,6 +21,11 @@ final class PillPanelController {
 
     init(model: AppModel) {
         self.model = model
+        model.selectionAccess.focusObservationOwnership = { [weak self] in
+            guard let self else { return nil }
+            return .init(isKey: self.panel?.isKeyWindow ?? false, ownAppActive: NSApp.isActive,
+                         activationRequested: self.presentationActivationRequested)
+        }
         subscription = model.pillModel.lifecycleChanges
             .sink { [weak self] lifecycle in
                 guard let self else { return }
@@ -40,6 +46,7 @@ final class PillPanelController {
 
     func present(afterCapturingTargetOn screen: NSScreen?) {
         guard model.pillModel.phase.isVisible else { return }
+        presentationActivationRequested = false
         let acceptsInputFocus = Self.acceptsInputFocus(for: model.pillModel.phase)
         model.selectionAccess.focusObservationPresentationStage = Self.presentationStage(for: model.pillModel.phase)
         if acceptsInputFocus {
@@ -55,6 +62,7 @@ final class PillPanelController {
         model.selectionAccess.focusObservationPanelPhase = .presentationRequested
         if acceptsInputFocus {
             panel.acceptsKeyFocus = true
+            presentationActivationRequested = true
             NSApp.activate()
             panel.makeKeyAndOrderFront(nil)
             panel.makeFirstResponder(panel.contentView)

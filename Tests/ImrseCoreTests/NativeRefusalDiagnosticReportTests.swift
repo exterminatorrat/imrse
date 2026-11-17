@@ -3,6 +3,28 @@ import Testing
 @testable import ImrseCore
 
 struct NativeRefusalDiagnosticReportTests {
+    @Test(arguments: [NativeRefusalDiagnostic.FocusSite.observer, .targetAnchor, .editableHost])
+    func focusOwnershipContainsOnlyClosedSiteAndBooleans(_ site: NativeRefusalDiagnostic.FocusSite) throws {
+        var metadata = DiagnosticMetadata()
+        metadata.nativeRefusalDiagnostic = .init(focusSite: site,
+            panelOwnership: .init(isKey: true, ownAppActive: false, activationRequested: true),
+            focus: .differentAnchor, focusRead: .resolved)
+        let refusal = try #require(try fields(metadata)["nativeRefusal"] as? [String: Any])
+        #expect(Set(refusal.keys) == Set(["focusSite", "panelOwnership", "focus", "focusRead"]))
+        #expect(refusal["focusSite"] as? String == site.rawValue)
+        let ownership = try #require(refusal["panelOwnership"] as? [String: Bool])
+        #expect(ownership == ["isKey": true, "ownAppActive": false, "activationRequested": true])
+    }
+
+    @Test func unavailableHostDoesNotClaimDifferentIdentity() throws {
+        var metadata = DiagnosticMetadata()
+        metadata.nativeRefusalDiagnostic = .init(focusSite: .editableHost)
+        let refusal = try #require(try fields(metadata)["nativeRefusal"] as? [String: Any])
+        #expect(Set(refusal.keys) == Set(["focusSite"]))
+        #expect(refusal["focusSite"] as? String == "editableHost")
+        #expect(refusal["focus"] == nil)
+    }
+
     @Test func refusalIsAbsentByDefault() throws {
         let metadata = DiagnosticMetadata()
         #expect(metadata.nativeRefusalDiagnostic == nil)

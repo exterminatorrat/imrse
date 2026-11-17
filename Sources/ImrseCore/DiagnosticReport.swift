@@ -104,6 +104,12 @@ public enum DiagnosticReport {
             if let style = undo.style { undoFields["style"] = style.rawValue }
             fields["undo"] = undoFields
         }
+        if let site = diagnostic.focusSite { fields["focusSite"] = site.rawValue }
+        if let ownership = diagnostic.panelOwnership {
+            fields["panelOwnership"] = ["isKey": ownership.isKey,
+                "ownAppActive": ownership.ownAppActive,
+                "activationRequested": ownership.activationRequested]
+        }
         if let focus = diagnostic.focus { fields["focus"] = focus.rawValue }
         if let focusRead = diagnostic.focusRead { fields["focusRead"] = focusRead.rawValue }
         if let foreground = diagnostic.foreground { fields["foreground"] = foreground.rawValue }

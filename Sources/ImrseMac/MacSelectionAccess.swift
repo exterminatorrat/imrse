@@ -192,6 +192,8 @@ public final class MacSelectionAccess: SelectionAccess {
         let element: AXUIElement?
     }
 
+    /// Diagnostic-only callback; must not perform AX reads or mutate focus.
+    public var focusObservationOwnership: (() -> NativeRefusalDiagnostic.PanelOwnership?)?
     public var clipboardFallbackEnabled: Bool
     public var focusObservationPanelPhase: NativeRefusalDiagnostic.PanelPhase = .unavailable
     public var focusObservationPresentationStage: NativeRefusalDiagnostic.PresentationStage = .unavailable
@@ -1036,13 +1038,16 @@ public final class MacSelectionAccess: SelectionAccess {
                 sameElement: { self.sameElement($0, $1) }
             )
             guard let outcome else { return }
-            lastNativeRefusalDiagnostic = NativeRefusalDiagnostic(
-                focus: outcome,
-                focusRead: focusRead,
-                foreground: foreground,
-                panelPhase: panelPhase,
-                presentationStage: presentationStage
-            )
+            if lastNativeRefusalDiagnostic == nil {
+                lastNativeRefusalDiagnostic = NativeRefusalDiagnostic(
+                    focusSite: .observer, panelOwnership: focusObservationOwnership?(),
+                    focus: outcome,
+                    focusRead: focusRead,
+                    foreground: foreground,
+                    panelPhase: panelPhase,
+                    presentationStage: presentationStage
+                )
+            }
         }
         invalidateCapture(targetID, reason: reason)
     }
@@ -1476,16 +1481,37 @@ public final class MacSelectionAccess: SelectionAccess {
         return try EditorSurfaceScope.decodeDOMClasses(raw)
     }
 
+    private func recordFocusRefusal(site: NativeRefusalDiagnostic.FocusSite,
+                                    outcome: NativeRefusalDiagnostic.FocusOutcome?,
+                                    read: NativeRefusalDiagnostic.FocusRead?) {
+        guard lastNativeRefusalDiagnostic == nil else { return }
+        lastNativeRefusalDiagnostic = .init(focusSite: site,
+            panelOwnership: focusObservationOwnership?(), focus: outcome, focusRead: read,
+            panelPhase: focusObservationPanelPhase,
+            presentationStage: focusObservationPresentationStage)
+    }
+
     private func validateSelectionTarget(_ target: TargetHandle) throws {
         guard Self.accessibilityPermissionGranted else { throw ImrseError.permissionRequired }
         guard !IsSecureEventInputEnabled(), try !isSecure(target.anchor, in: target.application) else {
             throw failure(.protectedTarget, .secureInput)
         }
         try requireSafeForeground(target)
-        guard let focused = try elementAttribute(target.application, kAXFocusedUIElementAttribute, failure: .targetLost) else {
+        var focusRead: NativeRefusalDiagnostic.FocusRead?
+        let focused: AXUIElement?
+        do {
+            focused = try elementAttribute(target.application, kAXFocusedUIElementAttribute,
+                failure: .targetLost, onRead: { focusRead = $0 })
+        } catch {
+            recordFocusRefusal(site: .targetAnchor, outcome: .readFailed, read: focusRead)
+            throw error
+        }
+        guard let focused else {
+            recordFocusRefusal(site: .targetAnchor, outcome: .missingFocusedElement, read: focusRead)
             throw failure(.focusedElementUnavailable, .staleSelection)
         }
         guard sameElement(focused, target.anchor) else {
+            recordFocusRefusal(site: .targetAnchor, outcome: .differentAnchor, read: focusRead)
             throw failure(.focusedElementChanged, .staleSelection)
         }
         try requireSupportedEditorSurface(target.anchor, applicationID: target.applicationID)
@@ -1499,9 +1525,13 @@ public final class MacSelectionAccess: SelectionAccess {
             guard try stringAttribute(target.anchor, kAXRoleAttribute, failure: .targetLost) == target.anchorRole else {
                 throw failure(.roleChanged, .staleSelection)
             }
-            guard let host = resolvedEditableHost(anchor: target.anchor, processID: target.processID),
-                  sameElement(host, target.element)
-            else {
+            guard let host = resolvedEditableHost(anchor: target.anchor, processID: target.processID) else {
+                // Unavailable resolution does not prove a different observed identity.
+                recordFocusRefusal(site: .editableHost, outcome: nil, read: nil)
+                throw failure(.focusedElementChanged, .staleSelection)
+            }
+            guard sameElement(host, target.element) else {
+                recordFocusRefusal(site: .editableHost, outcome: .differentAnchor, read: nil)
                 throw failure(.focusedElementChanged, .staleSelection)
             }
             guard let hostWindow = try elementAttribute(target.element, kAXWindowAttribute, failure: .staleSelection),

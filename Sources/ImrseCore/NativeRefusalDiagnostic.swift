@@ -20,6 +20,24 @@ public struct NativeRefusalDiagnostic: Equatable, Sendable {
         case styleMismatch
     }
 
+    public enum FocusSite: String, Equatable, Sendable {
+        case observer
+        case targetAnchor
+        case editableHost
+    }
+
+    /// Own-app state only, sampled when the refusal occurs; no target metadata.
+    public struct PanelOwnership: Equatable, Sendable {
+        public let isKey: Bool
+        public let ownAppActive: Bool
+        public let activationRequested: Bool
+        public init(isKey: Bool, ownAppActive: Bool, activationRequested: Bool) {
+            self.isKey = isKey
+            self.ownAppActive = ownAppActive
+            self.activationRequested = activationRequested
+        }
+    }
+
     public enum FocusOutcome: String, Equatable, Sendable {
         case missingFocusedElement
         case readFailed
@@ -93,6 +111,8 @@ public struct NativeRefusalDiagnostic: Equatable, Sendable {
         }
     }
 
+    public let focusSite: FocusSite?
+    public let panelOwnership: PanelOwnership?
     public let captureFocus: CaptureFocus?
     public let undo: Undo?
     public let focus: FocusOutcome?
@@ -102,6 +122,8 @@ public struct NativeRefusalDiagnostic: Equatable, Sendable {
     public let presentationStage: PresentationStage?
 
     public init(
+        focusSite: FocusSite? = nil,
+        panelOwnership: PanelOwnership? = nil,
         captureFocus: CaptureFocus? = nil,
         undo: Undo? = nil,
         focus: FocusOutcome? = nil,
@@ -110,6 +132,8 @@ public struct NativeRefusalDiagnostic: Equatable, Sendable {
         panelPhase: PanelPhase? = nil,
         presentationStage: PresentationStage? = nil
     ) {
+        self.focusSite = focusSite
+        self.panelOwnership = panelOwnership
         self.captureFocus = captureFocus
         self.undo = undo
         self.focus = focus

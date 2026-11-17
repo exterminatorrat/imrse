@@ -71,3 +71,12 @@ A later explicit recovery request may retry restoration after an earlier
 restoration failure only if the unchanged proof and ownership gates still pass.
 This is not a retry of the paste or source edit. No automatic recovery loop is
 introduced.
+
+
+## Focus refusal evidence follow-up
+
+544cf15 representative regression passed TextEdit/Chrome/Safari/Vivaldi but refused two Word attempts before writing (focusedElementChanged) and one Capy input-stage focus loss (AX noValue). The fresh hands-off Word control and Capy sequence excluded host observation during generation/input as a sufficient explanation. No automatic retry or delivery-as-pass follows.
+
+Diagnostic-only follow-up records the refusal site (observer, target anchor, editable-host resolution), existing focused-element read classification, and own panel key/app-active/activation-requested booleans. Panel ownership is sampled at refusal, not inferred from foreground app. The callback reads only own AppKit properties: no new AX reads, target text, IDs, URLs, selection values, focus changes, or mutation permissions. Earlier refusal evidence is retained instead of replaced by a later refusal; next capture resets it. ActivationRequested describes this presentation's request, not its success. All observer invalidation, exact-anchor validation, error mapping and handoff behavior remain unchanged. These fields diagnose a possible presentation-ownership conflict; they do not authorize ignoring a missing/different target or accepting it later.
+
+An editableHost refusal with no focus outcome means resolution was unavailable, not that a different identity was observed. Only an actually resolved unequal host is labeled differentAnchor; the original refusal/error and read count are unchanged.
