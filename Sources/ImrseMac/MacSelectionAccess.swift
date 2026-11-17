@@ -476,13 +476,18 @@ public final class MacSelectionAccess: SelectionAccess {
     private func requireInstructionDispatch(_ captureID: UUID?) throws {
         guard let captureID else { return }
         try Task.checkCancellation()
-        guard let captured = capturedTarget, captured.snapshot.id == captureID,
-              let ticket = instructionHandoff,
-              ticket.isLive(captureID: captureID, now: clock.now), ticket.phase == .returning,
-              instructionPanelIsKey?() == false,
-              let identity = instructionDestinationIdentity,
+        guard let captured = capturedTarget, captured.snapshot.id == captureID else {
+            throw failure(.instructionCaptureMissing, .staleSelection)
+        }
+        guard let ticket = instructionHandoff else { throw failure(.instructionTicketMissing, .staleSelection) }
+        guard ticket.isLive(captureID: captureID, now: clock.now) else {
+            throw failure(.instructionTicketExpiredOrInvalid, .staleSelection)
+        }
+        guard ticket.phase == .returning else { throw failure(.instructionNotReturning, .staleSelection) }
+        guard instructionPanelIsKey?() == false else { throw failure(.instructionPanelNotReleased, .staleSelection) }
+        guard let identity = instructionDestinationIdentity,
               let application = NSRunningApplication(processIdentifier: captured.handle.processID),
-              clipboardIdentity(application) == identity else { throw ImrseError.staleSelection }
+              clipboardIdentity(application) == identity else { throw failure(.instructionProcessChanged, .staleSelection) }
     }
 
     public func prepareForReplacement(_ target: SelectionSnapshot) async throws {
@@ -527,6 +532,9 @@ public final class MacSelectionAccess: SelectionAccess {
                 )
             }
         } catch {
+            if lastFailureReason == nil {
+                lastFailureReason = capturedTarget?.handle.focusReturn.lastFailureReason
+            }
             invalidateCapture(target.id)
             throw error
         }

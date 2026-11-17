@@ -31,6 +31,17 @@ public enum SelectionFailureReason: String, Equatable, Sendable {
     case selectedTextLengthMismatch
     case captureChangedDuringSetup
     case captureInvalidated
+    case instructionCaptureMissing
+    case instructionTicketMissing
+    case instructionTicketExpiredOrInvalid
+    case instructionNotReturning
+    case instructionPanelNotReleased
+    case instructionProcessChanged
+    case focusReturnInvalid
+    case focusReturnForegroundMissing
+    case focusReturnOtherApplication
+    case focusReturnActivationRejected
+    case focusReturnTimedOut
     case captureObservedFocusChange
     case captureObservedSelectionChange
     case captureObservedValueChange

@@ -27,6 +27,7 @@ struct ApplicationFocusReturnTests {
             #expect((error as? ImrseError) == .targetLost)
         }
         #expect(environment.activationCount == 1)
+        #expect(token.lastFailureReason == .focusReturnTimedOut)
     }
 
     @Test func cancellationBeforeTheHandoffDoesNotActivateAnything() async {
@@ -204,6 +205,37 @@ struct ApplicationFocusReturnTests {
         #expect(throws: ImrseError.targetLost) { try token.isOriginalFrontmost() }
         token.finishPresentation()
         #expect(environment.activationCount == 1)
+    }
+
+    @Test func diagnosticReasonsDescribeExistingFailureWithoutAddingActivation() throws {
+        let missing = FocusEnvironment()
+        missing.current = nil
+        let missingToken = missing.makeToken()
+        #expect(throws: ImrseError.targetLost) { try missingToken.isOriginalFrontmost() }
+        #expect(missingToken.lastFailureReason == .focusReturnForegroundMissing)
+        #expect(missing.activationCount == 0)
+
+        let other = FocusEnvironment()
+        let otherToken = other.makeToken()
+        otherToken.didActivate(.init(processID: 303, launchDate: other.date))
+        #expect(throws: ImrseError.targetLost) { try otherToken.isOriginalFrontmost() }
+        #expect(otherToken.lastFailureReason == .focusReturnOtherApplication)
+        #expect(other.activationCount == 0)
+
+        let rejected = FocusEnvironment()
+        rejected.activationAccepted = false
+        let rejectedToken = rejected.makeToken()
+        #expect(throws: ImrseError.targetLost) { try rejectedToken.requestReturn() }
+        rejectedToken.finishPresentation()
+        #expect(rejectedToken.lastFailureReason == .focusReturnActivationRejected)
+        #expect(rejected.activationCount == 1)
+
+        let valid = FocusEnvironment()
+        valid.current = valid.original
+        let validToken = valid.makeToken()
+        #expect(try validToken.isOriginalFrontmost())
+        #expect(validToken.lastFailureReason == nil)
+        #expect(valid.activationCount == 0)
     }
 
     private func waitForActivation(_ environment: FocusEnvironment) async {

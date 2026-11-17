@@ -72,7 +72,13 @@ final class DiagnosticReportTests: XCTestCase {
             SelectionFailureReason.captureObservedFocusChange,
             .captureObservedSelectionChange,
             .captureObservedValueChange,
-            .captureDiscarded
+            .captureDiscarded,
+            .instructionCaptureMissing, .instructionTicketMissing,
+            .instructionTicketExpiredOrInvalid, .instructionNotReturning,
+            .instructionPanelNotReleased, .instructionProcessChanged,
+            .focusReturnInvalid, .focusReturnForegroundMissing,
+            .focusReturnOtherApplication, .focusReturnActivationRejected,
+            .focusReturnTimedOut
         ] {
             var metadata = DiagnosticMetadata()
             metadata.selectionFailureReason = reason

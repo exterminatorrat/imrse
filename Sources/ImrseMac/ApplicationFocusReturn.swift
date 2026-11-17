@@ -24,6 +24,7 @@ public final class ApplicationFocusReturn: NSObject {
     private let originalIsAlive: () -> Bool
     private let foreground: () -> Identity?
     private let activateOriginal: () -> Bool
+    private(set) var lastFailureReason: SelectionFailureReason?
     private var isValid = true
     private var activationRequested = false
     private var notificationCenter: NotificationCenter?
@@ -78,13 +79,18 @@ public final class ApplicationFocusReturn: NSObject {
     }
 
     func isOriginalFrontmost() throws -> Bool {
-        guard isValid, let original, originalIsAlive() else { throw ImrseError.targetLost }
+        guard isValid, let original, originalIsAlive() else {
+            lastFailureReason = lastFailureReason ?? .focusReturnInvalid
+            throw ImrseError.targetLost
+        }
         guard let current = foreground() else {
+            lastFailureReason = .focusReturnForegroundMissing
             invalidate()
             throw ImrseError.targetLost
         }
         if current == original { return true }
         guard current.processID == ownProcessID else {
+            lastFailureReason = .focusReturnOtherApplication
             invalidate()
             throw ImrseError.staleSelection
         }
@@ -96,6 +102,7 @@ public final class ApplicationFocusReturn: NSObject {
         guard !activationRequested else { return }
         activationRequested = true
         guard activateOriginal() else {
+            lastFailureReason = .focusReturnActivationRejected
             invalidate()
             throw ImrseError.targetLost
         }
@@ -107,7 +114,10 @@ public final class ApplicationFocusReturn: NSObject {
         while true {
             try Task.checkCancellation()
             try checkCapture()
-            guard clock.now < deadline else { throw ImrseError.targetLost }
+            guard clock.now < deadline else {
+                lastFailureReason = .focusReturnTimedOut
+                throw ImrseError.targetLost
+            }
             if try isOriginalFrontmost() { return }
             try requestReturn()
             try await Task.sleep(for: .milliseconds(10))
@@ -116,6 +126,7 @@ public final class ApplicationFocusReturn: NSObject {
 
     func didActivate(_ identity: Identity?) {
         guard let identity, identity == original || identity.processID == ownProcessID else {
+            lastFailureReason = identity == nil ? .focusReturnForegroundMissing : .focusReturnOtherApplication
             invalidate()
             return
         }
