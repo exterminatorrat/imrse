@@ -144,6 +144,28 @@ struct TransformationEngineReplacementOutcomeTests {
         #expect(engine.diagnostics.writeAttempt == nil)
     }
 
+    @Test func clipboardConfirmationEvidenceSurvivesCleanupAndResetsNextInvocation() async {
+        let access = ScriptedSelectionAccess(target: snapshot("original"))
+        var evidence = ClipboardConfirmationDiagnostic()
+        evidence.beginSample()
+        evidence.phase = .targetValidation
+        evidence.failedRead = .init(operation: .attribute, attribute: .focusedElement, status: .cannotComplete)
+        evidence.finish(.threw, elapsedMilliseconds: 80)
+        var attempt = WriteAttemptDiagnostic(strategy: .clipboard)
+        attempt.clipboardConfirmation = evidence
+        access.replacementAttempt = attempt
+        access.outcomes = [.unconfirmed(.clipboardPending)]
+        let engine = TransformationEngine(selectionAccess: access, textProvider: FixedTextProvider(output: "rewritten"))
+        engine.invoke()
+        engine.submit(instruction: "", provider: configuration)
+        await waitForState(engine, .failed(.clipboardPending))
+        #expect(access.lastWriteAttempt == nil)
+        #expect(engine.diagnostics.writeAttempt?.clipboardConfirmation == evidence)
+        #expect(DiagnosticReport.render(engine.diagnostics).contains("cannotComplete"))
+        engine.dismiss(); engine.invoke()
+        #expect(engine.diagnostics.writeAttempt == nil)
+    }
+
     @Test func adapterFailureReasonSurvivesTheTargetDiscard() async {
         let access = ScriptedSelectionAccess(target: snapshot("original"))
         access.replacementReason = .replacementVerificationFailed

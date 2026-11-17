@@ -59,6 +59,16 @@ public enum DiagnosticReport {
             var write: [String: Any] = ["strategy": attempt.strategy.rawValue]
             if let status = attempt.setterStatus { write["setterStatus"] = status.rawValue }
             if let readback = attempt.readback { write["readback"] = readback.rawValue }
+            if let confirmation = attempt.clipboardConfirmation {
+                var evidence: [String: Any] = ["phase": confirmation.phase.rawValue,
+                    "sampleCount": confirmation.sampleCount, "elapsedMilliseconds": confirmation.elapsedMilliseconds]
+                if let outcome = confirmation.outcome { evidence["outcome"] = outcome.rawValue }
+                if let read = confirmation.failedRead {
+                    evidence["failedRead"] = ["operation": read.operation.rawValue,
+                        "attribute": read.attribute.rawValue, "status": read.status.rawValue]
+                }
+                write["clipboardConfirmation"] = evidence
+            }
             fields["writeAttempt"] = write
         }
         if let nativeRefusal = metadata.nativeRefusalDiagnostic {

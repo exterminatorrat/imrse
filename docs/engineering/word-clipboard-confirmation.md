@@ -33,3 +33,21 @@ This addresses a source-level premature-confirmation-abort mechanism consistent
 with the observation. Native candidate repeat testing is still required before
 claiming the Word failure resolved. It is not proof that every delayed Word write
 can be safely confirmed, nor a universal paste or Undo guarantee.
+
+## 404d4bb native result and next diagnostic checkpoint
+
+The first Word repeat on 404d4bb again produced correct visible text but failed
+forward confirmation before any Undo, now with `axReadFailure`. A Word paste
+onboarding popover was observed; causation is not established. Later read-only
+AX observations were coherent (expected value, collapsed end caret, same focused
+text area). The narrow snapshot fix is therefore not sufficient qualification.
+No generic AX error retry or success-proof relaxation has been added.
+
+The next diagnostic source attaches only closed confirmation phase, read
+operation/attribute category, AX status classification, bounded sample count and
+elapsed milliseconds to the existing write-attempt report. It records only
+existing failure sites, adds no AX probes, and retains no content/URLs/window
+names/PIDs. Each sample and phase clears stale read metadata; only an actual
+thrown axReadFailure can publish read evidence. The confirmation context is
+cleared in defer and the engine snapshots the report before target cleanup.
+Bookkeeping has CPU cost but read/retry/mutation policy remains unchanged.
