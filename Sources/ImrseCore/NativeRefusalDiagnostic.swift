@@ -143,3 +143,16 @@ public struct NativeRefusalDiagnostic: Equatable, Sendable {
         self.presentationStage = presentationStage
     }
 }
+
+/// Historical observer evidence for the latest capture, not a current operation error.
+/// Constructed only for an actual focus invalidation observation; no text or identity.
+public struct CaptureFocusObservation: Equatable, Sendable {
+    public let evidence: NativeRefusalDiagnostic
+
+    public init?(_ event: NativeRefusalDiagnostic) {
+        guard event.focusSite == .observer, let focus = event.focus else { return nil }
+        evidence = .init(focusSite: .observer, panelOwnership: event.panelOwnership,
+            focus: focus, focusRead: event.focusRead, foreground: event.foreground,
+            panelPhase: event.panelPhase, presentationStage: event.presentationStage)
+    }
+}

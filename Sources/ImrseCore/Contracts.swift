@@ -449,21 +449,32 @@ public struct DiagnosticMetadata: Equatable, Sendable {
             nativeRefusalDiagnostic = nil
             return
         }
-        let focus = error == .targetLost && selectionFailureReason == .captureObservedFocusChange
-            ? diagnostic.focus : nil
+        let observedFocus = error == .targetLost && selectionFailureReason == .captureObservedFocusChange
+            && diagnostic.focus != nil
+        let validationReasons: Set<SelectionFailureReason> = [
+            .focusedElementChanged, .focusedElementUnavailable, .axReadFailure,
+            .axMessagingFailure, .axValueTypeMismatch
+        ]
+        let validationFocus = (error == .staleSelection || error == .targetLost)
+            && (diagnostic.focusSite == .targetAnchor || diagnostic.focusSite == .editableHost)
+            && (selectionFailureReason.map(validationReasons.contains) == true)
+        let includeFocus = observedFocus || validationFocus
+        let focus = includeFocus ? diagnostic.focus : nil
         let captureReasons: Set<SelectionFailureReason> = [
             .focusedElementUnavailable, .axReadFailure, .axMessagingFailure, .axValueTypeMismatch, .protectedTarget
         ]
         let capture = selectionFailureReason.map(captureReasons.contains) == true ? diagnostic.captureFocus : nil
-        nativeRefusalDiagnostic = diagnostic.undo == nil && focus == nil && capture == nil
+        nativeRefusalDiagnostic = diagnostic.undo == nil && !includeFocus && capture == nil
             ? nil : NativeRefusalDiagnostic(
+                focusSite: includeFocus ? diagnostic.focusSite : nil,
+                panelOwnership: includeFocus ? diagnostic.panelOwnership : nil,
                 captureFocus: capture,
                 undo: diagnostic.undo,
                 focus: focus,
-                focusRead: focus == nil ? nil : diagnostic.focusRead,
-                foreground: focus == nil ? nil : diagnostic.foreground,
-                panelPhase: focus == nil ? nil : diagnostic.panelPhase,
-                presentationStage: focus == nil ? nil : diagnostic.presentationStage
+                focusRead: !includeFocus ? nil : diagnostic.focusRead,
+                foreground: !includeFocus ? nil : diagnostic.foreground,
+                panelPhase: !includeFocus ? nil : diagnostic.panelPhase,
+                presentationStage: !includeFocus ? nil : diagnostic.presentationStage
             )
     }
 }

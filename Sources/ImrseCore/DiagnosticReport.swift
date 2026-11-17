@@ -4,13 +4,19 @@ public enum DiagnosticReport {
     private static let generationStages: Set<String> = ["idle", "running", "complete", "failed", "cancelled"]
     private static let replacementStages: Set<String> = ["idle", "running", "replaced", "unchanged", "undoing", "undone", "failed"]
 
-    public static func render(_ metadata: DiagnosticMetadata) -> String {
+    public static func render(_ metadata: DiagnosticMetadata,
+                              lastCaptureFocusObservation: CaptureFocusObservation? = nil) -> String {
         var fields: [String: Any] = [
             "accessibilityGranted": metadata.accessibilityGranted,
             "eventMonitoringActive": metadata.eventMonitoringActive,
             "generation": generationStages.contains(metadata.generation) ? metadata.generation : "unknown",
             "replacement": replacementStages.contains(metadata.replacement) ? metadata.replacement : "unknown"
         ]
+        if let observation = lastCaptureFocusObservation {
+            var eventFields = nativeRefusalFields(observation.evidence)
+            eventFields["event"] = "captureInvalidatedByFocusObservation"
+            fields["lastCaptureFocusObservation"] = eventFields
+        }
         if let applicationID = metadata.applicationID {
             fields["applicationID"] = safeString(applicationID, maximumScalars: 128)
         }

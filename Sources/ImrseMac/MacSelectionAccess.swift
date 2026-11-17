@@ -203,6 +203,7 @@ public final class MacSelectionAccess: SelectionAccess {
     public private(set) var lastFailureReason: SelectionFailureReason?
     public private(set) var lastDocumentContextFailure: DocumentContextFailure?
     public private(set) var lastDocumentBindingDiagnostic: DocumentBindingDiagnostic?
+    public private(set) var lastCaptureFocusObservation: CaptureFocusObservation?
     public private(set) var lastNativeRefusalDiagnostic: NativeRefusalDiagnostic?
     private let documentBindingDiagnosticsEnabled: Bool
     private let prepareForClipboardPaste: ClipboardPastePreparation?
@@ -248,6 +249,7 @@ public final class MacSelectionAccess: SelectionAccess {
         lastDocumentContextFailure = nil
         lastDocumentBindingDiagnostic = nil
         lastNativeRefusalDiagnostic = nil
+        lastCaptureFocusObservation = nil
         lastWriteAttempt = nil
         focusObservationPanelPhase = .unavailable
         focusObservationPresentationStage = .unavailable
@@ -1038,16 +1040,12 @@ public final class MacSelectionAccess: SelectionAccess {
                 sameElement: { self.sameElement($0, $1) }
             )
             guard let outcome else { return }
-            if lastNativeRefusalDiagnostic == nil {
-                lastNativeRefusalDiagnostic = NativeRefusalDiagnostic(
-                    focusSite: .observer, panelOwnership: focusObservationOwnership?(),
-                    focus: outcome,
-                    focusRead: focusRead,
-                    foreground: foreground,
-                    panelPhase: panelPhase,
-                    presentationStage: presentationStage
-                )
-            }
+            let event = NativeRefusalDiagnostic(
+                focusSite: .observer, panelOwnership: focusObservationOwnership?(),
+                focus: outcome, focusRead: focusRead, foreground: foreground,
+                panelPhase: panelPhase, presentationStage: presentationStage)
+            lastCaptureFocusObservation = CaptureFocusObservation(event)
+            if lastNativeRefusalDiagnostic == nil { lastNativeRefusalDiagnostic = event }
         }
         invalidateCapture(targetID, reason: reason)
     }

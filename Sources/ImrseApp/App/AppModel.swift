@@ -1563,7 +1563,8 @@ final class AppModel: ObservableObject {
             }
             metadata.attachNativeRefusal(selectionAccess.lastNativeRefusalDiagnostic)
         }
-        return DiagnosticReport.render(metadata)
+        return DiagnosticReport.render(metadata, lastCaptureFocusObservation:
+            isPreviewMode ? nil : selectionAccess.lastCaptureFocusObservation)
     }
 
     func copyDiagnostics() -> Bool {

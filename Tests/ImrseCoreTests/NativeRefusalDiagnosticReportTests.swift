@@ -25,6 +25,53 @@ struct NativeRefusalDiagnosticReportTests {
         #expect(refusal["focus"] == nil)
     }
 
+    @Test(arguments: [NativeRefusalDiagnostic.FocusSite.targetAnchor, .editableHost, .observer])
+    func actualAttachmentPreservesCurrentOwnershipEvidence(_ site: NativeRefusalDiagnostic.FocusSite) throws {
+        var metadata = DiagnosticMetadata()
+        metadata.error = site == .observer ? .targetLost : .staleSelection
+        metadata.selectionFailureReason = site == .observer ? .captureObservedFocusChange : .focusedElementChanged
+        let ownership = NativeRefusalDiagnostic.PanelOwnership(isKey: true, ownAppActive: false, activationRequested: true)
+        metadata.attachNativeRefusal(.init(focusSite: site, panelOwnership: ownership,
+            focus: site == .editableHost ? nil : .differentAnchor, focusRead: .resolved))
+        #expect(metadata.nativeRefusalDiagnostic?.focusSite == site)
+        #expect(metadata.nativeRefusalDiagnostic?.panelOwnership == ownership)
+        let refusal = try #require(try fields(metadata)["nativeRefusal"] as? [String: Any])
+        #expect(refusal["focusSite"] as? String == site.rawValue)
+        #expect(refusal["panelOwnership"] != nil)
+        metadata.error = .cancelled
+        metadata.attachNativeRefusal(metadata.nativeRefusalDiagnostic)
+        #expect(metadata.nativeRefusalDiagnostic == nil)
+    }
+
+    @Test func observationIsHistoricalAndDoesNotInventAnOperationFailure() throws {
+        let event = NativeRefusalDiagnostic(focusSite: .observer,
+            panelOwnership: .init(isKey: true, ownAppActive: false, activationRequested: true),
+            undo: .init(route: .generic, stage: .preflight), focus: .missingFocusedElement,
+            focusRead: .noValue, foreground: .target, panelPhase: .presentationReturned,
+            presentationStage: .input)
+        let observation = try #require(CaptureFocusObservation(event))
+        #expect(observation.evidence.undo == nil)
+        var metadata = DiagnosticMetadata()
+        for error: ImrseError? in [nil, .cancelled, .network] {
+            metadata.error = error
+            metadata.attachNativeRefusal(observation.evidence)
+            let json = DiagnosticReport.render(metadata, lastCaptureFocusObservation: observation)
+            let report = try #require(JSONSerialization.jsonObject(with: Data(json.utf8)) as? [String: Any])
+            let eventFields = try #require(report["lastCaptureFocusObservation"] as? [String: Any])
+            #expect(eventFields["event"] as? String == "captureInvalidatedByFocusObservation")
+            #expect(eventFields["undo"] == nil)
+            #expect(eventFields["captureFocus"] == nil)
+            #expect(report["nativeRefusal"] == nil)
+            #expect(report["generation"] as? String == "idle")
+            #expect(report["replacement"] as? String == "idle")
+            #expect(report["targetValid"] == nil)
+        }
+        let reset = DiagnosticReport.render(metadata, lastCaptureFocusObservation: nil)
+        #expect(!reset.contains("lastCaptureFocusObservation"))
+        #expect(CaptureFocusObservation(.init(focusSite: .targetAnchor, focus: .differentAnchor)) == nil)
+        #expect(CaptureFocusObservation(.init(focusSite: .observer)) == nil)
+    }
+
     @Test func refusalIsAbsentByDefault() throws {
         let metadata = DiagnosticMetadata()
         #expect(metadata.nativeRefusalDiagnostic == nil)
