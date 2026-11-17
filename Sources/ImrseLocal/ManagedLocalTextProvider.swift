@@ -120,7 +120,7 @@ public struct ManagedLocalTextProvider: TextProvider, Sendable {
         switch error {
         case .missingModel, .unknownModel:
             .missingModel
-        case .busy, .alreadyInstalled, .invalidManifest, .invalidInstalledModel, .integrityMismatch, .unsafeRedirect, .downloadFailed:
+        case .busy, .resourceAdmissionUnavailable, .alreadyInstalled, .invalidManifest, .invalidInstalledModel, .integrityMismatch, .unsafeRedirect, .downloadFailed:
             .localModelUnavailable
         }
     }
@@ -202,6 +202,10 @@ private enum ManagedLocalMLX {
                 termination: termination
             )
         } releaseCache: {
+            // The producer has joined; finish pending default-stream work before
+            // clearing its cache and releasing cross-process admission.
+            Stream.gpu.synchronize()
+            Stream.cpu.synchronize()
             Memory.clearCache()
         }
         #else

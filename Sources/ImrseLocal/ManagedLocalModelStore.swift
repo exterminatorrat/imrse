@@ -7,6 +7,7 @@ import FoundationNetworking
 public enum ManagedLocalModelStoreError: Error, Equatable, Sendable {
     case unknownModel
     case busy
+    case resourceAdmissionUnavailable
     case alreadyInstalled
     case missingModel
     case invalidManifest
@@ -108,6 +109,8 @@ public actor ManagedLocalModelStore {
         guard let manifest = manifest(for: modelID) else { throw ManagedLocalModelStoreError.unknownModel }
         guard activeOperation == nil else { throw ManagedLocalModelStoreError.busy }
         try Self.validate(manifest)
+        let lease = try acquireResourceLease()
+        defer { withExtendedLifetime(lease) {} }
         if try Self.isVerifiedInstall(manifest, at: modelDirectory(for: manifest)) {
             throw ManagedLocalModelStoreError.alreadyInstalled
         }
@@ -192,6 +195,8 @@ public actor ManagedLocalModelStore {
     public func remove(modelID: String) throws {
         guard let manifest = manifest(for: modelID) else { throw ManagedLocalModelStoreError.unknownModel }
         guard activeOperation == nil else { throw ManagedLocalModelStoreError.busy }
+        let lease = try acquireResourceLease()
+        defer { withExtendedLifetime(lease) {} }
         let directory = modelDirectory(for: manifest)
         guard Self.isDirectory(directory) else { throw ManagedLocalModelStoreError.missingModel }
         do {
@@ -207,6 +212,8 @@ public actor ManagedLocalModelStore {
     ) async throws -> T {
         guard let manifest = manifest(for: modelID) else { throw ManagedLocalModelStoreError.unknownModel }
         guard activeOperation == nil else { throw ManagedLocalModelStoreError.busy }
+        let lease = try acquireResourceLease()
+        defer { withExtendedLifetime(lease) {} }
         let directory = modelDirectory(for: manifest)
         guard Self.isDirectory(directory) else { throw ManagedLocalModelStoreError.missingModel }
         activeOperation = .generation(modelID)
@@ -215,6 +222,14 @@ public actor ManagedLocalModelStore {
         try Self.verify(manifest, at: directory)
         try Task.checkCancellation()
         return try await operation(directory)
+    }
+
+    private func acquireResourceLease() throws -> ManagedLocalResourceLease {
+        // Creating a missing store is ordinary setup. Existing permissions are never changed.
+        try Self.ensureDirectory(root)
+        do { return try ManagedLocalResourceLease.acquire(root: root) }
+        catch ManagedLocalResourceLease.Failure.busy { throw ManagedLocalModelStoreError.busy }
+        catch { throw ManagedLocalModelStoreError.resourceAdmissionUnavailable }
     }
 
     private func updateProgress(modelID: String, operationID: UUID, completedBytes: Int64) {

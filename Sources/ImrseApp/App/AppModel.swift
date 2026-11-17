@@ -1617,6 +1617,8 @@ final class AppModel: ObservableObject {
                 return "This local model is no longer available."
             case .busy:
                 return "Another local model operation is still running."
+            case .resourceAdmissionUnavailable:
+                return "Local model access could not be coordinated safely. No operation was started."
             case .alreadyInstalled:
                 return "This local model is already downloaded."
             case .invalidManifest, .invalidInstalledModel, .integrityMismatch:

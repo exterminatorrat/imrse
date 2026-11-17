@@ -152,6 +152,47 @@ final class ManagedLocalModelStoreTests: XCTestCase {
         XCTAssertFalse(generationRemainsActive)
     }
 
+    func testIndependentStoresKeepLeaseThroughCancellationUntilOperationActuallyReturns() async throws {
+        let root = testRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let contents = Data("verified".utf8)
+        let manifest = fixtureManifest([artifact("config.json", contents)])
+        let first = makeStore(root: root, manifest: manifest, contents: contents)
+        let second = makeStore(root: root, manifest: manifest, contents: contents)
+        try await first.download(modelID: manifest.descriptor.id)
+        let started = TestSignal()
+        let release = TestSignal()
+        let operation = Task {
+            try await first.withInstalledModel(modelID: manifest.descriptor.id) { _ in
+                await started.signal()
+                // Models may still be finishing GPU/producer work after cancellation.
+                await release.wait()
+                try Task.checkCancellation()
+                return "done"
+            }
+        }
+        await started.wait()
+        operation.cancel()
+        for action in 0..<4 {
+            do {
+                switch action {
+                case 0: try await second.remove(modelID: manifest.descriptor.id)
+                case 1: try await second.download(modelID: manifest.descriptor.id)
+                case 2: try await second.repair(modelID: manifest.descriptor.id)
+                default: _ = try await second.withInstalledModel(modelID: manifest.descriptor.id) { _ in "must not run" }
+                }
+                XCTFail("Every competing operation must refuse")
+            } catch let error as ManagedLocalModelStoreError {
+                XCTAssertEqual(error, .busy)
+            }
+        }
+        await release.signal()
+        do { _ = try await operation.value; XCTFail("Expected cancellation") }
+        catch is CancellationError {}
+        let result = try await second.withInstalledModel(modelID: manifest.descriptor.id) { _ in "available" }
+        XCTAssertEqual(result, "available")
+    }
+
     func testProviderPassesHardThinkingOffContextAndReturnsOnlyTransformedText() async throws {
         let root = testRoot()
         defer { try? FileManager.default.removeItem(at: root) }
