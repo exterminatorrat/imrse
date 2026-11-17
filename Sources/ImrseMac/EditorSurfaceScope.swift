@@ -16,6 +16,9 @@ enum EditorSurfaceScope {
         let description = roleDescription?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         if description == "code editor" { return .recognizedProxy }
         let classes = Set(domClasses)
+        // Observed Obsidian Live Preview CodeMirror surface. Do not generalize
+        // this content-controlled token to unrelated hosts or ordinary fields.
+        if applicationID == "md.obsidian", classes.contains("cm-content") { return .recognizedProxy }
         if classes.contains("monaco-editor") || classes.contains("native-edit-context")
             || (classes.contains("inputarea") && classes.contains("monaco-mouse-cursor-text")) {
             return .recognizedProxy

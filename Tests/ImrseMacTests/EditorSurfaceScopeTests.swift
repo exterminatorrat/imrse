@@ -7,6 +7,35 @@ final class EditorSurfaceScopeTests: XCTestCase {
         XCTAssertEqual(EditorSurfaceScope.classify(applicationID: "com.microsoft.VSCode", roleDescription: nil, domClasses: []), .recognizedProxy)
     }
 
+    func testObservedObsidianCodeMirrorRequiresExactHostAndClass() {
+        for classes in [["cm-content"], ["cm-content", "cm-lineWrapping"]] {
+            XCTAssertEqual(EditorSurfaceScope.classify(applicationID: "md.obsidian", roleDescription: "text entry area", domClasses: classes), .recognizedProxy)
+        }
+        for host in ["com.google.Chrome", "com.apple.Safari", "other", "md.obsidian.other"] {
+            XCTAssertEqual(EditorSurfaceScope.classify(applicationID: host, roleDescription: "text entry area", domClasses: ["cm-content", "cm-lineWrapping"]), .notIdentified)
+        }
+        for classes in [[], ["cm-lineWrapping"], ["cm-content-wrapper"]] {
+            XCTAssertEqual(EditorSurfaceScope.classify(applicationID: "md.obsidian", roleDescription: "text entry area", domClasses: classes), .notIdentified)
+        }
+    }
+
+    @MainActor
+    func testObsidianSurfaceRefusesEveryPinnedRouteWithoutAlternateWrite() async {
+        for strategy in [ReplacementStrategy.selectedText, .valueRange, .clipboard] {
+            var writes = 0
+            let action = {
+                try VerifiedAction.perform(verify: {
+                    try EditorSurfaceScope.requireAllowed(applicationID: "md.obsidian", roleDescription: "text entry area", domClasses: ["cm-content"])
+                }, action: { writes += 1 })
+            }
+            do {
+                try await UndoWritePlan(strategy: strategy).perform(selectedText: action, valueRange: action, clipboard: action)
+                XCTFail("Expected terminal refusal")
+            } catch { XCTAssertEqual(error as? ImrseError, .unsupportedEditor) }
+            XCTAssertEqual(writes, 0)
+        }
+    }
+
     func testProxyMarkersRefuseInsideOtherwiseQualifiedBrowserHosts() {
         for host in ["com.google.Chrome", "com.apple.Safari", "com.vivaldi.Vivaldi"] {
             for marker in ["native-edit-context", "monaco-editor"] {
