@@ -1,0 +1,35 @@
+# Word clipboard confirmation investigation
+
+On candidate 9c46676, one disposable Word grammar replacement visibly changed
+25 UTF-16 units to the expected 24-unit sentence. The retained report said
+`generation: failed`, `replacementOutcome: unconfirmed`, `clipboardPending`,
+`selectedTextLengthMismatch`, and clipboard write attempt. A subsequent attempt
+to select the menu Undo action was initially called an Undo failure, but there
+was no pre-Undo successful receipt or enabled-state observation. The menu was
+later verified disabled. Engine Undo does not set this forward outcome: the
+observed failure is forward confirmation, not proven inverse dispatch/failure.
+Later read-only Word AX value, selected text and range coherently matched the
+24-unit output. No second paste/generation/Undo was attempted after uncertainty.
+
+## Narrow change
+
+The existing 500ms post-paste confirmation loop previously waited only for nil
+(not-yet-matching) reads. A thrown range/text length inconsistency immediately
+ended the window. The new helper permits only a fresh
+`selectedTextLengthMismatch` paired with the two existing selection-reader error
+codes to become a pending read within that same budget. Failure reason is reset
+before each sample so old diagnostics cannot classify unrelated errors. No
+pasteboard staging, key event, retry mutation or alternate route is added.
+
+Every confirmation still requires the same destination process identity,
+foreground, supported/nonsecure field, document/window binding, exact expected
+whole value, exact replacement/collapsed-caret selection, and second coherent
+selection. Other failures stop immediately. Preflight and pending recovery remain
+strict. Reads taking longer than the deadline cannot publish success. Persistent
+mismatch remains unconfirmed and keeps the staged clipboard until existing
+consumption/termination and ownership proof permits restoration.
+
+This addresses a source-level premature-confirmation-abort mechanism consistent
+with the observation. Native candidate repeat testing is still required before
+claiming the Word failure resolved. It is not proof that every delayed Word write
+can be safely confirmed, nor a universal paste or Undo guarantee.

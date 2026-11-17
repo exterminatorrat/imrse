@@ -2365,14 +2365,21 @@ public final class MacSelectionAccess: SelectionAccess {
     private func waitForClipboardWrite(_ destination: ClipboardDestination) async throws -> NativeSelection? {
         let clock = ContinuousClock()
         let deadline = clock.now.advanced(by: .milliseconds(500))
-        while true {
-            try Task.checkCancellation()
-            if let selection = try confirmedClipboardSelection(destination) {
-                return selection
-            }
-            guard clock.now < deadline else { return nil }
-            await waitForNativeUpdateTurn()
-        }
+        return try await ClipboardWriteConfirmation.wait(
+            deadline: deadline,
+            now: { clock.now },
+            sample: {
+                // Only this attempt's failure reason may classify a torn AX snapshot.
+                // Preflight, recovery and all exact destination/value proofs stay strict.
+                self.lastFailureReason = nil
+                do { return try self.confirmedClipboardSelection(destination) }
+                catch {
+                    guard ClipboardWriteConfirmation.isTransientSnapshotMismatch(error, reason: self.lastFailureReason) else { throw error }
+                    return nil // read-only resample, never a second paste or weaker proof
+                }
+            },
+            waitForUpdate: { await self.waitForNativeUpdateTurn() }
+        )
     }
 
     private func waitForNativeUpdateTurn() async {
