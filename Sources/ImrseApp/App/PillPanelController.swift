@@ -12,6 +12,7 @@ final class PillPanelController {
     static let panelStyleMask: NSWindow.StyleMask = [.borderless, .nonactivatingPanel]
     private let model: AppModel
     private var panel: ImrsePanel?
+    private let instructionPanelID = UUID()
     private var presentationActivationRequested = false
     private var keyMonitor: Any?
     private var foregroundEscapeMonitor: Any?
@@ -61,11 +62,15 @@ final class PillPanelController {
         panel.setFrame(Self.frame(width: PillTokens.width(for: model.pillModel.phase), visibleFrame: visible), display: false)
         model.selectionAccess.focusObservationPanelPhase = .presentationRequested
         if acceptsInputFocus {
+            model.selectionAccess.beginInstructionHandoff(panelID: instructionPanelID,
+                panelIsKey: { [weak panel] in panel?.isKeyWindow ?? false })
             panel.acceptsKeyFocus = true
-            presentationActivationRequested = true
-            NSApp.activate()
-            panel.makeKeyAndOrderFront(nil)
-            panel.makeFirstResponder(panel.contentView)
+            model.selectionAccess.performInstructionPresentation(panelID: instructionPanelID) {
+                presentationActivationRequested = true
+                NSApp.activate()
+                panel.makeKeyAndOrderFront(nil)
+                panel.makeFirstResponder(panel.contentView)
+            }
         } else {
             panel.acceptsKeyFocus = false
             panel.orderFrontRegardless()
@@ -231,6 +236,10 @@ final class PillPanelController {
 
     private func hide(forFocusHandoff: Bool = false) {
         model.selectionAccess.focusObservationPanelPhase = forFocusHandoff ? .handoffHideRequested : .hideRequested
+        if forFocusHandoff {
+            // Establish the bounded return phase before orderOut can synchronously notify AX.
+            model.selectionAccess.endInstructionHandoff(panelID: instructionPanelID)
+        }
         panel?.orderOut(nil)
         if !forFocusHandoff {
             panel?.acceptsKeyFocus = false

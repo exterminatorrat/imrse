@@ -10,6 +10,13 @@ public enum TransformationState: Equatable, Sendable {
     case failed(ImrseError)
 }
 
+/// Session-only recovery result. Contains no captured source, target, or provider data.
+/// This is not proof that an editor write succeeded and grants no paste authority.
+public struct RetainedGeneratedOutput: Equatable, Sendable {
+    public let id: UUID
+    public let result: String
+}
+
 @MainActor
 public final class TransformationEngine {
     public static let maximumSelectionUTF8Bytes = 1_048_576
@@ -19,6 +26,12 @@ public final class TransformationEngine {
     public private(set) var state = TransformationState.idle
     public private(set) var diagnostics = DiagnosticMetadata()
     public private(set) var responseMetadata: ResponseMetadata?
+    /// Available only after automatic application failed. Read/export never writes clipboard.
+    public var retainedGeneratedOutput: RetainedGeneratedOutput? {
+        expireRetainedOutputIfNeeded()
+        guard case .failed = state else { return nil }
+        return storedGeneratedOutput
+    }
     public var onChange: (@MainActor (TransformationState) -> Void)?
     public var onPrepareReplacement: (@MainActor () -> Void)?
     public var canUndo: Bool {
@@ -28,14 +41,40 @@ public final class TransformationEngine {
     private let selectionAccess: any SelectionAccess
     private let textProvider: any TextProvider
     private var target: SelectionSnapshot?
+    private var sourceDeadline: ContinuousClock.Instant?
+    private var sourceExpiryTask: Task<Void, Never>?
     private var activeOperationID: UUID?
     private var generationTask: Task<Void, Never>?
     private var undoReceipt: ReplacementReceipt?
     private var pendingResponseMetadata: ResponseMetadata?
+    private var storedGeneratedOutput: RetainedGeneratedOutput?
+    private var retainedOutputDeadline: ContinuousClock.Instant?
+    private var retainedOutputExpiryTask: Task<Void, Never>?
+    private let retainedOutputLifetime: Duration
+    private let now: @MainActor () -> ContinuousClock.Instant
 
     public init(selectionAccess: any SelectionAccess, textProvider: any TextProvider) {
         self.selectionAccess = selectionAccess
         self.textProvider = textProvider
+        retainedOutputLifetime = .seconds(180)
+        now = { ContinuousClock.now }
+    }
+
+    // Internal timing seam; production callers cannot disable retention bounds.
+    init(selectionAccess: any SelectionAccess, textProvider: any TextProvider,
+         retainedOutputLifetime: Duration,
+         now: @escaping @MainActor () -> ContinuousClock.Instant) {
+        self.selectionAccess = selectionAccess
+        self.textProvider = textProvider
+        self.retainedOutputLifetime = retainedOutputLifetime
+        self.now = now
+    }
+
+    /// Future explicit Copy Result boundary. A stale UI result ID cannot export a newer result.
+    /// No clipboard operation, automatic retry, target reactivation, or success claim occurs.
+    public func resultForExplicitCopy(outputID: UUID) -> String? {
+        guard let output = retainedGeneratedOutput, output.id == outputID else { return nil }
+        return output.result
     }
 
     public func invoke() {
@@ -48,6 +87,7 @@ public final class TransformationEngine {
             return
         }
         guard state == .idle else { return }
+        clearRetainedOutput()
         responseMetadata = nil
         pendingResponseMetadata = nil
         diagnostics = DiagnosticMetadata()
@@ -80,6 +120,13 @@ public final class TransformationEngine {
         }
 
         target = snapshot
+        sourceDeadline = now().advanced(by: .seconds(180))
+        let sourceID = snapshot.id
+        sourceExpiryTask = Task { [weak self] in
+            do { try await Task.sleep(for: .seconds(180)) } catch { return }
+            guard let self, self.state == .ready, self.target?.id == sourceID else { return }
+            self.fail(.timeout)
+        }
         diagnostics.error = nil
         diagnostics.generation = "idle"
         diagnostics.replacement = "idle"
@@ -93,6 +140,8 @@ public final class TransformationEngine {
         fallbackProvider: ProviderConfiguration? = nil
     ) {
         guard state == .ready, let target else { return }
+        guard let sourceDeadline, now() < sourceDeadline else { fail(.timeout); return }
+        clearRetainedOutput()
         responseMetadata = nil
         pendingResponseMetadata = nil
         if target.intent == .insertAtCaret,
@@ -154,6 +203,7 @@ public final class TransformationEngine {
     }
 
     public func cancel() {
+        clearRetainedOutput()
         guard state == .ready || state == .generating else { return }
         invalidateGeneration(cancelTask: true)
         responseMetadata = nil
@@ -167,6 +217,7 @@ public final class TransformationEngine {
 
     public func dismiss() {
         guard state != .replacing, state != .undoing else { return }
+        clearRetainedOutput()
         if state == .generating { invalidateGeneration(cancelTask: true) }
         responseMetadata = nil
         pendingResponseMetadata = nil
@@ -177,6 +228,7 @@ public final class TransformationEngine {
 
     public func undo() async {
         guard state != .generating, state != .replacing, state != .undoing else { return }
+        clearRetainedOutput()
         guard let receipt = undoReceipt else {
             fail(.undoUnavailable)
             return
@@ -232,6 +284,7 @@ public final class TransformationEngine {
     ) async {
         do {
             guard isGenerating(operationID) else { return }
+            guard let sourceDeadline, now() < sourceDeadline else { throw ImrseError.timeout }
             let stream = try await textProvider.stream(request)
             guard isGenerating(operationID) else { return }
 
@@ -272,6 +325,7 @@ public final class TransformationEngine {
                 finish(
                     operationID,
                     failure: Self.validationFailure(error),
+                    generatedOutput: output,
                     selectionFailureReason: selectionFailureReason
                 )
                 return
@@ -295,6 +349,7 @@ public final class TransformationEngine {
                     finish(
                         operationID,
                         failure: .replacementFailed,
+                        generatedOutput: output,
                         replacementFailed: true,
                         invalidatesPriorUndo: true
                     )
@@ -320,6 +375,7 @@ public final class TransformationEngine {
                 finish(
                     operationID,
                     failure: failure,
+                    generatedOutput: output,
                     replacementFailed: true,
                     selectionFailureReason: selectionFailureReason,
                     invalidatesPriorUndo: invalidatesPriorUndo
@@ -331,6 +387,7 @@ public final class TransformationEngine {
                 finish(
                     operationID,
                     failure: failure == .staleSelection ? .replacementFailed : failure,
+                    generatedOutput: output,
                     replacementFailed: true,
                     selectionFailureReason: selectionFailureReason,
                     invalidatesPriorUndo: true
@@ -357,11 +414,17 @@ public final class TransformationEngine {
     private func finish(
         _ operationID: UUID,
         failure: ImrseError,
+        generatedOutput: String? = nil,
         replacementFailed: Bool = false,
         selectionFailureReason: SelectionFailureReason? = nil,
         invalidatesPriorUndo: Bool = false
     ) {
         guard activeOperationID == operationID else { return }
+        clearRetainedOutput()
+        if failure != .cancelled, let generatedOutput,
+           generatedOutput.utf8.count <= Self.maximumOutputUTF8Bytes {
+            retainGeneratedOutput(generatedOutput)
+        }
         invalidateGeneration(cancelTask: false)
         pendingResponseMetadata = nil
         if invalidatesPriorUndo {
@@ -379,6 +442,7 @@ public final class TransformationEngine {
     }
 
     private func fail(_ failure: ImrseError, selectionFailureReason: SelectionFailureReason? = nil) {
+        clearRetainedOutput()
         responseMetadata = nil
         pendingResponseMetadata = nil
         discardTarget()
@@ -389,6 +453,31 @@ public final class TransformationEngine {
         transition(to: .failed(failure))
     }
 
+    private func retainGeneratedOutput(_ result: String) {
+        let output = RetainedGeneratedOutput(id: UUID(), result: result)
+        storedGeneratedOutput = output
+        retainedOutputDeadline = now().advanced(by: retainedOutputLifetime)
+        let outputID = output.id
+        retainedOutputExpiryTask = Task { [weak self, retainedOutputLifetime] in
+            do { try await Task.sleep(for: retainedOutputLifetime) } catch { return }
+            guard let self, self.storedGeneratedOutput?.id == outputID else { return }
+            self.clearRetainedOutput()
+            self.onChange?(self.state)
+        }
+    }
+
+    private func expireRetainedOutputIfNeeded() {
+        guard let deadline = retainedOutputDeadline, now() >= deadline else { return }
+        clearRetainedOutput()
+    }
+
+    private func clearRetainedOutput() {
+        retainedOutputExpiryTask?.cancel()
+        retainedOutputExpiryTask = nil
+        retainedOutputDeadline = nil
+        storedGeneratedOutput = nil
+    }
+
     private func invalidateGeneration(cancelTask: Bool) {
         let task = generationTask
         activeOperationID = nil
@@ -397,6 +486,9 @@ public final class TransformationEngine {
     }
 
     private func discardTarget() {
+        sourceExpiryTask?.cancel()
+        sourceExpiryTask = nil
+        sourceDeadline = nil
         guard let target else { return }
         self.target = nil
         selectionAccess.discard(target)

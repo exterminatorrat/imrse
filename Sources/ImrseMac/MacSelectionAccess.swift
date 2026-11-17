@@ -217,6 +217,10 @@ public final class MacSelectionAccess: SelectionAccess {
     private var undoTarget: UndoTarget?
     private var previousDocumentBindingSnapshot: DocumentBindingProbe.Snapshot<AXUIElement>?
     private var clipboardConfirmationEvidence: ClipboardConfirmationEvidence?
+    private var lastTargetFocusRead: NativeRefusalDiagnostic.FocusRead?
+    private var instructionHandoff: PinnedInstructionHandoff?
+    private var instructionPanelIsKey: (() -> Bool)?
+    private var instructionDestinationIdentity: ClipboardDestinationIdentity?
     private let clipboardRecovery = ClipboardPasteRecovery<ClipboardPasteboardTransaction, ClipboardDestination>()
 
     public static var accessibilityPermissionGranted: Bool {
@@ -417,6 +421,70 @@ public final class MacSelectionAccess: SelectionAccess {
         return snapshot
     }
 
+    /// Copy the already captured source into a pinned, session-only return ticket before own UI activates.
+    /// AX capture is preferred to Cmd-C: it does not overwrite the user's clipboard.
+    /// Unreadable full baseline keeps the old fail-closed route; it never grants a weaker ticket.
+    public func beginInstructionHandoff(panelID: UUID, panelIsKey: @escaping () -> Bool) {
+        instructionHandoff = nil
+        instructionPanelIsKey = nil
+        instructionDestinationIdentity = nil
+        guard let captured = capturedTarget, captured.snapshot.intent == .replaceSelection,
+              let range = captured.snapshot.range,
+              let application = NSRunningApplication(processIdentifier: captured.handle.processID),
+              let identity = clipboardIdentity(application) else { return }
+        let previousFailure = lastFailureReason
+        defer { lastFailureReason = previousFailure }
+        do {
+            try requireTargetForeground(captured.handle)
+            guard let baseline = try wholeValue(captured.handle.element, failure: .staleSelection),
+                  let selected = substring(baseline, range: range),
+                  sameText(selected, captured.snapshot.text),
+                  sameSelection(try currentSelection(captured.handle),
+                                NativeSelection(text: captured.snapshot.text, range: range)) else { return }
+            instructionHandoff = .init(captureID: captured.snapshot.id, panelID: panelID,
+                                       baseline: baseline, now: clock.now)
+            instructionPanelIsKey = panelIsKey
+            instructionDestinationIdentity = identity
+        } catch { return }
+    }
+
+    /// Synchronous scope only: authenticates the immediate activate→makeKey presentation transition.
+    /// No asynchronous work or host input belongs in this closure.
+    public func performInstructionPresentation(panelID: UUID, actions: () -> Void) {
+        instructionHandoff?.beginPresentation(panelID: panelID, now: clock.now)
+        actions()
+        instructionHandoff?.endPresentation(panelID: panelID,
+            panelIsKey: instructionPanelIsKey?() ?? false, now: clock.now)
+    }
+
+    public func endInstructionHandoff(panelID: UUID) {
+        instructionHandoff?.beginReturn(panelID: panelID, now: clock.now)
+    }
+
+    private func validateInstructionBaseline(_ captured: CapturedTarget) throws {
+        guard let ticket = instructionHandoff else { return }
+        guard ticket.isLive(captureID: captured.snapshot.id, now: clock.now),
+              ticket.phase == .returning, instructionPanelIsKey?() == false,
+              let application = NSRunningApplication(processIdentifier: captured.handle.processID),
+              let identity = instructionDestinationIdentity, clipboardIdentity(application) == identity,
+              let value = try wholeValue(captured.handle.element, failure: .staleSelection),
+              sameText(value, ticket.baseline) else {
+            throw failure(.textChanged, .staleSelection)
+        }
+    }
+
+    private func requireInstructionDispatch(_ captureID: UUID?) throws {
+        guard let captureID else { return }
+        try Task.checkCancellation()
+        guard let captured = capturedTarget, captured.snapshot.id == captureID,
+              let ticket = instructionHandoff,
+              ticket.isLive(captureID: captureID, now: clock.now), ticket.phase == .returning,
+              instructionPanelIsKey?() == false,
+              let identity = instructionDestinationIdentity,
+              let application = NSRunningApplication(processIdentifier: captured.handle.processID),
+              clipboardIdentity(application) == identity else { throw ImrseError.staleSelection }
+    }
+
     public func prepareForReplacement(_ target: SelectionSnapshot) async throws {
         do {
             guard let focusReturn = capturedTarget?.handle.focusReturn else {
@@ -431,6 +499,32 @@ public final class MacSelectionAccess: SelectionAccess {
                 guard self.sameSnapshot(target, captured.snapshot) else {
                     throw self.failure(.snapshotMismatch, .staleSelection)
                 }
+            }
+            if instructionHandoff != nil {
+                try await PinnedInstructionHandoff.awaitOriginal(
+                    validateSession: { try self.requireInstructionDispatch(target.id) },
+                    probeExactOriginal: {
+                        guard let captured = self.capturedTarget, captured.snapshot.id == target.id else {
+                            throw ImrseError.targetLost
+                        }
+                        do {
+                            _ = try self.currentSelection(captured.handle)
+                            try self.validateInstructionBaseline(captured)
+                            return true
+                        } catch {
+                            // Only a fresh noValue is transient; changed anchors/read errors are terminal.
+                            guard self.lastFailureReason == .focusedElementUnavailable,
+                                  self.lastTargetFocusRead == .noValue else { throw error }
+                            self.lastFailureReason = nil
+                            return false
+                        }
+                    },
+                    mayWaitForAbsence: {
+                        self.instructionHandoff?.mayWaitForOriginalFocus(captureID: target.id,
+                            panelIsKey: self.instructionPanelIsKey?() ?? true, now: self.clock.now) ?? false
+                    },
+                    wait: { try await Task.sleep(for: .milliseconds(10)) }
+                )
             }
         } catch {
             invalidateCapture(target.id)
@@ -451,6 +545,7 @@ public final class MacSelectionAccess: SelectionAccess {
 
         do {
             try requireSafeForeground(captured.handle)
+            try validateInstructionBaseline(captured)
             let selection = try currentSelection(captured.handle)
             guard selection.range == target.range else {
                 throw failure(.rangeChanged, .staleSelection)
@@ -523,7 +618,8 @@ public final class MacSelectionAccess: SelectionAccess {
                 with: text,
                 focusedSelection: before,
                 requiredOriginalValue: captured.insertionProof?.value,
-                dispatch: dispatch
+                dispatch: dispatch,
+                pinnedSessionBaseline: instructionHandoff?.baseline
             )
             if let insertionValue {
                 guard let value = try wholeValue(captured.handle.element, failure: .replacementFailed),
@@ -1040,6 +1136,12 @@ public final class MacSelectionAccess: SelectionAccess {
                 sameElement: { self.sameElement($0, $1) }
             )
             guard let outcome else { return }
+            if let ticket = instructionHandoff,
+               ticket.permitsFocusObservation(captureID: targetID, outcome: outcome,
+                   read: focusRead, foreground: foreground,
+                   panelIsKey: instructionPanelIsKey?() ?? false, now: clock.now) {
+                return // Authorized own-panel defocus; ticket remains non-writing until exact return proof.
+            }
             let event = NativeRefusalDiagnostic(
                 focusSite: .observer, panelOwnership: focusObservationOwnership?(),
                 focus: outcome, focusRead: focusRead, foreground: foreground,
@@ -1121,6 +1223,9 @@ public final class MacSelectionAccess: SelectionAccess {
         removeObserverRegistration()
         removeWorkspaceObserver()
         capturedTarget = nil
+        instructionHandoff = nil
+        instructionPanelIsKey = nil
+        instructionDestinationIdentity = nil
         capturedScreen = nil
     }
 
@@ -1490,6 +1595,7 @@ public final class MacSelectionAccess: SelectionAccess {
     }
 
     private func validateSelectionTarget(_ target: TargetHandle) throws {
+        lastTargetFocusRead = nil
         guard Self.accessibilityPermissionGranted else { throw ImrseError.permissionRequired }
         guard !IsSecureEventInputEnabled(), try !isSecure(target.anchor, in: target.application) else {
             throw failure(.protectedTarget, .secureInput)
@@ -1499,7 +1605,7 @@ public final class MacSelectionAccess: SelectionAccess {
         let focused: AXUIElement?
         do {
             focused = try elementAttribute(target.application, kAXFocusedUIElementAttribute,
-                failure: .targetLost, onRead: { focusRead = $0 })
+                failure: .targetLost, onRead: { focusRead = $0; self.lastTargetFocusRead = $0 })
         } catch {
             recordFocusRefusal(site: .targetAnchor, outcome: .readFailed, read: focusRead)
             throw error
@@ -1870,7 +1976,8 @@ public final class MacSelectionAccess: SelectionAccess {
         focusedSelection: NativeSelection,
         requiredOriginalValue: String? = nil,
         dispatch: ReplacementDispatchState? = nil,
-        pinnedStrategy: ReplacementStrategy? = nil
+        pinnedStrategy: ReplacementStrategy? = nil,
+        pinnedSessionBaseline: String? = nil
     ) async throws -> AppliedReplacement {
         guard !replacement.isEmpty else { throw ImrseError.emptyOutput }
         let before = try currentSelection(target, allowingEmpty: true)
@@ -1927,7 +2034,11 @@ public final class MacSelectionAccess: SelectionAccess {
         }
         // Diagnostic evidence only; never grants fallback or write authority.
         let diagnosticBaseline = oldValue ?? diagnosticWholeValue(target.element)
-        var selectedTextFallbackBaseline: String?
+        if let pinnedSessionBaseline {
+            guard let currentValue = try wholeValue(target.element, failure: .staleSelection),
+                  sameText(currentValue, pinnedSessionBaseline) else { throw ImrseError.staleSelection }
+        }
+        var selectedTextFallbackBaseline: String? = pinnedSessionBaseline
         var selectedTextOutcome: SelectionMutationOutcome<AppliedReplacement>?
         if plan == .selectedText {
             let status = try VerifiedAction.perform(
@@ -1943,6 +2054,11 @@ public final class MacSelectionAccess: SelectionAccess {
                             throw ImrseError.staleSelection
                         }
                     }
+                    if let pinnedSessionBaseline {
+                        guard let value = try self.wholeValue(target.element, failure: .staleSelection),
+                              self.sameText(value, pinnedSessionBaseline) else { throw ImrseError.staleSelection }
+                        try self.requireInstructionDispatch(target.id)
+                    }
                     if self.clipboardFallbackEnabled {
                         selectedTextFallbackBaseline = ClipboardFallbackNoOpValidation.baseline(
                             value: oldValue ?? (try? self.wholeValue(target.element, failure: .replacementFailed)),
@@ -1952,7 +2068,8 @@ public final class MacSelectionAccess: SelectionAccess {
                     }
                 },
                 action: {
-                    try self.setAttribute(
+                    if pinnedSessionBaseline != nil { try self.requireInstructionDispatch(target.id) }
+                    return try self.setAttribute(
                         target.element,
                         kAXSelectedTextAttribute,
                         value: replacement as CFString,
@@ -2084,6 +2201,7 @@ public final class MacSelectionAccess: SelectionAccess {
                     }
                 },
                 action: {
+                    if pinnedSessionBaseline != nil { try self.requireInstructionDispatch(target.id) }
                     return try self.setAttribute(
                         target.element,
                         kAXValueAttribute,
@@ -2183,7 +2301,8 @@ public final class MacSelectionAccess: SelectionAccess {
             oldValue: clipboardValue,
             expectedValue: clipboardExpectedValue,
             styleProof: styleProof,
-            dispatch: dispatch
+            dispatch: dispatch,
+            instructionCaptureID: pinnedSessionBaseline == nil ? nil : target.id
         )
         lastWriteAttempt?.readback = .expected
         return AppliedReplacement(strategy: .clipboard, focusedSelection: afterPaste, styleProof: styleProof,
@@ -2234,8 +2353,10 @@ public final class MacSelectionAccess: SelectionAccess {
         oldValue: String,
         expectedValue: String,
         styleProof: ContenteditableClipboardProof? = nil,
-        dispatch: ReplacementDispatchState? = nil
+        dispatch: ReplacementDispatchState? = nil,
+        instructionCaptureID: UUID? = nil
     ) async throws -> NativeSelection {
+        try requireInstructionDispatch(instructionCaptureID)
         try dispatch?.requireUndispatched()
         try SelectionMutationGate.requireAllowed(strategy: .clipboard, clipboardEnabled: clipboardFallbackEnabled)
         guard Self.eventPostingPermissionGranted else { throw ImrseError.permissionRequired }
@@ -2284,6 +2405,7 @@ public final class MacSelectionAccess: SelectionAccess {
                     self.noteUndoRefusal(.stage, style: eligibility.style)
                     throw ImrseError.staleSelection
                 }
+                try self.requireInstructionDispatch(instructionCaptureID)
                 try transaction.stage(text, on: pasteboard)
             },
             verify: { transaction in
@@ -2306,6 +2428,7 @@ public final class MacSelectionAccess: SelectionAccess {
                 }
                 guard transaction.stillOwns(pasteboard) else { throw ImrseError.clipboardFailed }
                 try SelectionMutationGate.requireAllowed(strategy: .clipboard, clipboardEnabled: self.clipboardFallbackEnabled)
+                try self.requireInstructionDispatch(instructionCaptureID)
                 try dispatch?.requireUndispatched()
             },
             post: {
