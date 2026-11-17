@@ -2,7 +2,12 @@ import {test,expect,type Page} from "@playwright/test";
 test.beforeEach(async({page})=>{await page.goto("/");});
 async function expectPillGeometry(page:Page,width:number){
  const pill=page.locator(".imrse-pill");
- expect(await pill.boundingBox()).toMatchObject({width,height:52});
+ const bounds=await pill.boundingBox();
+ expect(bounds).not.toBeNull();
+ // Browser layout may report sub-pixel float rounding (e.g. 51.99994 for a 52px pill).
+ // Allow <0.05 CSS px while still detecting actual geometry regressions.
+ expect(bounds!.width).toBeCloseTo(width,1);
+ expect(bounds!.height).toBeCloseTo(52,1);
  await expect(pill).toHaveCSS("border-radius","26px");
 }
 test("hidden until invoked; Escape removes surface",async({page})=>{
